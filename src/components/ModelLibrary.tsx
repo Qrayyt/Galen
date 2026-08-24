@@ -83,7 +83,9 @@ export function ModelLibrary({
             <p>
               {status.installed
                 ? "Гален нашёл Ollama, но локальный сервис сейчас не отвечает."
-                : "Установщик Galen обычно делает это сам. На Arch можно выполнить: sudo pacman -S ollama"}
+                : hardware?.operatingSystem.toLowerCase().includes("windows")
+                  ? "Установи Ollama в PowerShell: irm https://ollama.com/install.ps1 | iex — затем нажми «Проверить снова»."
+                  : "На Arch установи Ollama командой: sudo pacman -S ollama — затем нажми «Проверить снова»."}
             </p>
           </div>
           <button className="black-button" onClick={onRetryOllama}>

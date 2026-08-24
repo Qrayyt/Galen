@@ -62,6 +62,18 @@ export const MODEL_CATALOG: ModelCatalogItem[] = [
     speed: "Средняя",
   },
   {
+    id: "qwen3:14b",
+    name: "Qwen 3 14B",
+    maker: "Alibaba",
+    description: "Сильная локальная модель для сложных инструкций, кода и глубокого диалога на мощном ПК.",
+    parameters: "14B",
+    downloadSizeGb: 9.3,
+    minRamGb: 24,
+    recommendedVramGb: 12,
+    tags: ["Рекомендуем", "Русский", "Рассуждения", "Агент"],
+    speed: "Тяжёлая",
+  },
+  {
     id: "mistral:7b",
     name: "Mistral 7B",
     maker: "Mistral AI",

@@ -16,8 +16,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,34 +33,47 @@ jobs:
         shell: bash
         run: |
           version="$(node -p "require('./package.json').version")"
-          tag="v${version}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+          tag="v${{version}"
+          echo "version=${{version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{tag}" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/${{tag}" >/dev/null 2>&1; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-24.04
+            bundles: appimage
+          - platform: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
-        if: steps.version.outputs.publish == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
 
       - name: Setup Rust
-        if: steps.version.outputs.publish == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust
-        if: steps.version.outputs.publish == 'true'
         uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - name: Install Linux dependencies
-        if: steps.version.outputs.publish == 'true'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -72,30 +89,39 @@ jobs:
             patchelf
 
       - name: Install frontend dependencies
-        if: steps.version.outputs.publish == 'true'
         run: npm ci
 
       - name: Test frontend
-        if: steps.version.outputs.publish == 'true'
         run: npm test
 
-      - name: Build and publish AppImage
-        if: steps.version.outputs.publish == 'true'
+      - name: Generate native icons
+        run: npm run tauri icon src-tauri/icons/icon.png
+
+      - name: Build and upload
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ steps.version.outputs.tag }}
-          releaseName: "Galen ${{ steps.version.outputs.tag }}"
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Первый рабочий MVP Galen для Arch Linux.
+            Galen 0.2 brings the local AI desktop to Windows 11.
 
-            - локальный чат через Ollama
-            - подбор модели по CPU, RAM, GPU и VRAM
-            - библиотека моделей с поиском
-            - реальный прогресс загрузки
-            - обновления только по GitHub Releases
-          releaseDraft: false
+            - Windows x64 installer and Arch Linux AppImage
+            - local streaming chat through Ollama
+            - hardware-aware model selection
+            - Qwen 3 14B recommendation for 16 GB VRAM workstations
+            - real model download progress
+          releaseDraft: true
           prerelease: false
-          args: --bundles appimage
+          args: --bundles ${{ matrix.bundles }}
 
+  publish:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "${{ needs.prepare.outputs.tag }}" --repo "${{ github.repository }}" --draft=false

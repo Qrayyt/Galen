@@ -101,7 +101,7 @@ export function App() {
       })
       .catch((error) => setUpdate({
         available: false,
-        currentVersion: "0.1.0",
+        currentVersion: "0.2.0",
         error: error instanceof Error ? error.message : String(error),
       }));
   }, [refreshAll]);

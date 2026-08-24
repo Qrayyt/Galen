@@ -1,8 +1,8 @@
 {
   "name": "galen-desktop",
   "private": true,
-  "version": "0.1.0",
-  "description": "Galen — a private local AI desktop for Arch Linux.",
+  "version": "0.2.0",
+  "description": "Galen — a private local AI desktop for Windows and Arch Linux.",
   "type": "module",
   "scripts": {
     "dev": "vite",

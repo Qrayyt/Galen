@@ -23,5 +23,17 @@ describe("model recommendation", () => {
     const heavy = MODEL_CATALOG.find((model) => model.id === "deepseek-r1:7b")!;
     expect(scoreModel(light, currentPc)).toBeGreaterThan(scoreModel(heavy, currentPc));
   });
+  it("recommends Qwen 3 14B for a 16 GB VRAM workstation", () => {
+    const workstation: HardwareInfo = {
+      cpu: "AMD Ryzen 9 5950X",
+      cpuCores: 32,
+      ramTotalGb: 32,
+      gpu: "NVIDIA GeForce RTX 5060 Ti",
+      vramGb: 16,
+      operatingSystem: "Windows 11",
+      desktop: "Windows",
+      architecture: "x86_64",
+    };
+    expect(recommendModel(workstation).id).toBe("qwen3:14b");
+  });
 });
-
