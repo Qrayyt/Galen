@@ -222,45 +222,60 @@ fn round_one(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
 
-async fn query_ollama_status(client: &reqwest::Client) -> OllamaStatus {
-    let command = Command::new("ollama").arg("--version").output();
-    let installed = command.is_ok();
-    if !installed {
-        return OllamaStatus {
-            installed: false,
-            running: false,
-            version: None,
-            error: Some("Команда ollama не найдена".to_string()),
-        };
+fn ollama_executable() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let executable = PathBuf::from(local_app_data)
+            .join("Programs")
+            .join("Ollama")
+            .join("ollama.exe");
+        if executable.is_file() {
+            return executable;
+        }
     }
 
-    match client
+    PathBuf::from("ollama")
+}
+
+async fn query_ollama_status(client: &reqwest::Client) -> OllamaStatus {
+    let api_result = client
         .get(format!("{OLLAMA_API}/version"))
         .timeout(Duration::from_secs(2))
         .send()
-        .await
-    {
+        .await;
+
+    match api_result {
         Ok(response) if response.status().is_success() => {
             let version = response.json::<VersionResponse>().await.ok().map(|value| value.version);
-            OllamaStatus {
+            return OllamaStatus {
                 installed: true,
                 running: true,
                 version,
                 error: None,
+            };
+        }
+        result => {
+            let installed = Command::new(ollama_executable())
+                .arg("--version")
+                .output()
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            let error = match result {
+                Ok(response) => format!("Ollama ответила кодом {}", response.status()),
+                Err(error) => error.to_string(),
+            };
+
+            OllamaStatus {
+                installed,
+                running: false,
+                version: None,
+                error: Some(if installed {
+                    error
+                } else {
+                    "Ollama не найдена в PATH и стандартной папке установки".to_string()
+                }),
             }
         }
-        Ok(response) => OllamaStatus {
-            installed: true,
-            running: false,
-            version: None,
-            error: Some(format!("Ollama ответила кодом {}", response.status())),
-        },
-        Err(error) => OllamaStatus {
-            installed: true,
-            running: false,
-            version: None,
-            error: Some(error.to_string()),
-        },
     }
 }
 
@@ -276,7 +291,7 @@ async fn start_ollama(state: State<'_, AppState>) -> Result<OllamaStatus, String
         return Ok(current);
     }
 
-    Command::new("ollama")
+    Command::new(ollama_executable())
         .arg("serve")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
