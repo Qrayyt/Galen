@@ -1,5 +1,7 @@
 name: Release Galen
 
+# Builds signed-off release artifacts for Windows and Linux.
+
 on:
   push:
     branches: [main]
