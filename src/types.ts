@@ -1,14 +1,72 @@
-export type ViewId = "chat" | "models" | "system";
-
+export type ViewId = "chat" | "models" | "settings";
 export type MessageRole = "user" | "assistant" | "system";
+export type ReasoningLevel = "light" | "medium" | "heavy";
+export type AttachmentKind = "image" | "pdf" | "document" | "text";
+export type AgentPhase =
+  | "idle"
+  | "thinking"
+  | "searching"
+  | "reading"
+  | "terminal"
+  | "writing"
+  | "waiting"
+  | "done";
+
+export interface Attachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  kind: AttachmentKind;
+  text?: string;
+  dataUrl?: string;
+}
+
+export interface SourceLink {
+  title: string;
+  url: string;
+  snippet?: string;
+}
 
 export interface ChatMessage {
   id: string;
   role: MessageRole;
   content: string;
   createdAt: number;
+  attachments?: Attachment[];
+  sources?: SourceLink[];
   pending?: boolean;
   error?: boolean;
+  tokensPerSecond?: number;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  messages: ChatMessage[];
+  createdAt: number;
+  updatedAt: number;
+  model?: string | null;
+  reasoning: ReasoningLevel;
+}
+
+export interface MemoryItem {
+  id: string;
+  label: string;
+  value: string;
+  category: "profile" | "preference" | "project" | "other";
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface AppSettings {
+  reasoning: ReasoningLevel;
+  webEnabled: boolean;
+  terminalEnabled: boolean;
+  memoryEnabled: boolean;
+  autoSpeak: boolean;
+  workspaceDirectory: string;
 }
 
 export interface OllamaModel {
@@ -60,13 +118,30 @@ export interface PullProgress {
   error?: string;
 }
 
-export interface ChatToken {
+export interface ToolApproval {
   requestId: string;
-  content: string;
-  thinking?: string;
-  done: boolean;
-  error?: string;
+  approvalId: string;
+  command: string;
+  cwd?: string;
+  reason?: string;
+}
+
+export interface AgentEvent {
+  requestId: string;
+  kind: "status" | "token" | "sources" | "approval" | "done" | "error";
+  phase?: AgentPhase;
+  label?: string;
+  content?: string;
+  sources?: SourceLink[];
+  approval?: ToolApproval;
   tokensPerSecond?: number;
+  error?: string;
+}
+
+export interface MemoryCandidate {
+  label: string;
+  value: string;
+  category: MemoryItem["category"];
 }
 
 export interface UpdateInfo {
@@ -77,3 +152,11 @@ export interface UpdateInfo {
   error?: string;
 }
 
+export const DEFAULT_SETTINGS: AppSettings = {
+  reasoning: "medium",
+  webEnabled: true,
+  terminalEnabled: true,
+  memoryEnabled: true,
+  autoSpeak: false,
+  workspaceDirectory: "",
+};

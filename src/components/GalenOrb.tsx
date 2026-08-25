@@ -24,3 +24,4 @@ export function GalenOrb({ active = false, thinking = false, compact = false }: 
   );
 }
 
+
