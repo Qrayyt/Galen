@@ -428,8 +428,12 @@ async fn chat(request: ChatRequest, app: AppHandle, state: State<'_, AppState>) 
             "model": request.model,
             "messages": messages,
             "stream": true,
+            "think": false,
             "keep_alive": "10m",
-            "options": { "temperature": 0.65 }
+            "options": {
+                "temperature": 0.65,
+                "num_ctx": 8192
+            }
         }))
         .send()
         .await

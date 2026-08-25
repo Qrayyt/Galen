@@ -114,6 +114,7 @@ jobs:
             - hardware-aware model selection
             - Qwen 3 14B recommendation for 16 GB VRAM workstations
             - real model download progress
+            - instant visible replies from Qwen 3 without hidden thinking delay
           releaseDraft: true
           prerelease: false
           args: --bundles ${{ matrix.bundles }}
