@@ -1,6 +1,6 @@
 name: Release Galen
 
-# Builds signed-off release artifacts for Windows and Linux.
+# Windows uploads first, then Linux, so release assets cannot race each other.
 
 on:
   push:
@@ -44,18 +44,59 @@ jobs:
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-  build:
+  windows:
     needs: prepare
     if: needs.prepare.outputs.publish == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: ubuntu-24.04
-            bundles: appimage
-          - platform: windows-latest
-            bundles: nsis
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Test frontend
+        run: npm test
+
+      - name: Generate native icons
+        run: npm run tauri icon src-tauri/icons/icon.png
+
+      - name: Build and upload Windows installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
+          releaseBody: |
+            Galen local AI desktop for Windows 11 and Arch Linux.
+
+            - direct Ollama API detection on Windows
+            - hardware-aware model selection
+            - real model download progress
+            - instant visible Qwen 3 replies without hidden thinking delay
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis
+
+  linux:
+    needs: [prepare, windows]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,7 +116,6 @@ jobs:
           workspaces: src-tauri
 
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -99,7 +139,7 @@ jobs:
       - name: Generate native icons
         run: npm run tauri icon src-tauri/icons/icon.png
 
-      - name: Build and upload
+      - name: Build and upload Linux AppImage
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -107,23 +147,30 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.2 brings the local AI desktop to Windows 11.
+            Galen local AI desktop for Windows 11 and Arch Linux.
 
-            - Windows x64 installer and Arch Linux AppImage
-            - local streaming chat through Ollama
+            - direct Ollama API detection on Windows
             - hardware-aware model selection
-            - Qwen 3 14B recommendation for 16 GB VRAM workstations
             - real model download progress
-            - instant visible replies from Qwen 3 without hidden thinking delay
+            - instant visible Qwen 3 replies without hidden thinking delay
           releaseDraft: true
           prerelease: false
-          args: --bundles ${{ matrix.bundles }}
+          args: --bundles appimage
 
   publish:
-    needs: [prepare, build]
+    needs: [prepare, windows, linux]
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     steps:
+      - name: Verify both platform assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets="$(gh release view "${{ needs.prepare.outputs.tag }}" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
+          echo "$assets"
+          grep -q -- '-setup.exe$' <<< "$assets"
+          grep -q -- '.AppImage$' <<< "$assets"
+
       - name: Publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
