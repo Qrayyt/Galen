@@ -72,6 +72,9 @@ jobs:
       - name: Test frontend
         run: npm test
 
+      - name: Test native agent runtime
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Generate native icons
         run: npm run tauri icon src-tauri/icons/icon.png
 
@@ -83,12 +86,15 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen local AI desktop for Windows 11 and Arch Linux.
+            Galen 0.3 turns the local chat into a full desktop agent.
 
-            - direct Ollama API detection on Windows
-            - hardware-aware model selection
-            - real model download progress
-            - instant visible Qwen 3 replies without hidden thinking delay
+            - web search and page reading without API keys
+            - Light / Medium / Heavy reasoning with hidden thinking
+            - terminal tools with an explicit approval gate
+            - multiple chats and editable long-term memory
+            - PDF, DOCX and image attachments
+            - voice input, voice mode and answer playback
+            - redesigned monochrome interface
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -136,6 +142,9 @@ jobs:
       - name: Test frontend
         run: npm test
 
+      - name: Test native agent runtime
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
       - name: Generate native icons
         run: npm run tauri icon src-tauri/icons/icon.png
 
@@ -147,12 +156,15 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen local AI desktop for Windows 11 and Arch Linux.
+            Galen 0.3 turns the local chat into a full desktop agent.
 
-            - direct Ollama API detection on Windows
-            - hardware-aware model selection
-            - real model download progress
-            - instant visible Qwen 3 replies without hidden thinking delay
+            - web search and page reading without API keys
+            - Light / Medium / Heavy reasoning with hidden thinking
+            - terminal tools with an explicit approval gate
+            - multiple chats and editable long-term memory
+            - PDF, DOCX and image attachments
+            - voice input, voice mode and answer playback
+            - redesigned monochrome interface
           releaseDraft: true
           prerelease: false
           args: --bundles appimage

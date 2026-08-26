@@ -1,13 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { attachmentPrompt, imagePayloads } from "./attachments";
 import type {
+  AgentEvent,
+  AppSettings,
   ChatMessage,
-  ChatToken,
   HardwareInfo,
+  MemoryCandidate,
+  MemoryItem,
   OllamaModel,
   OllamaStatus,
   PullProgress,
+  ReasoningLevel,
   UpdateInfo,
 } from "../types";
 
@@ -29,6 +34,17 @@ async function safeInvoke<T>(command: string, args?: Record<string, unknown>): P
   return invoke<T>(command, args);
 }
 
+function apiMessages(messages: ChatMessage[]) {
+  return messages
+    .filter((message) => !message.error && !message.pending && message.role !== "system")
+    .slice(-80)
+    .map((message) => ({
+      role: message.role,
+      content: `${message.content}${attachmentPrompt(message.attachments ?? [])}`,
+      images: imagePayloads(message.attachments ?? []),
+    }));
+}
+
 export const native = {
   minimize: () => (isTauri() ? getCurrentWindow().minimize() : Promise.resolve()),
   toggleMaximize: () => (isTauri() ? getCurrentWindow().toggleMaximize() : Promise.resolve()),
@@ -44,10 +60,7 @@ export const native = {
   listModels: (): Promise<OllamaModel[]> => safeInvoke("list_models"),
   deleteModel: (model: string): Promise<void> => safeInvoke("delete_model", { model }),
 
-  pullModel: async (
-    model: string,
-    onProgress: (progress: PullProgress) => void,
-  ): Promise<void> => {
+  pullModel: async (model: string, onProgress: (progress: PullProgress) => void): Promise<void> => {
     let unlisten: UnlistenFn | undefined;
     try {
       unlisten = await listen<PullProgress>("model-pull-progress", (event) => {
@@ -59,24 +72,32 @@ export const native = {
     }
   },
 
-  chat: async (
+  agentChat: async (
     requestId: string,
     model: string,
     messages: ChatMessage[],
-    onToken: (token: ChatToken) => void,
+    memories: MemoryItem[],
+    reasoning: ReasoningLevel,
+    settings: AppSettings,
+    onEvent: (event: AgentEvent) => void,
   ): Promise<void> => {
     let unlisten: UnlistenFn | undefined;
     try {
-      unlisten = await listen<ChatToken>("chat-token", (event) => {
-        if (event.payload.requestId === requestId) onToken(event.payload);
+      unlisten = await listen<AgentEvent>("agent-event", (event) => {
+        if (event.payload.requestId === requestId) onEvent(event.payload);
       });
-      await safeInvoke<void>("chat", {
+      await safeInvoke<void>("agent_chat", {
         request: {
           requestId,
           model,
-          messages: messages
-            .filter((message) => !message.error && !message.pending)
-            .map(({ role, content }) => ({ role, content })),
+          messages: apiMessages(messages),
+          memories: settings.memoryEnabled
+            ? memories.filter((memory) => memory.enabled).map(({ label, value }) => ({ label, value }))
+            : [],
+          reasoning,
+          webEnabled: settings.webEnabled,
+          terminalEnabled: settings.terminalEnabled,
+          workspaceDirectory: settings.workspaceDirectory || null,
         },
       });
     } finally {
@@ -84,8 +105,21 @@ export const native = {
     }
   },
 
+  resolveApproval: (requestId: string, approvalId: string, approved: boolean): Promise<void> =>
+    safeInvoke("resolve_tool_approval", { requestId, approvalId, approved }),
+
+  cancelAgent: (requestId: string): Promise<void> => safeInvoke("cancel_agent", { requestId }),
+
+  extractMemories: (
+    model: string,
+    userMessage: string,
+    assistantMessage: string,
+  ): Promise<MemoryCandidate[]> => safeInvoke("extract_memories", { model, userMessage, assistantMessage }),
+
+  openUrl: (url: string): Promise<void> => safeInvoke("open_url", { url }),
+  transcribeOnce: (): Promise<string> => safeInvoke("transcribe_once"),
+
   checkUpdate: (): Promise<UpdateInfo> => safeInvoke("check_for_update"),
   downloadUpdate: (tag: string): Promise<string> => safeInvoke("download_update", { tag }),
   restartIntoUpdate: (path: string): Promise<void> => safeInvoke("restart_into_update", { path }),
 };
-

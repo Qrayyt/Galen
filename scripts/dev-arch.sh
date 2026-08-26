@@ -23,3 +23,4 @@ sudo systemctl enable --now ollama.service
 npm ci
 npm run tauri dev
 
+

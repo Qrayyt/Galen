@@ -37,3 +37,4 @@ describe("model recommendation", () => {
     expect(recommendModel(workstation).id).toBe("qwen3:14b");
   });
 });
+

@@ -1,59 +1,73 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Composer } from "../components/Composer";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatView } from "../components/ChatView";
+import { Composer } from "../components/Composer";
 import { ModelLibrary } from "../components/ModelLibrary";
 import { NavRail } from "../components/NavRail";
-import { SystemPanel } from "../components/SystemPanel";
+import { SettingsPanel } from "../components/SettingsPanel";
+import { VoiceMode } from "../components/VoiceMode";
 import { WindowBar } from "../components/WindowBar";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
-import { loadActiveModel, loadHistory, saveActiveModel, saveHistory } from "../lib/storage";
+import {
+  createConversation, loadActiveChatId, loadActiveModel, loadConversations, loadMemories,
+  loadSettings, saveActiveChatId, saveActiveModel, saveConversations, saveMemories,
+  saveSettings, titleFromMessage,
+} from "../lib/storage";
 import type {
-  ChatMessage,
-  HardwareInfo,
-  OllamaModel,
-  OllamaStatus,
-  PullProgress,
-  UpdateInfo,
-  ViewId,
+  AgentPhase, AppSettings, Attachment, ChatMessage, Conversation, HardwareInfo,
+  MemoryCandidate, MemoryItem, OllamaModel, OllamaStatus, PullProgress, ReasoningLevel,
+  ToolApproval, UpdateInfo, ViewId,
 } from "../types";
 
-const makeId = () => `${Date.now()}-${crypto.randomUUID()}`;
+const makeId = () => crypto.randomUUID();
 const normalized = (name: string) => name.replace(":latest", "").toLowerCase();
+const isVisionModel = (name: string) => /gemma3|qwen(?:2\.5|3)-?vl|llava|minicpm-v/i.test(name);
 
 export function App() {
+  const initialChats = useMemo(() => loadConversations(), []);
   const [view, setView] = useState<ViewId>("chat");
-  const [navOpen, setNavOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [chats, setChats] = useState<Conversation[]>(initialChats);
+  const [activeChatId, setActiveChatId] = useState(() => loadActiveChatId(initialChats));
+  const [memories, setMemories] = useState<MemoryItem[]>(() => loadMemories());
+  const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [status, setStatus] = useState<OllamaStatus | null>(null);
   const [installed, setInstalled] = useState<OllamaModel[]>([]);
   const [activeModel, setActiveModel] = useState<string | null>(() => loadActiveModel());
-  const [messages, setMessages] = useState<ChatMessage[]>(() => loadHistory());
   const [pulls, setPulls] = useState<Record<string, PullProgress>>({});
-  const [busy, setBusy] = useState(false);
+  const [request, setRequest] = useState<{ id: string; chatId: string } | null>(null);
+  const [activity, setActivity] = useState<{ phase: AgentPhase; label: string } | null>(null);
+  const [approval, setApproval] = useState<ToolApproval | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [updatePath, setUpdatePath] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const requestRef = useRef(request);
+  requestRef.current = request;
 
+  const activeChat = chats.find((chat) => chat.id === activeChatId) ?? chats[0];
+  const busy = Boolean(request);
   const recommended = useMemo(
     () => (hardware && hardware.ramTotalGb > 0 ? recommendModel(hardware) : null),
     [hardware],
   );
 
-  useEffect(() => {
-    if (!busy) saveHistory(messages);
-  }, [busy, messages]);
+  useEffect(() => saveConversations(chats), [chats]);
+  useEffect(() => saveActiveChatId(activeChatId), [activeChatId]);
+  useEffect(() => saveMemories(memories), [memories]);
+  useEffect(() => saveSettings(settings), [settings]);
+
+  const updateChat = useCallback((chatId: string, updater: (chat: Conversation) => Conversation) => {
+    setChats((current) => current.map((chat) => chat.id === chatId ? updater(chat) : chat));
+  }, []);
 
   const refreshRuntime = useCallback(async () => {
     try {
       const ollama = await native.getOllamaStatus();
       let resolved = ollama;
       if (ollama.installed && !ollama.running) {
-        try {
-          resolved = await native.startOllama();
-        } catch {
-          resolved = ollama;
-        }
+        try { resolved = await native.startOllama(); } catch { resolved = ollama; }
       }
       setStatus(resolved);
       if (!resolved.running) return;
@@ -63,52 +77,29 @@ export function App() {
       const selected = saved && models.some((model) => normalized(model.name) === normalized(saved))
         ? saved
         : models[0]?.name ?? null;
-      if (selected) {
-        setActiveModel(selected);
-        saveActiveModel(selected);
-      } else {
-        setActiveModel(null);
-      }
+      setActiveModel(selected);
+      if (selected) saveActiveModel(selected);
       if (!models.length) setView("models");
     } catch (error) {
-      setStatus({
-        installed: false,
-        running: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
+      setStatus({ installed: false, running: false, error: error instanceof Error ? error.message : String(error) });
     }
   }, []);
 
   const refreshAll = useCallback(async () => {
-    const hardwareRequest = native.getHardware().then(setHardware).catch(() => undefined);
-    await Promise.all([hardwareRequest, refreshRuntime()]);
+    await Promise.all([native.getHardware().then(setHardware).catch(() => undefined), refreshRuntime()]);
   }, [refreshRuntime]);
 
   useEffect(() => {
     void refreshAll();
-    void native.checkUpdate()
-      .then(async (info) => {
-        setUpdate(info);
-        if (info.available && info.tag) {
-          setUpdating(true);
-          try {
-            const path = await native.downloadUpdate(info.tag);
-            setUpdatePath(path);
-          } finally {
-            setUpdating(false);
-          }
-        }
-      })
-      .catch((error) => setUpdate({
-        available: false,
-        currentVersion: "0.2.3",
-        error: error instanceof Error ? error.message : String(error),
-      }));
+    void native.checkUpdate().then(setUpdate).catch((error) => setUpdate({
+      available: false, currentVersion: "0.3.0", error: error instanceof Error ? error.message : String(error),
+    }));
   }, [refreshAll]);
 
   const selectModel = (model: string) => {
     setActiveModel(model);
     saveActiveModel(model);
+    updateChat(activeChatId, (chat) => ({ ...chat, model, updatedAt: Date.now() }));
     setView("chat");
   };
 
@@ -118,9 +109,7 @@ export function App() {
       [model]: { model, status: "Подготавливаем загрузку", completed: 0, total: 0, percent: 0, done: false },
     }));
     try {
-      await native.pullModel(model, (progress) => {
-        setPulls((current) => ({ ...current, [model]: progress }));
-      });
+      await native.pullModel(model, (progress) => setPulls((current) => ({ ...current, [model]: progress })));
       await refreshRuntime();
       selectModel(model);
     } catch (error) {
@@ -128,9 +117,7 @@ export function App() {
         ...current,
         [model]: {
           ...(current[model] ?? { model, completed: 0, total: 0, percent: 0 }),
-          status: "Ошибка загрузки",
-          done: true,
-          error: error instanceof Error ? error.message : String(error),
+          status: "Ошибка загрузки", done: true, error: error instanceof Error ? error.message : String(error),
         },
       }));
     }
@@ -142,90 +129,227 @@ export function App() {
     await refreshRuntime();
   };
 
-  const sendMessage = async (content: string) => {
-    if (!activeModel || busy) return;
-    const userMessage: ChatMessage = {
-      id: makeId(),
-      role: "user",
-      content,
-      createdAt: Date.now(),
-    };
+  const mergeMemoryCandidates = (candidates: MemoryCandidate[]) => {
+    if (!candidates.length) return;
+    setMemories((current) => {
+      const next = [...current];
+      for (const candidate of candidates) {
+        if (/парол|password|токен|token|api.?key|секрет|secret|cvv|номер карты/i.test(`${candidate.label} ${candidate.value}`)) continue;
+        const label = candidate.label.trim().toLowerCase();
+        if (next.some((item) => item.label.trim().toLowerCase() === label)) continue;
+        const now = Date.now();
+        next.push({ ...candidate, id: makeId(), enabled: true, createdAt: now, updatedAt: now });
+      }
+      return next;
+    });
+  };
+
+  const sendMessage = async (content: string, attachments: Attachment[] = []) => {
+    if (!activeModel || request || !activeChat) return;
+    const needsVision = attachments.some((attachment) => attachment.kind === "image");
+    const visionModel = isVisionModel(activeModel)
+      ? activeModel
+      : installed.find((model) => isVisionModel(model.name))?.name;
+    if (needsVision && !visionModel) {
+      const now = Date.now();
+      const userMessage: ChatMessage = { id: makeId(), role: "user", content, attachments, createdAt: now };
+      const warning: ChatMessage = {
+        id: makeId(), role: "assistant", createdAt: now + 1, error: true,
+        content: "Для анализа изображений нужна vision-модель. Скачай **Gemma 3 4B** в библиотеке моделей — после этого Galen будет автоматически использовать её для картинок.",
+      };
+      updateChat(activeChat.id, (chat) => ({
+        ...chat,
+        title: chat.messages.length ? chat.title : titleFromMessage(content || attachments[0]?.name || "Изображение"),
+        messages: [...chat.messages, userMessage, warning],
+        updatedAt: now,
+      }));
+      return;
+    }
+    const requestModel = needsVision ? visionModel! : activeModel;
+    const chatId = activeChat.id;
+    const userMessage: ChatMessage = { id: makeId(), role: "user", content, attachments, createdAt: Date.now() };
     const assistantId = makeId();
-    const assistantMessage: ChatMessage = {
-      id: assistantId,
-      role: "assistant",
-      content: "",
-      createdAt: Date.now(),
-      pending: true,
-    };
-    const conversation = [...messages, userMessage];
-    setMessages([...conversation, assistantMessage]);
-    setBusy(true);
+    const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", content: "", createdAt: Date.now(), pending: true };
+    const conversation = [...activeChat.messages, userMessage, assistantMessage];
+    updateChat(chatId, (chat) => ({
+      ...chat,
+      title: chat.messages.length ? chat.title : titleFromMessage(content || attachments[0]?.name || ""),
+      messages: conversation,
+      updatedAt: Date.now(),
+      model: activeModel,
+    }));
+
+    const requestId = makeId();
+    setRequest({ id: requestId, chatId });
+    setActivity({ phase: "thinking", label: "Думаю" });
+    setApproval(null);
+    let answerBuffer = "";
+    let completed = false;
 
     try {
-      await native.chat(makeId(), activeModel, conversation, (token) => {
-        setMessages((current) => current.map((message) => {
-          if (message.id !== assistantId) return message;
-          return {
-            ...message,
-            content: `${message.content}${token.content}`,
-            pending: !token.done,
-            error: Boolean(token.error),
-          };
-        }));
-      });
-      setMessages((current) => current.map((message) =>
-        message.id === assistantId ? { ...message, pending: false } : message,
-      ));
+      await native.agentChat(
+        requestId,
+        requestModel,
+        conversation,
+        memories,
+        activeChat.reasoning,
+        settings,
+        (event) => {
+          if (event.kind === "status" && event.phase && event.label) {
+            if (requestRef.current?.id === requestId) setActivity({ phase: event.phase, label: event.label });
+          }
+          if (event.kind === "token" && event.content) {
+            answerBuffer += event.content;
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              updatedAt: Date.now(),
+              messages: chat.messages.map((message) => message.id === assistantId
+                ? { ...message, content: `${message.content}${event.content}` }
+                : message),
+            }));
+          }
+          if (event.kind === "sources" && event.sources) {
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              messages: chat.messages.map((message) => message.id === assistantId ? { ...message, sources: event.sources } : message),
+            }));
+          }
+          if (event.kind === "approval" && event.approval && requestRef.current?.id === requestId) setApproval(event.approval);
+          if (event.kind === "error") {
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              messages: chat.messages.map((message) => message.id === assistantId
+                ? { ...message, content: message.content || event.error || "Неизвестная ошибка", error: true, pending: false }
+                : message),
+            }));
+          }
+          if (event.kind === "done") {
+            completed = true;
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              updatedAt: Date.now(),
+              messages: chat.messages.map((message) => message.id === assistantId
+                ? { ...message, pending: false, tokensPerSecond: event.tokensPerSecond }
+                : message),
+            }));
+          }
+        },
+      );
+
+      if (completed && answerBuffer && settings.memoryEnabled) {
+        void native.extractMemories(requestModel, content, answerBuffer).then(mergeMemoryCandidates).catch(() => undefined);
+      }
+      if (completed && answerBuffer && settings.autoSpeak && !voiceOpen) {
+        const utterance = new SpeechSynthesisUtterance(answerBuffer.replace(/[*_#`]/g, ""));
+        utterance.lang = "ru-RU";
+        speechSynthesis.speak(utterance);
+      }
     } catch (error) {
-      setMessages((current) => current.map((message) =>
-        message.id === assistantId
-          ? {
-              ...message,
-              content: error instanceof Error ? error.message : String(error),
-              pending: false,
-              error: true,
-            }
-          : message,
-      ));
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.map((message) => message.id === assistantId
+          ? { ...message, content: message.content || (error instanceof Error ? error.message : String(error)), pending: false, error: true }
+          : message),
+      }));
     } finally {
-      setBusy(false);
+      setRequest((current) => {
+        if (current?.id !== requestId) return current;
+        setActivity(null);
+        setApproval(null);
+        return null;
+      });
     }
   };
 
+  const stopAgent = () => {
+    if (!requestRef.current) return;
+    const current = requestRef.current;
+    void native.cancelAgent(current.id);
+    updateChat(current.chatId, (chat) => ({
+      ...chat,
+      messages: chat.messages.map((message) => message.pending ? {
+        ...message, pending: false, content: message.content || "Остановлено.",
+      } : message),
+    }));
+    setRequest(null);
+    setActivity(null);
+    setApproval(null);
+  };
+
+  const resolveApproval = (approved: boolean) => {
+    if (!approval) return;
+    void native.resolveApproval(approval.requestId, approval.approvalId, approved);
+    setApproval(null);
+  };
+
+  const newChat = () => {
+    const chat = createConversation(settings.reasoning);
+    setChats((current) => [chat, ...current]);
+    setActiveChatId(chat.id);
+    setView("chat");
+  };
+
+  const deleteChat = (id: string) => {
+    if (!window.confirm("Удалить этот диалог?")) return;
+    if (requestRef.current?.chatId === id) stopAgent();
+    setChats((current) => {
+      const next = current.filter((chat) => chat.id !== id);
+      if (next.length) {
+        if (id === activeChatId) setActiveChatId(next[0].id);
+        return next;
+      }
+      const fresh = createConversation(settings.reasoning);
+      setActiveChatId(fresh.id);
+      return [fresh];
+    });
+  };
+
+  const changeReasoning = (reasoning: ReasoningLevel) => {
+    updateChat(activeChatId, (chat) => ({ ...chat, reasoning, updatedAt: Date.now() }));
+    setSettings((current) => ({ ...current, reasoning }));
+  };
+
   const installUpdate = async () => {
-    if (updatePath) {
-      await native.restartIntoUpdate(updatePath);
-      return;
-    }
+    if (updatePath) return native.restartIntoUpdate(updatePath);
     if (!update?.tag) return;
     setUpdating(true);
     try {
       const path = await native.downloadUpdate(update.tag);
       setUpdatePath(path);
       await native.restartIntoUpdate(path);
-    } finally {
-      setUpdating(false);
-    }
+    } finally { setUpdating(false); }
   };
 
   const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
-    ?? activeModel
-    ?? undefined;
+    ?? activeModel ?? undefined;
+  const lastAssistant = [...(activeChat?.messages ?? [])].reverse().find((message) => message.role === "assistant");
 
   return (
     <div className="app-shell">
-      <NavRail view={view} open={navOpen} onChange={(next) => { setView(next); setNavOpen(false); }} />
+      <NavRail
+        view={view}
+        open={sidebarOpen}
+        chats={chats}
+        activeChatId={activeChatId}
+        onToggle={() => setSidebarOpen((open) => !open)}
+        onChange={setView}
+        onNewChat={newChat}
+        onSelectChat={(id) => { setActiveChatId(id); setView("chat"); }}
+        onDeleteChat={deleteChat}
+      />
       <div className="workspace">
-        <WindowBar onMenu={() => setNavOpen((open) => !open)} />
+        <WindowBar sidebarOpen={sidebarOpen} onMenu={() => setSidebarOpen(true)} title={view === "chat" ? activeChat?.title : view === "models" ? "Модели" : "Настройки"} />
         <div className="view-stage">
-          {view === "chat" && (
+          {view === "chat" && activeChat && (
             <ChatView
-              messages={messages}
-              busy={busy}
+              messages={activeChat.messages}
+              busy={request?.chatId === activeChat.id}
               hasModel={Boolean(activeModel)}
+              activity={request?.chatId === activeChat.id ? activity : null}
+              approval={request?.chatId === activeChat.id ? approval : null}
               onOpenModels={() => setView("models")}
-              onClear={() => setMessages([])}
+              onResolveApproval={resolveApproval}
+              onSuggestion={(text) => void sendMessage(text)}
             />
           )}
           {view === "models" && (
@@ -242,27 +366,43 @@ export function App() {
               onRetryOllama={() => void refreshRuntime()}
             />
           )}
-          {view === "system" && (
-            <SystemPanel
+          {view === "settings" && (
+            <SettingsPanel
+              settings={settings}
+              memories={memories}
               hardware={hardware}
-              recommended={recommended}
               status={status}
               update={update}
               updating={updating}
+              onSettings={setSettings}
+              onMemories={setMemories}
               onRefresh={() => void refreshAll()}
               onInstallUpdate={() => void installUpdate()}
             />
           )}
         </div>
-        {view === "chat" && (
+        {view === "chat" && activeChat && (
           <Composer
             disabled={!activeModel || !status?.running}
             busy={busy}
             modelLabel={activeLabel}
-            onSend={(message) => void sendMessage(message)}
+            reasoning={activeChat.reasoning}
+            webEnabled={settings.webEnabled}
+            onReasoningChange={changeReasoning}
+            onSend={(message, attachments) => void sendMessage(message, attachments)}
+            onStop={stopAgent}
+            onVoiceMode={() => setVoiceOpen(true)}
           />
         )}
       </div>
+      <VoiceMode
+        open={voiceOpen}
+        busy={busy}
+        activity={activity}
+        lastAssistant={lastAssistant}
+        onClose={() => setVoiceOpen(false)}
+        onSend={(text) => void sendMessage(text)}
+      />
     </div>
   );
 }

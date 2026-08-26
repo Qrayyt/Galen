@@ -110,3 +110,4 @@ function HardwareCard({ icon: Icon, label, value, detail, index }: HardwareCardP
   );
 }
 
+

@@ -1,7 +1,7 @@
 {
   "name": "galen-desktop",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Galen — a private local AI desktop for Windows and Arch Linux.",
   "type": "module",
   "scripts": {
@@ -15,9 +15,13 @@
   "dependencies": {
     "@tauri-apps/api": "2.11.1",
     "lucide-react": "1.28.0",
+    "mammoth": "1.10.0",
     "motion": "12.43.0",
+    "pdfjs-dist": "5.4.149",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "2.11.4",

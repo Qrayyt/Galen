@@ -8,7 +8,7 @@ readonly APP_DIR="$HOME/.local/share/applications"
 readonly ICON_DIR="$HOME/.local/share/icons/hicolor/512x512/apps"
 
 if ! command -v pacman >/dev/null 2>&1; then
-  echo "Galen v0.1 поддерживает Arch Linux и системы на его базе."
+  echo "Galen поддерживает Arch Linux и системы на его базе."
   exit 1
 fi
 
@@ -55,5 +55,5 @@ chmod 644 "$desktop_file"
 
 echo "[5/5] Готово"
 echo "Запуск: galen"
-echo "Galen сам предложит Qwen 3 4B для GTX 1650 SUPER и покажет загрузку модели."
+echo "Galen проанализирует железо, предложит подходящую модель и покажет реальный прогресс загрузки."
 
