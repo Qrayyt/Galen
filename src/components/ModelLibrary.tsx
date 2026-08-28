@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
-  MODEL_CATALOG, MODEL_CATEGORIES, formatBytes, modelFit, recommendModel,
+  MODEL_CATALOG, MODEL_CATEGORIES, formatBytes, modelFit, recommendModel, scoreModel,
 } from "../data/models";
 import { native } from "../lib/native";
 import type {
@@ -49,6 +49,9 @@ const COMFY_GUIDES: Record<string, string> = {
   "comfy:ltx-video": "https://docs.comfy.org/tutorials/video/ltxv",
   "comfy:ltx-23": "https://docs.comfy.org/tutorials/video/ltx/ltx-2-3",
   "comfy:juggernaut-xl-dark": "https://civitai.com/models/133005/juggernaut-xl",
+  "comfy:cyberrealistic-dark-fast": "https://civitai.com/models/15003/cyberrealistic",
+  "comfy:cyberrealistic-xl-dark": "https://civitai.com/models/312530/cyberrealistic-xl",
+  "comfy:wan22-dark-5b": "https://docs.comfy.org/tutorials/video/wan/wan2_2",
   "comfy:wan22-dark": "https://huggingface.co/rzgar/Wan2.2_I2V_R1_base_v2",
 };
 
@@ -81,8 +84,17 @@ export function ModelLibrary(props: ModelLibraryProps) {
     .filter((model) => model.id !== recommended?.id && model.quality > (recommended?.quality ?? 0))
     .sort((a, b) => b.quality - a.quality)[0];
   const rest = regularModels.filter((model) => model.id !== recommended?.id && model.id !== qualityPick?.id);
+  const darkRecommended = darkModels.length
+    ? hardware
+      ? [...darkModels].sort((a, b) => scoreModel(b, hardware) - scoreModel(a, hardware))[0]
+      : darkModels[0]
+    : undefined;
+  const darkQualityPick = [...darkModels]
+    .filter((model) => model.id !== darkRecommended?.id && model.quality > (darkRecommended?.quality ?? 0))
+    .sort((a, b) => b.quality - a.quality)[0];
+  const darkRest = darkModels.filter((model) => model.id !== darkRecommended?.id && model.id !== darkQualityPick?.id);
 
-  const renderCard = (model: ModelCatalogItem, index: number, variant?: "recommended" | "quality" | "dark") => (
+  const renderCard = (model: ModelCatalogItem, index: number, variant?: "recommended" | "quality" | "dark" | "darkRecommended" | "darkQuality") => (
     <ModelRow
       key={`${model.category}:${model.id}`}
       model={model}
@@ -168,7 +180,9 @@ export function ModelLibrary(props: ModelLibraryProps) {
           {!!rest.length && <div className="model-list-label">Другие варианты</div>}
           {rest.map((model, index) => renderCard(model, index + 2))}
           {!!darkModels.length && !darkOnly && <div className="model-list-label model-list-label--dark">Dark Models · без встроенной цензуры</div>}
-          {darkModels.map((model, index) => renderCard(model, index + regularModels.length, "dark"))}
+          {darkRecommended && renderCard(darkRecommended, regularModels.length, "darkRecommended")}
+          {darkQualityPick && renderCard(darkQualityPick, regularModels.length + 1, "darkQuality")}
+          {darkRest.map((model, index) => renderCard(model, index + regularModels.length + 2, "dark"))}
         </motion.section>
       </AnimatePresence>
 
@@ -190,7 +204,7 @@ function CategoryButton({ entry, active, onClick }: {
 }
 
 function ModelRow({ model, index, variant, fit, installed, active, progress, disabled, comfyRunning, onPull, onDelete, onSelect, onSelectVoice, onOpenSettings, onOpenComfy }: {
-  model: ModelCatalogItem; index: number; variant?: "recommended" | "quality" | "dark"; fit: number | null;
+  model: ModelCatalogItem; index: number; variant?: "recommended" | "quality" | "dark" | "darkRecommended" | "darkQuality"; fit: number | null;
   installed: boolean; active: boolean; progress?: PullProgress; disabled: boolean; comfyRunning: boolean;
   onPull: () => void; onDelete: () => void; onSelect: () => void; onSelectVoice: () => void; onOpenSettings: () => void; onOpenComfy: () => void;
 }) {
@@ -200,7 +214,7 @@ function ModelRow({ model, index, variant, fit, installed, active, progress, dis
   const comfyGuide = COMFY_GUIDES[model.id] ?? "https://docs.comfy.org/tutorials/overview";
   return (
     <motion.article className={`model-row ${variant ? `model-row--${variant}` : ""} ${active ? "active" : ""}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(index * 0.035, 0.18) }}>
-      {variant && <div className="model-ribbon">{variant === "recommended" ? <><Sparkles size={13} /> Лучший выбор для этого ПК</> : variant === "quality" ? <><Gauge size={13} /> Медленнее, но качественнее</> : <><Sparkles size={13} /> Dark model · без встроенной цензуры</>}</div>}
+      {variant && <div className="model-ribbon">{variant === "recommended" ? <><Sparkles size={13} /> Лучший выбор для этого ПК</> : variant === "quality" ? <><Gauge size={13} /> Медленнее, но качественнее</> : variant === "darkRecommended" ? <><Sparkles size={13} /> Dark · лучший выбор для этого ПК</> : variant === "darkQuality" ? <><Gauge size={13} /> Dark · медленнее, но качественнее</> : <><Sparkles size={13} /> Dark model · быстрый вариант</>}</div>}
       <div className="model-row-main">
         <div className="model-monogram">{model.name.slice(0, 1)}</div>
         <div className="model-copy">

@@ -46,12 +46,20 @@ describe("model recommendation", () => {
     expect(scoreModel(bestFit, workstation)).toBeGreaterThan(scoreModel(slower, workstation));
   });
 
-  it("contains a distinct Dark model in every category", () => {
+  it("contains multiple distinct Dark models in every category", () => {
     const categories = ["chat", "vision", "image", "video", "voice"];
     for (const category of categories) {
       const dark = MODEL_CATALOG.filter((model) => model.category === category && model.dark);
-      expect(dark.length, `missing Dark model in ${category}`).toBeGreaterThan(0);
+      expect(dark.length, `not enough Dark models in ${category}`).toBeGreaterThanOrEqual(2);
       expect(dark.every((model) => model.tags.includes("Dark"))).toBe(true);
+    }
+  });
+
+  it("offers fast and higher-quality Dark choices in major model categories", () => {
+    for (const category of ["chat", "vision", "image", "video"]) {
+      const dark = MODEL_CATALOG.filter((model) => model.category === category && model.dark);
+      expect(dark.some((model) => model.speed === "Быстрая" || model.tags.includes("Быстрее"))).toBe(true);
+      expect(Math.max(...dark.map((model) => model.quality)) - Math.min(...dark.map((model) => model.quality))).toBeGreaterThanOrEqual(8);
     }
   });
 

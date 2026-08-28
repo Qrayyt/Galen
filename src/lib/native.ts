@@ -101,6 +101,7 @@ export const native = {
           webEnabled: settings.webEnabled,
           terminalEnabled: settings.terminalEnabled,
           workspaceDirectory: settings.workspaceDirectory || null,
+          customInstructions: settings.customInstructions.trim() || null,
         },
       });
     } finally {
