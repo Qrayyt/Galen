@@ -126,6 +126,7 @@ export interface ModelCatalogItem {
   quality: number;
   capabilities: string[];
   status?: "available" | "integration";
+  dark?: boolean;
 }
 
 export interface PullProgress {

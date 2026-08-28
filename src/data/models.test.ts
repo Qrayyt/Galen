@@ -45,4 +45,18 @@ describe("model recommendation", () => {
     expect(slower.quality).toBeGreaterThan(bestFit.quality);
     expect(scoreModel(bestFit, workstation)).toBeGreaterThan(scoreModel(slower, workstation));
   });
+
+  it("contains a distinct Dark model in every category", () => {
+    const categories = ["chat", "vision", "image", "video", "voice"];
+    for (const category of categories) {
+      const dark = MODEL_CATALOG.filter((model) => model.category === category && model.dark);
+      expect(dark.length, `missing Dark model in ${category}`).toBeGreaterThan(0);
+      expect(dark.every((model) => model.tags.includes("Dark"))).toBe(true);
+    }
+  });
+
+  it("does not recommend Dark models unless explicitly requested", () => {
+    const workstation: HardwareInfo = { ...currentPc, ramTotalGb: 32, vramGb: 16, gpu: "RTX 5060 Ti" };
+    expect(recommendModel(workstation).dark).not.toBe(true);
+  });
 });
