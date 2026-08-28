@@ -95,6 +95,8 @@ jobs:
             - PDF, DOCX and image attachments
             - natural Russian neural voice plus an optional offline system mode
             - categorized Model Studio with hardware fit scores
+            - distinct Dark Models in every category, selected only by the user
+            - Galen Core Prompt v1 with editable persistent user instructions
             - polished ChatGPT-like monochrome interface and Markdown rendering
           releaseDraft: true
           prerelease: false
@@ -166,6 +168,8 @@ jobs:
             - PDF, DOCX and image attachments
             - natural Russian neural voice plus an optional offline system mode
             - categorized Model Studio with hardware fit scores
+            - distinct Dark Models in every category, selected only by the user
+            - Galen Core Prompt v1 with editable persistent user instructions
             - polished ChatGPT-like monochrome interface and Markdown rendering
           releaseDraft: true
           prerelease: false

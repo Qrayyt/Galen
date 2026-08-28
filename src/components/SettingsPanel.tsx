@@ -135,6 +135,19 @@ export function SettingsPanel({
           </div>
 
           <div className="settings-section">
+            <div className="section-heading"><span><Bot size={18} /></span><div><h2>Мои инструкции</h2><p>Постоянные требования к стилю и поведению модели</p></div></div>
+            <label className="instruction-field">
+              <textarea
+                value={settings.customInstructions}
+                onChange={(event) => patch({ customInstructions: event.target.value.slice(0, 6000) })}
+                placeholder="Например: отвечай кратко; всегда давай команды для PowerShell; обращайся ко мне на ты…"
+              />
+              <span>{settings.customInstructions.length} / 6000</span>
+            </label>
+            <p className="security-note"><Shield size={14} /> Эти инструкции добавляются к Galen Core Prompt во всех новых запросах. История чатов при изменении не удаляется.</p>
+          </div>
+
+          <div className="settings-section">
             <div className="section-heading"><span><HardDrive size={18} /></span><div><h2>Рабочая папка</h2><p>Базовая папка для команд терминала</p></div></div>
             <label className="workspace-field">
               <span>Путь</span>

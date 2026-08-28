@@ -99,7 +99,7 @@ export function App() {
   useEffect(() => {
     void refreshAll();
     void native.checkUpdate().then(setUpdate).catch((error) => setUpdate({
-      available: false, currentVersion: "0.4.0", error: error instanceof Error ? error.message : String(error),
+      available: false, currentVersion: "0.4.1", error: error instanceof Error ? error.message : String(error),
     }));
   }, [refreshAll]);
 
@@ -340,6 +340,22 @@ export function App() {
 
   const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
     ?? activeModel ?? undefined;
+  const activeVoiceId = settings.voiceEngine === "system"
+    ? settings.voiceRate <= 0.9 ? "voice:dark-offline" : "voice:system"
+    : settings.voiceId === "ru-RU-DmitryNeural" && settings.voiceRate <= 0.9
+      ? "voice:galen-dark"
+      : "voice:galen-neural";
+  const selectVoice = (model: string) => {
+    if (model === "voice:system") {
+      setSettings((current) => ({ ...current, voiceEngine: "system", voiceRate: 0.96 }));
+    } else if (model === "voice:dark-offline") {
+      setSettings((current) => ({ ...current, voiceEngine: "system", voiceRate: 0.86 }));
+    } else if (model === "voice:galen-dark") {
+      setSettings((current) => ({ ...current, voiceEngine: "neural", voiceId: "ru-RU-DmitryNeural", voiceRate: 0.86 }));
+    } else {
+      setSettings((current) => ({ ...current, voiceEngine: "neural", voiceId: "ru-RU-DmitryNeural", voiceRate: 0.96 }));
+    }
+  };
   const lastAssistant = [...(activeChat?.messages ?? [])].reverse().find((message) => message.role === "assistant");
 
   return (
@@ -379,10 +395,12 @@ export function App() {
               comfyStatus={comfyStatus}
               installed={installed}
               activeModel={activeModel}
+              activeVoiceId={activeVoiceId}
               pulls={pulls}
               onPull={(model) => void pullModel(model)}
               onDelete={(model) => void deleteModel(model)}
               onSelect={selectModel}
+              onSelectVoice={selectVoice}
               onRetryOllama={() => void refreshRuntime()}
               onRetryComfy={() => void native.getComfyStatus().then(setComfyStatus)}
               onOpenComfy={() => void native.openComfy()}

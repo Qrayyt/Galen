@@ -72,6 +72,7 @@ export interface AppSettings {
   voiceEngine: "neural" | "system";
   voiceId: string;
   voiceRate: number;
+  customInstructions: string;
 }
 
 export interface OllamaModel {
@@ -126,6 +127,7 @@ export interface ModelCatalogItem {
   quality: number;
   capabilities: string[];
   status?: "available" | "integration";
+  dark?: boolean;
 }
 
 export interface PullProgress {
@@ -183,4 +185,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceEngine: "neural",
   voiceId: "ru-RU-DmitryNeural",
   voiceRate: 0.96,
+  customInstructions: "",
 };

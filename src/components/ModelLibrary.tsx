@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
-  MODEL_CATALOG, MODEL_CATEGORIES, formatBytes, modelFit, recommendModel,
+  MODEL_CATALOG, MODEL_CATEGORIES, formatBytes, modelFit, recommendModel, scoreModel,
 } from "../data/models";
 import { native } from "../lib/native";
 import type {
@@ -19,10 +19,12 @@ interface ModelLibraryProps {
   comfyStatus: ContentEngineStatus | null;
   installed: OllamaModel[];
   activeModel: string | null;
+  activeVoiceId: string;
   pulls: Record<string, PullProgress>;
   onPull: (model: string) => void;
   onDelete: (model: string) => void;
   onSelect: (model: string) => void;
+  onSelectVoice: (model: string) => void;
   onRetryOllama: () => void;
   onRetryComfy: () => void;
   onOpenComfy: () => void;
@@ -46,35 +48,53 @@ const COMFY_GUIDES: Record<string, string> = {
   "comfy:wan22-14b": "https://docs.comfy.org/tutorials/video/wan/wan2_2",
   "comfy:ltx-video": "https://docs.comfy.org/tutorials/video/ltxv",
   "comfy:ltx-23": "https://docs.comfy.org/tutorials/video/ltx/ltx-2-3",
+  "comfy:juggernaut-xl-dark": "https://civitai.com/models/133005/juggernaut-xl",
+  "comfy:cyberrealistic-dark-fast": "https://civitai.com/models/15003/cyberrealistic",
+  "comfy:cyberrealistic-xl-dark": "https://civitai.com/models/312530/cyberrealistic-xl",
+  "comfy:wan22-dark-5b": "https://docs.comfy.org/tutorials/video/wan/wan2_2",
+  "comfy:wan22-dark": "https://huggingface.co/rzgar/Wan2.2_I2V_R1_base_v2",
 };
 
 export function ModelLibrary(props: ModelLibraryProps) {
   const {
-    hardware, status, comfyStatus, installed, activeModel, pulls, onPull, onDelete, onSelect,
+    hardware, status, comfyStatus, installed, activeModel, activeVoiceId, pulls, onPull, onDelete, onSelect, onSelectVoice,
     onRetryOllama, onRetryComfy, onOpenComfy, onOpenSettings,
   } = props;
   const [category, setCategory] = useState<ModelCatalogItem["category"]>("chat");
   const [query, setQuery] = useState("");
+  const [darkOnly, setDarkOnly] = useState(false);
   const [customModel, setCustomModel] = useState("");
   const installedNames = useMemo(() => new Set(installed.map((model) => normalized(model.name))), [installed]);
   const categoryMeta = MODEL_CATEGORIES.find((entry) => entry.id === category)!;
 
   const models = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return MODEL_CATALOG.filter((model) => model.category === category && (!needle ||
+    return MODEL_CATALOG.filter((model) => model.category === category && (!darkOnly || model.dark) && (!needle ||
       [model.name, model.id, model.maker, model.description, ...model.tags, ...model.capabilities]
         .join(" ").toLowerCase().includes(needle)));
-  }, [category, query]);
+  }, [category, darkOnly, query]);
 
-  const recommended = hardware && models.length
+  const regularModels = models.filter((model) => !model.dark);
+  const darkModels = models.filter((model) => model.dark);
+
+  const recommended = hardware && regularModels.length
     ? recommendModel(hardware, category)
-    : models[0];
-  const qualityPick = [...models]
+    : regularModels[0];
+  const qualityPick = [...regularModels]
     .filter((model) => model.id !== recommended?.id && model.quality > (recommended?.quality ?? 0))
     .sort((a, b) => b.quality - a.quality)[0];
-  const rest = models.filter((model) => model.id !== recommended?.id && model.id !== qualityPick?.id);
+  const rest = regularModels.filter((model) => model.id !== recommended?.id && model.id !== qualityPick?.id);
+  const darkRecommended = darkModels.length
+    ? hardware
+      ? [...darkModels].sort((a, b) => scoreModel(b, hardware) - scoreModel(a, hardware))[0]
+      : darkModels[0]
+    : undefined;
+  const darkQualityPick = [...darkModels]
+    .filter((model) => model.id !== darkRecommended?.id && model.quality > (darkRecommended?.quality ?? 0))
+    .sort((a, b) => b.quality - a.quality)[0];
+  const darkRest = darkModels.filter((model) => model.id !== darkRecommended?.id && model.id !== darkQualityPick?.id);
 
-  const renderCard = (model: ModelCatalogItem, index: number, variant?: "recommended" | "quality") => (
+  const renderCard = (model: ModelCatalogItem, index: number, variant?: "recommended" | "quality" | "dark" | "darkRecommended" | "darkQuality") => (
     <ModelRow
       key={`${model.category}:${model.id}`}
       model={model}
@@ -82,13 +102,14 @@ export function ModelLibrary(props: ModelLibraryProps) {
       variant={variant}
       fit={hardware ? modelFit(model, hardware) : null}
       installed={installedNames.has(normalized(model.id)) || model.engine === "builtin"}
-      active={normalized(activeModel ?? "") === normalized(model.id)}
+      active={model.category === "voice" ? activeVoiceId === model.id : normalized(activeModel ?? "") === normalized(model.id)}
       progress={pulls[model.id]}
       disabled={!status?.running}
       comfyRunning={Boolean(comfyStatus?.running)}
       onPull={() => onPull(model.id)}
       onDelete={() => onDelete(model.id)}
       onSelect={() => onSelect(model.id)}
+      onSelectVoice={() => onSelectVoice(model.id)}
       onOpenSettings={onOpenSettings}
       onOpenComfy={onOpenComfy}
     />
@@ -137,15 +158,20 @@ export function ModelLibrary(props: ModelLibraryProps) {
 
       <nav className="model-categories" aria-label="Категории моделей">
         {MODEL_CATEGORIES.map((entry) => (
-          <CategoryButton key={entry.id} entry={entry} active={category === entry.id} onClick={() => { setCategory(entry.id); setQuery(""); }} />
+          <CategoryButton key={entry.id} entry={entry} active={category === entry.id} onClick={() => { setCategory(entry.id); setQuery(""); setDarkOnly(false); }} />
         ))}
       </nav>
 
       <div className="model-toolbar">
         <div><h2>{categoryMeta.label}</h2><span>{models.length} вариантов</span></div>
-        <label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Поиск в «${categoryMeta.label}»`} />{query && <button onClick={() => setQuery("")}><X size={15} /></button>}</label>
+        <div className="model-toolbar-actions">
+          <button className={`dark-filter ${darkOnly ? "active" : ""}`} onClick={() => setDarkOnly((value) => !value)}><Sparkles size={15} /> Dark</button>
+          <label className="search-field"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Поиск в «${categoryMeta.label}»`} />{query && <button onClick={() => setQuery("")}><X size={15} /></button>}</label>
+        </div>
       </div>
       <p className="catalog-method"><Star size={12} fill="currentColor" /> Оценка Galen основана на качестве и возможностях модели; совместимость рассчитывается отдельно по RAM и VRAM этого компьютера.</p>
+
+      {darkOnly && <section className="dark-notice"><strong>Dark Models</strong><p>Локальные модели с минимальным alignment-фильтром и поддержкой NSFW. Galen не добавляет к их ответам отдельную цензуру; ответственность за законность и согласие остаётся у пользователя.</p></section>}
 
       <AnimatePresence mode="wait">
         <motion.section key={category} className="model-list" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -5 }}>
@@ -153,6 +179,10 @@ export function ModelLibrary(props: ModelLibraryProps) {
           {qualityPick && renderCard(qualityPick, 1, "quality")}
           {!!rest.length && <div className="model-list-label">Другие варианты</div>}
           {rest.map((model, index) => renderCard(model, index + 2))}
+          {!!darkModels.length && !darkOnly && <div className="model-list-label model-list-label--dark">Dark Models · без встроенной цензуры</div>}
+          {darkRecommended && renderCard(darkRecommended, regularModels.length, "darkRecommended")}
+          {darkQualityPick && renderCard(darkQualityPick, regularModels.length + 1, "darkQuality")}
+          {darkRest.map((model, index) => renderCard(model, index + regularModels.length + 2, "dark"))}
         </motion.section>
       </AnimatePresence>
 
@@ -173,10 +203,10 @@ function CategoryButton({ entry, active, onClick }: {
   return <button className={active ? "active" : ""} onClick={onClick}><Icon size={17} /><div><span>{entry.label}</span><small>{entry.description}</small></div></button>;
 }
 
-function ModelRow({ model, index, variant, fit, installed, active, progress, disabled, comfyRunning, onPull, onDelete, onSelect, onOpenSettings, onOpenComfy }: {
-  model: ModelCatalogItem; index: number; variant?: "recommended" | "quality"; fit: number | null;
+function ModelRow({ model, index, variant, fit, installed, active, progress, disabled, comfyRunning, onPull, onDelete, onSelect, onSelectVoice, onOpenSettings, onOpenComfy }: {
+  model: ModelCatalogItem; index: number; variant?: "recommended" | "quality" | "dark" | "darkRecommended" | "darkQuality"; fit: number | null;
   installed: boolean; active: boolean; progress?: PullProgress; disabled: boolean; comfyRunning: boolean;
-  onPull: () => void; onDelete: () => void; onSelect: () => void; onOpenSettings: () => void; onOpenComfy: () => void;
+  onPull: () => void; onDelete: () => void; onSelect: () => void; onSelectVoice: () => void; onOpenSettings: () => void; onOpenComfy: () => void;
 }) {
   const downloading = progress && !progress.done && !progress.error;
   const isComfy = model.engine === "comfyui";
@@ -184,11 +214,11 @@ function ModelRow({ model, index, variant, fit, installed, active, progress, dis
   const comfyGuide = COMFY_GUIDES[model.id] ?? "https://docs.comfy.org/tutorials/overview";
   return (
     <motion.article className={`model-row ${variant ? `model-row--${variant}` : ""} ${active ? "active" : ""}`} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: Math.min(index * 0.035, 0.18) }}>
-      {variant && <div className="model-ribbon">{variant === "recommended" ? <><Sparkles size={13} /> Лучший выбор для этого ПК</> : <><Gauge size={13} /> Медленнее, но качественнее</>}</div>}
+      {variant && <div className="model-ribbon">{variant === "recommended" ? <><Sparkles size={13} /> Лучший выбор для этого ПК</> : variant === "quality" ? <><Gauge size={13} /> Медленнее, но качественнее</> : variant === "darkRecommended" ? <><Sparkles size={13} /> Dark · лучший выбор для этого ПК</> : variant === "darkQuality" ? <><Gauge size={13} /> Dark · медленнее, но качественнее</> : <><Sparkles size={13} /> Dark model · быстрый вариант</>}</div>}
       <div className="model-row-main">
         <div className="model-monogram">{model.name.slice(0, 1)}</div>
         <div className="model-copy">
-          <div className="model-name-line"><h3>{model.name}</h3><span>{model.maker}</span>{active && <i><Check size={12} /> Активна</i>}</div>
+          <div className="model-name-line"><h3>{model.name}</h3><span>{model.maker}</span>{model.dark && <b className="dark-badge">Dark</b>}{active && <i><Check size={12} /> Активна</i>}</div>
           <p>{model.description}</p>
           <div className="capability-list">{model.capabilities.map((value) => <span key={value}>{value}</span>)}</div>
         </div>
@@ -207,7 +237,7 @@ function ModelRow({ model, index, variant, fit, installed, active, progress, dis
             <button className="model-secondary" onClick={() => void native.openUrl(comfyGuide)}><span>Модель и workflow</span><ExternalLink size={14} /></button>
           </div>
         ) : isVoice ? (
-          <button className="model-secondary" onClick={onOpenSettings}><span>Настроить голос</span><ChevronRight size={16} /></button>
+          <div className="model-buttons"><button className={active ? "model-secondary" : "black-button"} onClick={onSelectVoice}><span>{active ? "Используется" : "Подключить"}</span><ChevronRight size={16} /></button><button className="model-secondary" onClick={onOpenSettings}>Настроить</button></div>
         ) : installed ? (
           <div className="model-buttons"><button className={active ? "model-secondary" : "black-button"} onClick={onSelect}>{active ? "Используется" : "Подключить"}</button><button className="icon-danger" onClick={onDelete} aria-label={`Удалить ${model.name}`}><Trash2 size={15} /></button></div>
         ) : (
