@@ -19,11 +19,11 @@ describe("model recommendation", () => {
   });
 
   it("penalizes models that do not fit available memory", () => {
-    const light = MODEL_CATALOG.find((model) => model.id === "llama3.2:3b")!;
-    const heavy = MODEL_CATALOG.find((model) => model.id === "deepseek-r1:7b")!;
+    const light = MODEL_CATALOG.find((model) => model.id === "qwen3:4b")!;
+    const heavy = MODEL_CATALOG.find((model) => model.id === "deepseek-r1:14b")!;
     expect(scoreModel(light, currentPc)).toBeGreaterThan(scoreModel(heavy, currentPc));
   });
-  it("recommends Qwen 3 14B for a 16 GB VRAM workstation", () => {
+  it("recommends Qwen 3.5 9B for a 16 GB VRAM workstation", () => {
     const workstation: HardwareInfo = {
       cpu: "AMD Ryzen 9 5950X",
       cpuCores: 32,
@@ -34,7 +34,15 @@ describe("model recommendation", () => {
       desktop: "Windows",
       architecture: "x86_64",
     };
-    expect(recommendModel(workstation).id).toBe("qwen3:14b");
+    expect(recommendModel(workstation).id).toBe("qwen3.5:9b");
+  });
+
+  it("keeps the higher-quality 27B model below the best-fit workstation pick", () => {
+    const workstation: HardwareInfo = { ...currentPc, ramTotalGb: 32, vramGb: 16, gpu: "RTX 5060 Ti" };
+    const bestFit = recommendModel(workstation);
+    const slower = MODEL_CATALOG.find((model) => model.id === "qwen3.5:27b")!;
+    expect(bestFit.id).toBe("qwen3.5:9b");
+    expect(slower.quality).toBeGreaterThan(bestFit.quality);
+    expect(scoreModel(bestFit, workstation)).toBeGreaterThan(scoreModel(slower, workstation));
   });
 });
-

@@ -8,20 +8,22 @@ import { VoiceMode } from "../components/VoiceMode";
 import { WindowBar } from "../components/WindowBar";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
+import { splitReasoningText, visibleAnswer } from "../lib/reasoning";
+import { speakText } from "../lib/speech";
 import {
   createConversation, loadActiveChatId, loadActiveModel, loadConversations, loadMemories,
   loadSettings, saveActiveChatId, saveActiveModel, saveConversations, saveMemories,
   saveSettings, titleFromMessage,
 } from "../lib/storage";
 import type {
-  AgentPhase, AppSettings, Attachment, ChatMessage, Conversation, HardwareInfo,
+  AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, HardwareInfo,
   MemoryCandidate, MemoryItem, OllamaModel, OllamaStatus, PullProgress, ReasoningLevel,
   ToolApproval, UpdateInfo, ViewId,
 } from "../types";
 
 const makeId = () => crypto.randomUUID();
 const normalized = (name: string) => name.replace(":latest", "").toLowerCase();
-const isVisionModel = (name: string) => /gemma3|qwen(?:2\.5|3)-?vl|llava|minicpm-v/i.test(name);
+const isVisionModel = (name: string) => /gemma[34]|qwen3\.5|qwen(?:2\.5|3)-?vl|llava|minicpm-v/i.test(name);
 
 export function App() {
   const initialChats = useMemo(() => loadConversations(), []);
@@ -33,6 +35,7 @@ export function App() {
   const [settings, setSettings] = useState<AppSettings>(() => loadSettings());
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [status, setStatus] = useState<OllamaStatus | null>(null);
+  const [comfyStatus, setComfyStatus] = useState<ContentEngineStatus | null>(null);
   const [installed, setInstalled] = useState<OllamaModel[]>([]);
   const [activeModel, setActiveModel] = useState<string | null>(() => loadActiveModel());
   const [pulls, setPulls] = useState<Record<string, PullProgress>>({});
@@ -86,13 +89,17 @@ export function App() {
   }, []);
 
   const refreshAll = useCallback(async () => {
-    await Promise.all([native.getHardware().then(setHardware).catch(() => undefined), refreshRuntime()]);
+    await Promise.all([
+      native.getHardware().then(setHardware).catch(() => undefined),
+      native.getComfyStatus().then(setComfyStatus).catch(() => undefined),
+      refreshRuntime(),
+    ]);
   }, [refreshRuntime]);
 
   useEffect(() => {
     void refreshAll();
     void native.checkUpdate().then(setUpdate).catch((error) => setUpdate({
-      available: false, currentVersion: "0.3.0", error: error instanceof Error ? error.message : String(error),
+      available: false, currentVersion: "0.4.0", error: error instanceof Error ? error.message : String(error),
     }));
   }, [refreshAll]);
 
@@ -198,13 +205,26 @@ export function App() {
           if (event.kind === "status" && event.phase && event.label) {
             if (requestRef.current?.id === requestId) setActivity({ phase: event.phase, label: event.label });
           }
+          if (event.kind === "reasoning" && event.content) {
+            const separated = splitReasoningText(event.content);
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              messages: chat.messages.map((message) => message.id === assistantId
+                ? {
+                    ...message,
+                    reasoning: [message.reasoning, separated.reasoning || separated.answer].filter(Boolean).join("\n\n"),
+                    reasoningSeconds: event.reasoningSeconds,
+                  }
+                : message),
+            }));
+          }
           if (event.kind === "token" && event.content) {
-            answerBuffer += event.content;
+            answerBuffer = visibleAnswer(`${answerBuffer}${event.content}`);
             updateChat(chatId, (chat) => ({
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, content: `${message.content}${event.content}` }
+                ? { ...message, content: visibleAnswer(`${message.content}${event.content}`) }
                 : message),
             }));
           }
@@ -240,9 +260,7 @@ export function App() {
         void native.extractMemories(requestModel, content, answerBuffer).then(mergeMemoryCandidates).catch(() => undefined);
       }
       if (completed && answerBuffer && settings.autoSpeak && !voiceOpen) {
-        const utterance = new SpeechSynthesisUtterance(answerBuffer.replace(/[*_#`]/g, ""));
-        utterance.lang = "ru-RU";
-        speechSynthesis.speak(utterance);
+        void speakText(answerBuffer, settings).catch(() => undefined);
       }
     } catch (error) {
       updateChat(chatId, (chat) => ({
@@ -347,6 +365,7 @@ export function App() {
               hasModel={Boolean(activeModel)}
               activity={request?.chatId === activeChat.id ? activity : null}
               approval={request?.chatId === activeChat.id ? approval : null}
+              settings={settings}
               onOpenModels={() => setView("models")}
               onResolveApproval={resolveApproval}
               onSuggestion={(text) => void sendMessage(text)}
@@ -357,6 +376,7 @@ export function App() {
               hardware={hardware}
               recommendedId={recommended?.id ?? null}
               status={status}
+              comfyStatus={comfyStatus}
               installed={installed}
               activeModel={activeModel}
               pulls={pulls}
@@ -364,6 +384,9 @@ export function App() {
               onDelete={(model) => void deleteModel(model)}
               onSelect={selectModel}
               onRetryOllama={() => void refreshRuntime()}
+              onRetryComfy={() => void native.getComfyStatus().then(setComfyStatus)}
+              onOpenComfy={() => void native.openComfy()}
+              onOpenSettings={() => setView("settings")}
             />
           )}
           {view === "settings" && (
@@ -400,6 +423,7 @@ export function App() {
         busy={busy}
         activity={activity}
         lastAssistant={lastAssistant}
+        settings={settings}
         onClose={() => setVoiceOpen(false)}
         onSend={(text) => void sendMessage(text)}
       />

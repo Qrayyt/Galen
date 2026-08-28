@@ -86,15 +86,16 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.3 turns the local chat into a full desktop agent.
+            Galen 0.4 is a visual and intelligence upgrade for the local desktop agent.
 
             - web search and page reading without API keys
-            - Light / Medium / Heavy reasoning with hidden thinking
+            - separated reasoning with a collapsible timed thinking block
             - terminal tools with an explicit approval gate
             - multiple chats and editable long-term memory
             - PDF, DOCX and image attachments
-            - voice input, voice mode and answer playback
-            - redesigned monochrome interface
+            - natural Russian neural voice plus an optional offline system mode
+            - categorized Model Studio with hardware fit scores
+            - polished ChatGPT-like monochrome interface and Markdown rendering
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -156,15 +157,16 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.3 turns the local chat into a full desktop agent.
+            Galen 0.4 is a visual and intelligence upgrade for the local desktop agent.
 
             - web search and page reading without API keys
-            - Light / Medium / Heavy reasoning with hidden thinking
+            - separated reasoning with a collapsible timed thinking block
             - terminal tools with an explicit approval gate
             - multiple chats and editable long-term memory
             - PDF, DOCX and image attachments
-            - voice input, voice mode and answer playback
-            - redesigned monochrome interface
+            - natural Russian neural voice plus an optional offline system mode
+            - categorized Model Studio with hardware fit scores
+            - polished ChatGPT-like monochrome interface and Markdown rendering
           releaseDraft: true
           prerelease: false
           args: --bundles appimage

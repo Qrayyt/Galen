@@ -1,4 +1,6 @@
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::StreamExt;
+use kothok_edge_tts::{init_tls, EdgeTts, Engine as TtsEngine, TtsEvent};
 use regex::Regex;
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -10,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use sysinfo::System;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -19,6 +21,7 @@ use url::Url;
 use uuid::Uuid;
 
 const OLLAMA_API: &str = "http://127.0.0.1:11434/api";
+const COMFYUI_API: &str = "http://127.0.0.1:8188";
 const REPOSITORY: &str = "Qrayyt/Galen";
 const MAX_WEB_CHARS: usize = 18_000;
 const MAX_TOOL_OUTPUT: usize = 18_000;
@@ -48,6 +51,16 @@ struct OllamaStatus {
     installed: bool,
     running: bool,
     version: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentEngineStatus {
+    installed: bool,
+    running: bool,
+    name: String,
+    endpoint: String,
     error: Option<String>,
 }
 
@@ -146,6 +159,8 @@ struct OllamaResponseMessage {
     #[serde(default)]
     content: String,
     #[serde(default)]
+    thinking: String,
+    #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
 }
 
@@ -194,6 +209,7 @@ struct AgentEvent {
     sources: Option<Vec<SourceLink>>,
     approval: Option<ToolApproval>,
     tokens_per_second: Option<f64>,
+    reasoning_seconds: Option<f64>,
     error: Option<String>,
 }
 
@@ -232,6 +248,7 @@ fn emit_status(app: &AppHandle, request_id: &str, phase: &str, label: &str) {
             sources: None,
             approval: None,
             tokens_per_second: None,
+            reasoning_seconds: None,
             error: None,
         },
     );
@@ -249,6 +266,7 @@ fn emit_error(app: &AppHandle, request_id: &str, error: &str) {
             sources: None,
             approval: None,
             tokens_per_second: None,
+            reasoning_seconds: None,
             error: Some(error.to_string()),
         },
     );
@@ -421,6 +439,63 @@ async fn start_ollama(state: State<'_, AppState>) -> Result<OllamaStatus, String
         }
     }
     Ok(query_ollama_status(&state.client).await)
+}
+
+fn comfyui_installed() -> bool {
+    if Command::new("comfy")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    #[cfg(windows)]
+    if let Ok(local_app_data) = env::var("LOCALAPPDATA") {
+        let root = PathBuf::from(local_app_data);
+        let candidates = [
+            root.join("Programs").join("ComfyUI").join("ComfyUI.exe"),
+            root.join("Programs").join("ComfyUI Desktop").join("ComfyUI.exe"),
+            root.join("ComfyUI").join("ComfyUI.exe"),
+        ];
+        if candidates.iter().any(|path| path.is_file()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[tauri::command]
+async fn get_comfyui_status(state: State<'_, AppState>) -> Result<ContentEngineStatus, String> {
+    let response = state
+        .client
+        .get(format!("{COMFYUI_API}/system_stats"))
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await;
+    let running = response
+        .as_ref()
+        .map(|value| value.status().is_success())
+        .unwrap_or(false);
+    Ok(ContentEngineStatus {
+        installed: running || comfyui_installed(),
+        running,
+        name: "ComfyUI".to_string(),
+        endpoint: COMFYUI_API.to_string(),
+        error: if running {
+            None
+        } else {
+            Some("ComfyUI не запущен на 127.0.0.1:8188".to_string())
+        },
+    })
+}
+
+#[tauri::command]
+fn open_comfyui() -> Result<(), String> {
+    open::that(COMFYUI_API).map_err(|error| format!("Не удалось открыть ComfyUI: {error}"))
 }
 
 #[tauri::command]
@@ -657,6 +732,73 @@ fn take_arg(arguments: &Value, key: &str) -> String {
         .to_string()
 }
 
+fn split_reasoning(content: &str, explicit: &str) -> (String, String) {
+    let mut reasoning = explicit.trim().to_string();
+    let mut answer = content.to_string();
+
+    let channel = Regex::new(
+        r"(?is)<\|channel\|>\s*(?:analysis|reasoning)(.*?)<\|channel\|>\s*final",
+    )
+    .expect("valid channel reasoning regex");
+    for capture in channel.captures_iter(content) {
+        if let Some(value) = capture.get(1) {
+            let value = value.as_str().trim();
+            if !value.is_empty() {
+                if !reasoning.is_empty() {
+                    reasoning.push_str("\n\n");
+                }
+                reasoning.push_str(value);
+            }
+        }
+    }
+    answer = channel.replace_all(&answer, "").into_owned();
+
+    let tagged = Regex::new(
+        r"(?is)<(think|thinking|analysis|reasoning)\b[^>]*>(.*?)</(?:think|thinking|analysis|reasoning)>",
+    )
+        .expect("valid reasoning regex");
+    for capture in tagged.captures_iter(content) {
+        if let Some(value) = capture.get(2) {
+            let value = value.as_str().trim();
+            if !value.is_empty() {
+                if !reasoning.is_empty() {
+                    reasoning.push_str("\n\n");
+                }
+                reasoning.push_str(value);
+            }
+        }
+    }
+    answer = tagged.replace_all(&answer, "").into_owned();
+
+    // Some model templates return an unfinished opening tag.
+    let opening = Regex::new(r"(?is)<(?:think|thinking|analysis|reasoning)\b[^>]*>")
+        .expect("valid opening reasoning regex");
+    if let Some(opening) = opening.find(&answer) {
+        let start = opening.start();
+        let tail = answer[opening.end()..].trim();
+        if !tail.is_empty() {
+            if !reasoning.is_empty() {
+                reasoning.push_str("\n\n");
+            }
+            reasoning.push_str(tail);
+        }
+        answer.truncate(start);
+    }
+    let stray = Regex::new(r"(?is)</?(?:think|thinking|analysis|reasoning)\b[^>]*>")
+        .expect("valid stray reasoning regex");
+    answer = stray.replace_all(&answer, "").into_owned();
+    (answer.trim().to_string(), reasoning.trim().to_string())
+}
+
+fn format_duration(seconds: f64) -> String {
+    let rounded = seconds.max(0.0).round() as u64;
+    if rounded < 60 {
+        format!("{rounded} сек")
+    } else {
+        format!("{} мин {} сек", rounded / 60, rounded % 60)
+    }
+}
+
 #[tauri::command]
 async fn agent_chat(
     request: AgentRequest,
@@ -687,6 +829,8 @@ async fn agent_chat(
         _ => 5,
     };
     let mut all_sources: Vec<SourceLink> = Vec::new();
+    let mut all_reasoning: Vec<String> = Vec::new();
+    let mut reasoning_seconds = 0.0;
 
     for _ in 0..max_steps {
         if is_cancelled(&state, &request.request_id).await {
@@ -694,6 +838,7 @@ async fn agent_chat(
             return Ok(());
         }
         emit_status(&app, &request.request_id, "thinking", "Думаю");
+        let reasoning_started = Instant::now();
         let reply = match ollama_step(&state, &request, &messages, &tools).await {
             Ok(reply) => reply,
             Err(error) => {
@@ -701,14 +846,37 @@ async fn agent_chat(
                 return Err(error);
             }
         };
+        reasoning_seconds += reasoning_started.elapsed().as_secs_f64();
+        let (clean_content, reasoning) = split_reasoning(&reply.message.content, &reply.message.thinking);
+        if !reasoning.is_empty() {
+            all_reasoning.push(reasoning);
+        }
         let calls = reply.message.tool_calls.clone();
         if calls.is_empty() {
             emit_status(&app, &request.request_id, "writing", "Формулирую ответ");
-            let answer = if reply.message.content.trim().is_empty() {
+            let answer = if clean_content.trim().is_empty() {
                 "Не получилось сформировать ответ. Попробуй переформулировать запрос или выбрать более сильную модель.".to_string()
             } else {
-                reply.message.content
+                clean_content
             };
+            if !all_reasoning.is_empty() {
+                app.emit(
+                    "agent-event",
+                    AgentEvent {
+                        request_id: request.request_id.clone(),
+                        kind: "reasoning".to_string(),
+                        phase: Some("thinking".to_string()),
+                        label: Some(format!("Думал {}", format_duration(reasoning_seconds))),
+                        content: Some(all_reasoning.join("\n\n")),
+                        sources: None,
+                        approval: None,
+                        tokens_per_second: None,
+                        reasoning_seconds: Some(reasoning_seconds),
+                        error: None,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+            }
             for chunk in chunk_text(&answer, 28) {
                 if is_cancelled(&state, &request.request_id).await {
                     return Ok(());
@@ -724,6 +892,7 @@ async fn agent_chat(
                         sources: None,
                         approval: None,
                         tokens_per_second: None,
+                        reasoning_seconds: None,
                         error: None,
                     },
                 )
@@ -748,6 +917,7 @@ async fn agent_chat(
                         sources: Some(deduplicate_sources(all_sources)),
                         approval: None,
                         tokens_per_second: None,
+                        reasoning_seconds: None,
                         error: None,
                     },
                 )
@@ -764,6 +934,7 @@ async fn agent_chat(
                     sources: None,
                     approval: None,
                     tokens_per_second: speed,
+                    reasoning_seconds: Some(reasoning_seconds),
                     error: None,
                 },
             )
@@ -774,7 +945,7 @@ async fn agent_chat(
 
         messages.push(json!({
             "role": reply.message.role,
-            "content": reply.message.content,
+            "content": clean_content,
             "tool_calls": calls.clone(),
         }));
         for call in calls {
@@ -865,6 +1036,7 @@ async fn ask_terminal_approval(
                 },
             }),
             tokens_per_second: None,
+            reasoning_seconds: None,
             error: None,
         },
     )
@@ -1237,6 +1409,59 @@ fn open_url(url: String) -> Result<(), String> {
     open::that(url).map_err(|error| error.to_string())
 }
 
+fn speech_chunks(input: &str, max_chars: usize) -> Vec<String> {
+    let clean = Regex::new(r"(?s)```.*?```")
+        .expect("valid code regex")
+        .replace_all(input, " Кодовый блок пропущен. ");
+    let clean = Regex::new(r"[*_#>`|]")
+        .expect("valid markdown regex")
+        .replace_all(&clean, "");
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    for sentence in clean.split_inclusive(['.', '!', '?', '\n']) {
+        if current.chars().count() + sentence.chars().count() > max_chars && !current.is_empty() {
+            chunks.push(current.trim().to_string());
+            current.clear();
+        }
+        current.push_str(sentence);
+    }
+    if !current.trim().is_empty() {
+        chunks.push(current.trim().to_string());
+    }
+    chunks
+}
+
+#[tauri::command]
+async fn synthesize_speech(text: String, voice: String, rate: f64) -> Result<String, String> {
+    if text.trim().is_empty() {
+        return Err("Нечего озвучивать".to_string());
+    }
+    init_tls();
+    let voice = if voice.trim().is_empty() {
+        "ru-RU-DmitryNeural"
+    } else {
+        voice.trim()
+    };
+    let rate_percent = ((rate.clamp(0.65, 1.45) - 1.0) * 100.0).round() as i32;
+    let rate = format!("{rate_percent:+}%");
+    let mut audio = Vec::new();
+    for chunk in speech_chunks(&text, 2800).into_iter().take(8) {
+        let events = EdgeTts
+            .synthesize(&chunk, voice, &rate, "ru-RU")
+            .await
+            .map_err(|error| format!("Нейронный голос недоступен: {error}"))?;
+        for event in events {
+            if let TtsEvent::Audio(bytes) = event {
+                audio.extend_from_slice(&bytes);
+            }
+        }
+    }
+    if audio.is_empty() {
+        return Err("Голосовой сервис не вернул аудио".to_string());
+    }
+    Ok(BASE64.encode(audio))
+}
+
 #[cfg(windows)]
 #[tauri::command]
 async fn transcribe_once() -> Result<String, String> {
@@ -1438,6 +1663,8 @@ pub fn run() {
             get_hardware_info,
             get_ollama_status,
             start_ollama,
+            get_comfyui_status,
+            open_comfyui,
             list_models,
             delete_model,
             pull_model,
@@ -1446,6 +1673,7 @@ pub fn run() {
             cancel_agent,
             extract_memories,
             open_url,
+            synthesize_speech,
             transcribe_once,
             check_for_update,
             download_update,
@@ -1481,6 +1709,48 @@ mod tests {
     fn answer_chunks_round_trip() {
         let answer = "Короткий ответ, который должен появляться плавно и без потери пробелов.";
         assert_eq!(chunk_text(answer, 12).join(""), answer);
+    }
+
+    #[test]
+    fn separates_explicit_reasoning_from_answer() {
+        let (answer, reasoning) = split_reasoning("Короткий финальный ответ.", "Сначала проверю факты.");
+        assert_eq!(answer, "Короткий финальный ответ.");
+        assert_eq!(reasoning, "Сначала проверю факты.");
+    }
+
+    #[test]
+    fn strips_tagged_reasoning_from_answer() {
+        let (answer, reasoning) = split_reasoning(
+            "<think>Скрытое рассуждение.</think>\n\n## Ответ\nГотово.",
+            "",
+        );
+        assert_eq!(answer, "## Ответ\nГотово.");
+        assert_eq!(reasoning, "Скрытое рассуждение.");
+        assert!(!answer.contains("think"));
+    }
+
+    #[test]
+    fn strips_unfinished_and_channel_reasoning() {
+        let (answer, reasoning) = split_reasoning(
+            "<|channel|>analysis Скрытый план<|channel|>final Итог.",
+            "",
+        );
+        assert_eq!(answer, "Итог.");
+        assert_eq!(reasoning, "Скрытый план");
+
+        let (answer, reasoning) = split_reasoning("Ответ.\n<thinking>Незакрытый хвост", "");
+        assert_eq!(answer, "Ответ.");
+        assert_eq!(reasoning, "Незакрытый хвост");
+    }
+
+    #[test]
+    fn speech_omits_code_blocks_and_splits_long_text() {
+        let source = "Сначала объяснение.\n```powershell\nRemove-Item C:\\\\Temp\n```\nПосле кода — вывод.";
+        let chunks = speech_chunks(source, 32);
+        let spoken = chunks.join(" ");
+        assert!(!spoken.contains("Remove-Item"));
+        assert!(spoken.contains("Кодовый блок пропущен"));
+        assert!(chunks.len() > 1);
     }
 
     #[test]
