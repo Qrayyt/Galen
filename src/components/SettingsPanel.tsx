@@ -3,6 +3,7 @@ import {
   Plus, RefreshCw, Shield, TerminalSquare, Trash2, Volume2,
 } from "lucide-react";
 import { useState } from "react";
+import { speakText } from "../lib/speech";
 import type { AppSettings, HardwareInfo, MemoryItem, OllamaStatus, UpdateInfo } from "../types";
 
 interface SettingsPanelProps {
@@ -29,6 +30,7 @@ export function SettingsPanel({
   settings, memories, hardware, status, update, updating, onSettings, onMemories, onRefresh, onInstallUpdate,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState({ label: "", value: "" });
+  const [voiceTest, setVoiceTest] = useState<"idle" | "playing" | "error">("idle");
 
   const patch = (next: Partial<AppSettings>) => onSettings({ ...settings, ...next });
   const addMemory = () => {
@@ -42,10 +44,10 @@ export function SettingsPanel({
   };
 
   const testVoice = () => {
-    speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance("Голос Галена работает.");
-    utterance.lang = "ru-RU";
-    speechSynthesis.speak(utterance);
+    setVoiceTest("playing");
+    void speakText("Привет. Это голос Галена. Я готов помочь.", settings)
+      .then(() => setVoiceTest("idle"))
+      .catch(() => setVoiceTest("error"));
   };
 
   return (
@@ -122,7 +124,14 @@ export function SettingsPanel({
           <div className="settings-section">
             <div className="section-heading"><span><Mic2 size={18} /></span><div><h2>Голос</h2><p>Ввод с микрофона и озвучивание ответов</p></div></div>
             <Toggle icon={<Volume2 size={18} />} title="Озвучивать ответы автоматически" detail="После окончания генерации" checked={settings.autoSpeak} onChange={(checked) => patch({ autoSpeak: checked })} />
-            <button className="settings-action" onClick={testVoice}><Volume2 size={16} /> Проверить голос</button>
+            <div className="voice-settings">
+              <label><span>Движок</span><select value={settings.voiceEngine} onChange={(event) => patch({ voiceEngine: event.target.value as AppSettings["voiceEngine"] })}><option value="neural">Galen Neural · естественный</option><option value="system">Системный · офлайн</option></select></label>
+              {settings.voiceEngine === "neural" && <label><span>Голос</span><select value={settings.voiceId} onChange={(event) => patch({ voiceId: event.target.value })}><option value="ru-RU-DmitryNeural">Дмитрий · мужской</option><option value="ru-RU-SvetlanaNeural">Светлана · женский</option></select></label>}
+              <label className="voice-rate"><span>Скорость <b>{settings.voiceRate.toFixed(2)}×</b></span><input type="range" min="0.75" max="1.25" step="0.01" value={settings.voiceRate} onChange={(event) => patch({ voiceRate: Number(event.target.value) })} /></label>
+            </div>
+            {settings.voiceEngine === "neural" && <p className="security-note"><Globe2 size={14} /> Для синтеза текст отправляется в Microsoft Edge TTS. Ключ и аккаунт не нужны. Системный режим работает офлайн.</p>}
+            <button className="settings-action" onClick={testVoice}><Volume2 size={16} /> {voiceTest === "playing" ? "Говорю…" : "Проверить голос"}</button>
+            {voiceTest === "error" && <p className="inline-error">Нейронный голос сейчас недоступен. Проверь интернет и повтори — на системного робота Galen больше молча не переключается.</p>}
           </div>
 
           <div className="settings-section">
@@ -146,12 +155,12 @@ export function SettingsPanel({
           </div>
           <div className="status-card">
             <strong>Обновления</strong>
-            <p>Текущая версия {update?.currentVersion ?? "0.3.0"}</p>
+            <p>Текущая версия {update?.currentVersion ?? "0.4.0"}</p>
             {update?.available ? (
               <button className="primary-button" disabled={updating} onClick={onInstallUpdate}>{updating ? "Загружаем…" : `Установить ${update.latestVersion}`}</button>
             ) : <span className="up-to-date"><Check size={14} /> Актуальная версия</span>}
           </div>
-          <div className="privacy-card"><Shield size={22} /><strong>Private by design</strong><p>Чаты, документы и память хранятся на этом компьютере. В интернет уходят только поисковые запросы и адреса страниц, когда веб включён.</p></div>
+          <div className="privacy-card"><Shield size={22} /><strong>Private by design</strong><p>Чаты, документы и память хранятся на этом компьютере. При включённых функциях наружу уходят веб-запросы и текст для нейронной озвучки — это всегда видно в настройках.</p></div>
         </aside>
       </div>
     </main>

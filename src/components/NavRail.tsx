@@ -1,5 +1,6 @@
 import { motion } from "motion/react";
-import { Bot, Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Trash2 } from "lucide-react";
+import { Bot, Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Trash2, X } from "lucide-react";
+import { useMemo, useState } from "react";
 import type { Conversation, ViewId } from "../types";
 
 interface NavRailProps {
@@ -17,6 +18,12 @@ interface NavRailProps {
 export function NavRail({
   view, open, chats, activeChatId, onToggle, onChange, onNewChat, onSelectChat, onDeleteChat,
 }: NavRailProps) {
+  const [query, setQuery] = useState("");
+  const visibleChats = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase("ru-RU");
+    return needle ? chats.filter((chat) => chat.title.toLocaleLowerCase("ru-RU").includes(needle)) : chats;
+  }, [chats, query]);
+
   return (
     <motion.aside
       className={`sidebar ${open ? "sidebar--open" : "sidebar--closed"}`}
@@ -35,14 +42,15 @@ export function NavRail({
       </button>
 
       {open && (
-        <div className="sidebar-search">
+        <label className="sidebar-search">
           <Search size={15} />
-          <span>История диалогов</span>
-        </div>
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Поиск по чатам" />
+          {query && <button onClick={() => setQuery("")} aria-label="Очистить поиск"><X size={14} /></button>}
+        </label>
       )}
 
       <div className="chat-history">
-        {open && chats.map((chat) => (
+        {open && visibleChats.map((chat) => (
           <div className={`chat-row ${view === "chat" && chat.id === activeChatId ? "active" : ""}`} key={chat.id}>
             <button onClick={() => onSelectChat(chat.id)}>
               <span>{chat.title}</span>
@@ -53,6 +61,7 @@ export function NavRail({
             </button>
           </div>
         ))}
+        {open && !visibleChats.length && <div className="chat-history-empty">Ничего не найдено</div>}
       </div>
 
       <nav className="sidebar-nav">
@@ -71,4 +80,3 @@ export function NavRail({
     </motion.aside>
   );
 }
-

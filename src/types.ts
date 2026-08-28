@@ -38,6 +38,8 @@ export interface ChatMessage {
   pending?: boolean;
   error?: boolean;
   tokensPerSecond?: number;
+  reasoning?: string;
+  reasoningSeconds?: number;
 }
 
 export interface Conversation {
@@ -67,6 +69,9 @@ export interface AppSettings {
   memoryEnabled: boolean;
   autoSpeak: boolean;
   workspaceDirectory: string;
+  voiceEngine: "neural" | "system";
+  voiceId: string;
+  voiceRate: number;
 }
 
 export interface OllamaModel {
@@ -81,6 +86,14 @@ export interface OllamaStatus {
   installed: boolean;
   running: boolean;
   version?: string;
+  error?: string;
+}
+
+export interface ContentEngineStatus {
+  installed: boolean;
+  running: boolean;
+  name: string;
+  endpoint: string;
   error?: string;
 }
 
@@ -106,6 +119,13 @@ export interface ModelCatalogItem {
   recommendedVramGb: number;
   tags: string[];
   speed: "Быстрая" | "Средняя" | "Тяжёлая";
+  category: "chat" | "vision" | "image" | "video" | "voice";
+  engine: "ollama" | "comfyui" | "builtin";
+  rating: number;
+  reviewCount: number;
+  quality: number;
+  capabilities: string[];
+  status?: "available" | "integration";
 }
 
 export interface PullProgress {
@@ -128,13 +148,14 @@ export interface ToolApproval {
 
 export interface AgentEvent {
   requestId: string;
-  kind: "status" | "token" | "sources" | "approval" | "done" | "error";
+  kind: "status" | "reasoning" | "token" | "sources" | "approval" | "done" | "error";
   phase?: AgentPhase;
   label?: string;
   content?: string;
   sources?: SourceLink[];
   approval?: ToolApproval;
   tokensPerSecond?: number;
+  reasoningSeconds?: number;
   error?: string;
 }
 
@@ -159,4 +180,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   memoryEnabled: true,
   autoSpeak: false,
   workspaceDirectory: "",
+  voiceEngine: "neural",
+  voiceId: "ru-RU-DmitryNeural",
+  voiceRate: 0.96,
 };

@@ -1,13 +1,15 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  AlertCircle, Check, CheckCircle2, Clipboard, ExternalLink, ShieldCheck,
+  AlertCircle, Brain, Check, CheckCircle2, ChevronDown, Clipboard, ExternalLink, ShieldCheck,
   TerminalSquare, Volume2, XCircle,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { native } from "../lib/native";
-import type { AgentPhase, ChatMessage, ToolApproval } from "../types";
+import { visibleAnswer } from "../lib/reasoning";
+import { speakText, stopSpeech } from "../lib/speech";
+import type { AgentPhase, AppSettings, ChatMessage, ToolApproval } from "../types";
 import { GalenOrb } from "./GalenOrb";
 
 interface ChatViewProps {
@@ -19,6 +21,7 @@ interface ChatViewProps {
   onOpenModels: () => void;
   onResolveApproval: (approved: boolean) => void;
   onSuggestion: (text: string) => void;
+  settings: AppSettings;
 }
 
 const SUGGESTIONS = [
@@ -28,11 +31,25 @@ const SUGGESTIONS = [
 ];
 
 export function ChatView({
-  messages, busy, hasModel, activity, approval, onOpenModels, onResolveApproval, onSuggestion,
+  messages, busy, hasModel, activity, approval, onOpenModels, onResolveApproval, onSuggestion, settings,
 }: ChatViewProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState<string | null>(null);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+  const [thinkingSeconds, setThinkingSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!busy) {
+      setThinkingSeconds(0);
+      return;
+    }
+    const started = Date.now();
+    const tick = () => setThinkingSeconds(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: busy ? "auto" : "smooth", block: "end" });
@@ -45,18 +62,16 @@ export function ChatView({
   };
 
   const speak = (message: ChatMessage) => {
-    speechSynthesis.cancel();
     if (speaking === message.id) {
+      stopSpeech();
       setSpeaking(null);
       return;
     }
-    const utterance = new SpeechSynthesisUtterance(message.content.replace(/[*_#`]/g, ""));
-    utterance.lang = "ru-RU";
-    utterance.rate = 1.02;
-    utterance.onend = () => setSpeaking(null);
-    utterance.onerror = () => setSpeaking(null);
     setSpeaking(message.id);
-    speechSynthesis.speak(utterance);
+    setSpeechError(null);
+    void speakText(message.content, settings)
+      .catch(() => setSpeechError(message.id))
+      .finally(() => setSpeaking(null));
   };
 
   if (!messages.length) {
@@ -106,6 +121,12 @@ export function ChatView({
                   </div>
                 )}
                 {message.error && <div className="message-error-label"><AlertCircle size={15} /> Ошибка</div>}
+                {!!message.reasoning && (
+                  <details className="reasoning-block">
+                    <summary><span><Brain size={15} /> Думал {formatReasoningTime(message.reasoningSeconds)}</span><ChevronDown size={14} /></summary>
+                    <div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.reasoning}</ReactMarkdown></div>
+                  </details>
+                )}
                 <div className="markdown">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -115,9 +136,11 @@ export function ChatView({
                           {children}<ExternalLink size={12} />
                         </button>
                       ),
+                      pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
+                      table: ({ children }) => <div className="table-scroll"><table>{children}</table></div>,
                     }}
                   >
-                    {message.content || (message.pending ? "" : "…")}
+                    {visibleAnswer(message.content) || (message.pending ? "" : "…")}
                   </ReactMarkdown>
                   {message.pending && !message.content && <span className="typing-dot"><i /><i /><i /></span>}
                 </div>
@@ -136,6 +159,7 @@ export function ChatView({
                       {copied === message.id ? <Check size={14} /> : <Clipboard size={14} />}
                     </button>
                     <button onClick={() => speak(message)} title="Озвучить"><Volume2 size={15} /></button>
+                    {speechError === message.id && <span>Нейронный голос недоступен</span>}
                     {message.tokensPerSecond && <span>{message.tokensPerSecond.toFixed(1)} ток/с</span>}
                   </div>
                 )}
@@ -148,7 +172,7 @@ export function ChatView({
           {busy && activity && (
             <motion.div className="agent-activity" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
               <div className="activity-orb"><span /></div>
-              <span>{activity.label}</span>
+              <span>{activity.phase === "thinking" ? `Думаю${thinkingSeconds ? ` · ${thinkingSeconds} сек` : ""}` : activity.label}</span>
               <i /><i /><i />
             </motion.div>
           )}
@@ -175,4 +199,17 @@ export function ChatView({
       </div>
     </main>
   );
+}
+
+function formatReasoningTime(seconds?: number): string {
+  if (!seconds) return "несколько секунд";
+  const value = Math.max(1, Math.round(seconds));
+  return value < 60 ? `${value} сек` : `${Math.floor(value / 60)} мин ${value % 60} сек`;
+}
+
+function CodeBlock({ children }: { children?: ReactNode }) {
+  const [copied, setCopied] = useState(false);
+  const content = String((children as { props?: { children?: unknown } })?.props?.children ?? "").replace(/\n$/, "");
+  const language = String((children as { props?: { className?: string } })?.props?.className ?? "").replace("language-", "") || "code";
+  return <div className="code-block"><div><span>{language}</span><button onClick={() => { void navigator.clipboard.writeText(content); setCopied(true); window.setTimeout(() => setCopied(false), 1200); }}>{copied ? <Check size={13} /> : <Clipboard size={13} />}{copied ? "Скопировано" : "Копировать"}</button></div><pre>{children}</pre></div>;
 }

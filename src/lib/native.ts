@@ -6,6 +6,7 @@ import type {
   AgentEvent,
   AppSettings,
   ChatMessage,
+  ContentEngineStatus,
   HardwareInfo,
   MemoryCandidate,
   MemoryItem,
@@ -57,6 +58,8 @@ export const native = {
 
   getOllamaStatus: (): Promise<OllamaStatus> => safeInvoke("get_ollama_status"),
   startOllama: (): Promise<OllamaStatus> => safeInvoke("start_ollama"),
+  getComfyStatus: (): Promise<ContentEngineStatus> => safeInvoke("get_comfyui_status"),
+  openComfy: (): Promise<void> => safeInvoke("open_comfyui"),
   listModels: (): Promise<OllamaModel[]> => safeInvoke("list_models"),
   deleteModel: (model: string): Promise<void> => safeInvoke("delete_model", { model }),
 
@@ -118,6 +121,8 @@ export const native = {
 
   openUrl: (url: string): Promise<void> => safeInvoke("open_url", { url }),
   transcribeOnce: (): Promise<string> => safeInvoke("transcribe_once"),
+  synthesizeSpeech: (text: string, voice: string, rate: number): Promise<string> =>
+    safeInvoke("synthesize_speech", { text, voice, rate }),
 
   checkUpdate: (): Promise<UpdateInfo> => safeInvoke("check_for_update"),
   downloadUpdate: (tag: string): Promise<string> => safeInvoke("download_update", { tag }),

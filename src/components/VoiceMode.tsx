@@ -1,9 +1,10 @@
 import { Mic, MicOff, PhoneOff, Volume2 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
-import type { AgentPhase, ChatMessage } from "../types";
+import type { AgentPhase, AppSettings, ChatMessage } from "../types";
 import { GalenOrb } from "./GalenOrb";
 import { isTauri, native } from "../lib/native";
+import { speakText, stopSpeech } from "../lib/speech";
 
 interface Recognition {
   lang: string;
@@ -17,39 +18,44 @@ interface Recognition {
 }
 
 export function VoiceMode({
-  open, busy, activity, lastAssistant, onClose, onSend,
+  open, busy, activity, lastAssistant, settings, onClose, onSend,
 }: {
   open: boolean;
   busy: boolean;
   activity: { phase: AgentPhase; label: string } | null;
   lastAssistant?: ChatMessage;
+  settings: AppSettings;
   onClose: () => void;
   onSend: (text: string) => void;
 }) {
   const [listening, setListening] = useState(false);
   const [transcript, setTranscript] = useState("");
+  const [voiceError, setVoiceError] = useState("");
   const recognitionRef = useRef<Recognition | null>(null);
   const spokenRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!open || !lastAssistant?.content || lastAssistant.pending || spokenRef.current === lastAssistant.id) return;
     spokenRef.current = lastAssistant.id;
-    speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(lastAssistant.content.replace(/[*_#`]/g, ""));
-    utterance.lang = "ru-RU";
-    utterance.rate = 1.03;
-    speechSynthesis.speak(utterance);
-  }, [lastAssistant, open]);
+    setVoiceError("");
+    void speakText(lastAssistant.content, settings)
+      .then(() => {
+        if (open && !busy) void start();
+      })
+      .catch((error) => {
+        setVoiceError(error instanceof Error ? error.message : "Не удалось озвучить ответ");
+      });
+  }, [lastAssistant, open, settings]);
 
   useEffect(() => () => {
     recognitionRef.current?.stop();
-    speechSynthesis.cancel();
+    stopSpeech();
   }, []);
 
-  const start = async () => {
+  async function start() {
     if (isTauri()) {
       setListening(true);
-      speechSynthesis.cancel();
+      stopSpeech();
       try {
         const text = await native.transcribeOnce();
         setTranscript("");
@@ -69,7 +75,7 @@ export function VoiceMode({
       window.alert("Распознавание речи недоступно в WebView2. Обнови Microsoft Edge WebView2 Runtime.");
       return;
     }
-    speechSynthesis.cancel();
+    stopSpeech();
     const recognition = new Constructor();
     recognition.lang = "ru-RU";
     recognition.continuous = false;
@@ -89,7 +95,7 @@ export function VoiceMode({
     recognitionRef.current = recognition;
     setListening(true);
     recognition.start();
-  };
+  }
 
   const stop = () => {
     recognitionRef.current?.stop();
@@ -101,11 +107,11 @@ export function VoiceMode({
       {open && (
         <motion.div className="voice-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
           <motion.div className="voice-panel" initial={{ y: 24, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 20, scale: 0.98 }}>
-            <div className="voice-top"><span>Голосовой режим</span><i>Локальный диалог</i></div>
+            <div className="voice-top"><span>Голосовой режим</span><i>Galen Voice</i></div>
             <div className="voice-orb"><GalenOrb active thinking={busy || listening} /></div>
             <div className="voice-state">
               <strong>{busy ? activity?.label ?? "Думаю" : listening ? "Слушаю" : "Нажми на микрофон"}</strong>
-              <p>{transcript || (lastAssistant?.content ? lastAssistant.content.slice(0, 160) : "Можно говорить естественно — Galen ответит голосом.")}</p>
+              <p className={voiceError ? "voice-error" : ""}>{voiceError || transcript || (lastAssistant?.content ? visibleVoicePreview(lastAssistant.content) : "Можно говорить естественно — Galen ответит голосом.")}</p>
             </div>
             <div className="voice-wave" aria-hidden>{Array.from({ length: 21 }, (_, index) => <i key={index} style={{ animationDelay: `${index * 34}ms` }} />)}</div>
             <div className="voice-actions">
@@ -114,10 +120,10 @@ export function VoiceMode({
               </button>
               <button onClick={() => {
                 if (!lastAssistant) return;
-                const utterance = new SpeechSynthesisUtterance(lastAssistant.content.replace(/[*_#\`]/g, ""));
-                utterance.lang = "ru-RU";
-                speechSynthesis.cancel();
-                speechSynthesis.speak(utterance);
+                setVoiceError("");
+                void speakText(lastAssistant.content, settings).catch((error) => {
+                  setVoiceError(error instanceof Error ? error.message : "Не удалось озвучить ответ");
+                });
               }}><Volume2 size={20} /></button>
               <button className="voice-end" onClick={onClose}><PhoneOff size={20} /></button>
             </div>
@@ -126,4 +132,8 @@ export function VoiceMode({
       )}
     </AnimatePresence>
   );
+}
+
+function visibleVoicePreview(content: string): string {
+  return content.replace(/```[\s\S]*?```/g, "").replace(/[*_#>`|]/g, "").trim().slice(0, 180);
 }
