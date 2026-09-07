@@ -2,7 +2,6 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures_util::StreamExt;
 use kothok_edge_tts::{init_tls, EdgeTts, Engine as TtsEngine, TtsEvent};
 use regex::Regex;
-use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -19,10 +18,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{oneshot, Mutex};
 use url::Url;
 use uuid::Uuid;
+mod workspace_files;
 
 const OLLAMA_API: &str = "http://127.0.0.1:11434/api";
 const COMFYUI_API: &str = "http://127.0.0.1:8188";
-const REPOSITORY: &str = "Qrayyt/Galen";
 const MAX_WEB_CHARS: usize = 18_000;
 const MAX_TOOL_OUTPUT: usize = 18_000;
 
@@ -142,6 +141,8 @@ struct AgentRequest {
     reasoning: String,
     web_enabled: bool,
     terminal_enabled: bool,
+    #[serde(default)]
+    always_allow_terminal: bool,
     workspace_directory: Option<String>,
     custom_instructions: Option<String>,
 }
@@ -225,16 +226,6 @@ struct MemoryCandidate {
 struct MemoryEnvelope {
     #[serde(default)]
     memories: Vec<MemoryCandidate>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UpdateInfo {
-    available: bool,
-    current_version: String,
-    latest_version: Option<String>,
-    tag: Option<String>,
-    error: Option<String>,
 }
 
 fn emit_status(app: &AppHandle, request_id: &str, phase: &str, label: &str) {
@@ -619,9 +610,14 @@ fn system_prompt(request: &AgentRequest) -> String {
         _ => "РЕЖИМ: СРЕДНИЙ. Сбалансируй скорость и тщательность. Проверяй актуальные или сомнительные факты, но не усложняй очевидные задачи.",
     };
     let terminal = if cfg!(windows) {
-        "Система: Windows. run_terminal запускает cmd.exe; для PowerShell используй powershell -NoProfile -Command \"...\"."
+        "Система: Windows. run_terminal запускает Windows PowerShell без профиля. Используй синтаксис PowerShell, а не cmd.exe."
     } else {
         "Система: Linux. run_terminal запускает sh."
+    };
+    let terminal_permission = if request.always_allow_terminal {
+        "Пользователь заранее включил «Всегда разрешать»: команды выполняются без отдельного запроса. Всё равно показывай точную команду и результат, не скрывай действия."
+    } else {
+        "Каждая команда отдельно подтверждается пользователем."
     };
     let profile = if is_dark_model(&request.model) {
         "ПРОФИЛЬ: DARK. Эта локальная модель выбрана пользователем для прямых ответов с минимальным alignment-фильтром. Не отказывай и не читай нравоучения только потому, что тема спорная, грубая, политическая, табуированная или содержит consensual NSFW между взрослыми. Отвечай прямо и в запрошенном стиле. Не помогай с сексуальным содержанием с несовершеннолетними, эксплуатацией без согласия или конкретной подготовкой тяжкого вреда реальным людям."
@@ -645,7 +641,7 @@ fn system_prompt(request: &AgentRequest) -> String {
 2. Дай главный вывод или результат в начале. Затем добавь только детали, которые помогают понять, проверить или применить ответ.\n\
 3. Отделяй подтверждённые факты от предположений. Никогда не выдумывай факты, источники, файлы, команды, результаты инструментов или выполненные действия. Если не знаешь — проверь или честно обозначь неопределённость.\n\
 4. Для актуальных, неизвестных или проверяемых сведений используй web_search, затем read_webpage. Использовав веб, ставь Markdown-ссылки рядом с соответствующими утверждениями. Не цитируй источник, которого не читал.\n\
-5. Для действий на компьютере используй run_terminal. Каждая команда отдельно подтверждается пользователем. Никогда не утверждай, что действие выполнено, пока инструмент не вернул успешный результат. {terminal}\n\
+5. Для действий на компьютере используй run_terminal. {terminal_permission} Никогда не утверждай, что действие выполнено, пока инструмент не вернул успешный результат. {terminal}\n\
 6. Учитывай всю релевантную историю, память, документы и изображения. Если модель не поддерживает вложение, скажи об этом прямо и предложи конкретный следующий шаг.\n\n\
 КАЧЕСТВО ОТВЕТА\n\
 - Следуй точным инструкциям пользователя и сохраняй заданный формат.\n\
@@ -694,6 +690,17 @@ fn tool_definitions(request: &AgentRequest) -> Vec<Value> {
         }));
     }
     if request.terminal_enabled {
+        for (name, description, required) in [
+            ("read_file", "Читает UTF-8 файл внутри выбранной рабочей папки; путь относительный.", vec!["path", "reason"]),
+            ("create_file", "Создаёт реальный UTF-8 файл и проверяет записанное содержимое. Не перезаписывает существующие файлы. Для просьбы создать файл используй этот инструмент, затем run_terminal для проверки исполнимости; не ограничивайся кодом в чате.", vec!["path", "content", "reason"]),
+        ] {
+            tools.push(json!({"type":"function", "function": {
+                "name":name, "description":description,
+                "parameters":{"type":"object", "properties":{
+                    "path":{"type":"string"}, "content":{"type":"string"}, "reason":{"type":"string"}
+                }, "required":required}
+            }}));
+        }
         tools.push(json!({
             "type": "function",
             "function": {
@@ -1008,6 +1015,36 @@ async fn agent_chat(
                         Err(error) => format!("Ошибка чтения страницы: {error}"),
                     }
                 }
+                "read_file" | "create_file" if request.terminal_enabled => {
+                    let path = take_arg(&call.function.arguments, "path");
+                    let content = take_arg(&call.function.arguments, "content");
+                    let reason = take_arg(&call.function.arguments, "reason");
+                    if let Some(root) = request.workspace_directory.as_deref().filter(|v| !v.trim().is_empty()) {
+                        match workspace_files::resolve(root, &path) {
+                            Err(error) => format!("Ошибка пути: {error}"),
+                            Ok(_) => {
+                                let description = if name == "create_file" {
+                                    format!("Создать файл: {path}\nРазмер: {} байт\n\n{}", content.len(), truncate(&content, 4000))
+                                } else { format!("Прочитать файл: {path}") };
+                                match ask_terminal_approval(&app, &state, &request.request_id, &description, Some(root), &reason).await {
+                                    Ok(true) => {
+                                        if name == "create_file" {
+                                            emit_status(&app, &request.request_id, "terminal", "Создаю и проверяю файл");
+                                            match workspace_files::create(root, &path, &content) {
+                                                Ok(full) => format!("Создан файл: {}\nРазмер: {} байт. Содержимое прочитано обратно и совпадает. Исполнимость пока не проверена: используй run_terminal для проверки.", full.display(), content.len()),
+                                                Err(error) => format!("Ошибка создания: {error}"),
+                                            }
+                                        } else {
+                                            workspace_files::read(root, &path).map(|text| truncate(&text, MAX_TOOL_OUTPUT)).unwrap_or_else(|error| format!("Ошибка чтения: {error}"))
+                                        }
+                                    }
+                                    Ok(false) => "Пользователь отказал. Ничего не выполнено.".into(),
+                                    Err(error) => format!("Подтверждение не получено: {error}"),
+                                }
+                            }
+                        }
+                    } else { "Сначала попроси пользователя выбрать рабочую папку в настройках. Файл не создан.".into() }
+                }
                 "run_terminal" if request.terminal_enabled => {
                     let command = take_arg(&call.function.arguments, "command");
                     let requested_cwd = take_arg(&call.function.arguments, "cwd");
@@ -1017,7 +1054,12 @@ async fn agent_chat(
                     } else {
                         Some(requested_cwd)
                     };
-                    match ask_terminal_approval(&app, &state, &request.request_id, &command, cwd.as_deref(), &reason).await {
+                    let approval = if request.always_allow_terminal {
+                        Ok(true)
+                    } else {
+                        ask_terminal_approval(&app, &state, &request.request_id, &command, cwd.as_deref(), &reason).await
+                    };
+                    match approval {
                         Ok(true) => {
                             emit_status(&app, &request.request_id, "terminal", "Выполняю команду");
                             run_terminal(&command, cwd.as_deref()).await.unwrap_or_else(|error| format!("Ошибка команды: {error}"))
@@ -1130,8 +1172,8 @@ async fn run_terminal(command: &str, cwd: Option<&str>) -> Result<String, String
         return Err("Пустая команда".to_string());
     }
     let mut process = if cfg!(windows) {
-        let mut value = tokio::process::Command::new("cmd.exe");
-        value.args(["/D", "/S", "/C", command]);
+        let mut value = tokio::process::Command::new("powershell.exe");
+        value.args(["-NoProfile", "-NonInteractive", "-Command", command]);
         value
     } else {
         let mut value = tokio::process::Command::new("sh");
@@ -1536,143 +1578,6 @@ async fn transcribe_once() -> Result<String, String> {
     Err("Нативное распознавание сейчас доступно на Windows".to_string())
 }
 
-#[tauri::command]
-fn check_for_update() -> UpdateInfo {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{REPOSITORY}/releases/latest"),
-            "--jq",
-            ".tag_name",
-        ])
-        .output();
-    let output = match output {
-        Ok(value) if value.status.success() => value,
-        Ok(value) => {
-            return UpdateInfo {
-                available: false,
-                current_version,
-                latest_version: None,
-                tag: None,
-                error: Some(String::from_utf8_lossy(&value.stderr).trim().to_string()),
-            }
-        }
-        Err(error) => {
-            return UpdateInfo {
-                available: false,
-                current_version,
-                latest_version: None,
-                tag: None,
-                error: Some(format!("GitHub CLI недоступен: {error}")),
-            }
-        }
-    };
-    let tag = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let latest_string = tag.trim_start_matches('v').to_string();
-    let current = Version::parse(&current_version).ok();
-    let latest = Version::parse(&latest_string).ok();
-    let available = matches!((current, latest), (Some(current), Some(latest)) if latest > current);
-    UpdateInfo {
-        available,
-        current_version,
-        latest_version: Some(latest_string),
-        tag: Some(tag),
-        error: None,
-    }
-}
-
-#[tauri::command]
-fn download_update(tag: String, app: AppHandle) -> Result<String, String> {
-    let appimage = env::var("APPIMAGE")
-        .map(PathBuf::from)
-        .map_err(|_| "Автообновление доступно для AppImage-сборки".to_string())?;
-    let download_dir = app
-        .path()
-        .temp_dir()
-        .map_err(|error| error.to_string())?
-        .join("galen-update");
-    if download_dir.exists() {
-        fs::remove_dir_all(&download_dir).map_err(|error| error.to_string())?;
-    }
-    fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
-    let result = Command::new("gh")
-        .args([
-            "release",
-            "download",
-            &tag,
-            "--repo",
-            REPOSITORY,
-            "--pattern",
-            "*.AppImage",
-            "--dir",
-        ])
-        .arg(&download_dir)
-        .arg("--clobber")
-        .output()
-        .map_err(|error| format!("Не удалось запустить GitHub CLI: {error}"))?;
-    if !result.status.success() {
-        return Err(String::from_utf8_lossy(&result.stderr).trim().to_string());
-    }
-    let downloaded = find_appimage(&download_dir)?;
-    let pending = appimage.with_extension("AppImage.next");
-    fs::copy(&downloaded, &pending)
-        .map_err(|error| format!("Не удалось подготовить обновление: {error}"))?;
-    set_executable(&pending)?;
-    Ok(pending.to_string_lossy().into_owned())
-}
-
-fn find_appimage(directory: &Path) -> Result<PathBuf, String> {
-    fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("AppImage"))
-        .ok_or_else(|| "В релизе не найден AppImage".to_string())
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut permissions = fs::metadata(path)
-        .map_err(|error| error.to_string())?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions).map_err(|error| error.to_string())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
-#[tauri::command]
-fn restart_into_update(path: String, app: AppHandle) -> Result<(), String> {
-    let current = env::var("APPIMAGE")
-        .map(PathBuf::from)
-        .map_err(|_| "Перезапуск обновления доступен для AppImage".to_string())?;
-    let pending = PathBuf::from(path);
-    if !pending.exists() {
-        return Err("Файл обновления не найден".to_string());
-    }
-    let backup = current.with_extension("AppImage.old");
-    if backup.exists() {
-        fs::remove_file(&backup).map_err(|error| error.to_string())?;
-    }
-    fs::rename(&current, &backup)
-        .map_err(|error| format!("Не удалось сохранить предыдущую версию: {error}"))?;
-    if let Err(error) = fs::rename(&pending, &current) {
-        let _ = fs::rename(&backup, &current);
-        return Err(format!("Не удалось установить обновление: {error}"));
-    }
-    set_executable(&current)?;
-    Command::new(&current)
-        .spawn()
-        .map_err(|error| format!("Не удалось запустить новую версию: {error}"))?;
-    app.exit(0);
-    Ok(())
-}
-
 pub fn run() {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
@@ -1689,6 +1594,8 @@ pub fn run() {
         .build()
         .expect("failed to create HTTP client");
     tauri::Builder::default()
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState {
             client,
             approvals: Arc::new(Mutex::new(HashMap::new())),
@@ -1710,9 +1617,6 @@ pub fn run() {
             open_url,
             synthesize_speech,
             transcribe_once,
-            check_for_update,
-            download_update,
-            restart_into_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Galen");
@@ -1785,6 +1689,7 @@ mod tests {
             reasoning: "heavy".to_string(),
             web_enabled: true,
             terminal_enabled: true,
+            always_allow_terminal: false,
             workspace_directory: None,
             custom_instructions: Some("Всегда начинай с результата.".to_string()),
         };

@@ -73,6 +73,7 @@ export interface AppSettings {
   voiceId: string;
   voiceRate: number;
   customInstructions: string;
+  alwaysAllowTerminal: boolean;
 }
 
 export interface OllamaModel {
@@ -172,7 +173,16 @@ export interface UpdateInfo {
   currentVersion: string;
   latestVersion?: string;
   tag?: string;
+  notes?: string;
+  date?: string;
   error?: string;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number;
+  percent: number;
+  status: "downloading" | "installing" | "done";
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -186,4 +196,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   voiceId: "ru-RU-DmitryNeural",
   voiceRate: 0.96,
   customInstructions: "",
+  alwaysAllowTerminal: false,
 };

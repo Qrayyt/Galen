@@ -26,3 +26,4 @@ export function WindowBar({ sidebarOpen, onMenu, title }: WindowBarProps) {
   );
 }
 
+

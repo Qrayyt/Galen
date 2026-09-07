@@ -84,3 +84,4 @@ export function imagePayloads(attachments: Attachment[]): string[] {
     .filter((attachment) => attachment.kind === "image" && attachment.dataUrl)
     .map((attachment) => attachment.dataUrl!.split(",", 2)[1] ?? "");
 }
+

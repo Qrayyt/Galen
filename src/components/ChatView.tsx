@@ -18,6 +18,8 @@ interface ChatViewProps {
   hasModel: boolean;
   activity: { phase: AgentPhase; label: string } | null;
   approval: ToolApproval | null;
+  approvalDecision: "approved" | "denied" | null;
+  approvalResolving: boolean;
   onOpenModels: () => void;
   onResolveApproval: (approved: boolean) => void;
   onSuggestion: (text: string) => void;
@@ -31,7 +33,8 @@ const SUGGESTIONS = [
 ];
 
 export function ChatView({
-  messages, busy, hasModel, activity, approval, onOpenModels, onResolveApproval, onSuggestion, settings,
+  messages, busy, hasModel, activity, approval, approvalDecision, approvalResolving,
+  onOpenModels, onResolveApproval, onSuggestion, settings,
 }: ChatViewProps) {
   const endRef = useRef<HTMLDivElement>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -189,10 +192,18 @@ export function ChatView({
               <pre>{approval.command}</pre>
               {approval.cwd && <small>Папка: {approval.cwd}</small>}
               <div className="approval-actions">
-                <button onClick={() => onResolveApproval(false)}><XCircle size={16} /> Отклонить</button>
-                <button className="approve" onClick={() => onResolveApproval(true)}><CheckCircle2 size={16} /> Выполнить</button>
+                <button disabled={approvalResolving} onClick={() => onResolveApproval(false)}><XCircle size={16} /> Отказать</button>
+                <button className="approve" disabled={approvalResolving} onClick={() => onResolveApproval(true)}><CheckCircle2 size={16} /> Подтвердить</button>
               </div>
             </motion.section>
+          )}
+        </AnimatePresence>
+        <AnimatePresence>
+          {approvalDecision && !approval && (
+            <motion.div className={`approval-result approval-result--${approvalDecision}`} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
+              {approvalDecision === "approved" ? <CheckCircle2 size={16} /> : <XCircle size={16} />}
+              {approvalDecision === "approved" ? "Действие подтверждено" : "Действие отклонено"}
+            </motion.div>
           )}
         </AnimatePresence>
         <div ref={endRef} />

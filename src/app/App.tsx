@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { ChatView } from "../components/ChatView";
 import { Composer } from "../components/Composer";
 import { ModelLibrary } from "../components/ModelLibrary";
@@ -8,7 +9,8 @@ import { VoiceMode } from "../components/VoiceMode";
 import { WindowBar } from "../components/WindowBar";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
-import { splitReasoningText, visibleAnswer } from "../lib/reasoning";
+import { AnswerStream } from "../lib/answer-stream";
+import { splitReasoningText } from "../lib/reasoning";
 import { speakText } from "../lib/speech";
 import {
   createConversation, loadActiveChatId, loadActiveModel, loadConversations, loadMemories,
@@ -19,6 +21,7 @@ import type {
   AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, HardwareInfo,
   MemoryCandidate, MemoryItem, OllamaModel, OllamaStatus, PullProgress, ReasoningLevel,
   ToolApproval, UpdateInfo, ViewId,
+  UpdateProgress,
 } from "../types";
 
 const makeId = () => crypto.randomUUID();
@@ -42,10 +45,14 @@ export function App() {
   const [request, setRequest] = useState<{ id: string; chatId: string } | null>(null);
   const [activity, setActivity] = useState<{ phase: AgentPhase; label: string } | null>(null);
   const [approval, setApproval] = useState<ToolApproval | null>(null);
+  const [approvalDecision, setApprovalDecision] = useState<"approved" | "denied" | null>(null);
+  const [approvalResolving, setApprovalResolving] = useState(false);
   const [voiceOpen, setVoiceOpen] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [updatePath, setUpdatePath] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const requestRef = useRef(request);
   requestRef.current = request;
 
@@ -99,7 +106,7 @@ export function App() {
   useEffect(() => {
     void refreshAll();
     void native.checkUpdate().then(setUpdate).catch((error) => setUpdate({
-      available: false, currentVersion: "0.4.1", error: error instanceof Error ? error.message : String(error),
+      available: false, currentVersion: "0.5.0", error: error instanceof Error ? error.message : String(error),
     }));
   }, [refreshAll]);
 
@@ -190,7 +197,9 @@ export function App() {
     setRequest({ id: requestId, chatId });
     setActivity({ phase: "thinking", label: "Думаю" });
     setApproval(null);
+    setApprovalDecision(null);
     let answerBuffer = "";
+    const answerStream = new AnswerStream();
     let completed = false;
 
     try {
@@ -219,12 +228,13 @@ export function App() {
             }));
           }
           if (event.kind === "token" && event.content) {
-            answerBuffer = visibleAnswer(`${answerBuffer}${event.content}`);
+            answerBuffer = answerStream.append(event.content);
+            const visibleContent = answerBuffer;
             updateChat(chatId, (chat) => ({
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, content: visibleAnswer(`${message.content}${event.content}`) }
+                ? { ...message, content: visibleContent }
                 : message),
             }));
           }
@@ -234,7 +244,10 @@ export function App() {
               messages: chat.messages.map((message) => message.id === assistantId ? { ...message, sources: event.sources } : message),
             }));
           }
-          if (event.kind === "approval" && event.approval && requestRef.current?.id === requestId) setApproval(event.approval);
+          if (event.kind === "approval" && event.approval && requestRef.current?.id === requestId) {
+            setApprovalDecision(null);
+            setApproval(event.approval);
+          }
           if (event.kind === "error") {
             updateChat(chatId, (chat) => ({
               ...chat,
@@ -294,10 +307,17 @@ export function App() {
     setApproval(null);
   };
 
-  const resolveApproval = (approved: boolean) => {
-    if (!approval) return;
-    void native.resolveApproval(approval.requestId, approval.approvalId, approved);
-    setApproval(null);
+  const resolveApproval = async (approved: boolean) => {
+    if (!approval || approvalResolving) return;
+    setApprovalResolving(true);
+    try {
+      await native.resolveApproval(approval.requestId, approval.approvalId, approved);
+      setApproval(null);
+      setApprovalDecision(approved ? "approved" : "denied");
+      window.setTimeout(() => setApprovalDecision(null), 1800);
+    } finally {
+      setApprovalResolving(false);
+    }
   };
 
   const newChat = () => {
@@ -328,14 +348,17 @@ export function App() {
   };
 
   const installUpdate = async () => {
-    if (updatePath) return native.restartIntoUpdate(updatePath);
-    if (!update?.tag) return;
+    if (!update?.available || updating) return;
     setUpdating(true);
+    setUpdateError(null);
     try {
-      const path = await native.downloadUpdate(update.tag);
-      setUpdatePath(path);
-      await native.restartIntoUpdate(path);
-    } finally { setUpdating(false); }
+      await native.installUpdate(setUpdateProgress);
+    } catch (error) {
+      setUpdateError(error instanceof Error ? error.message : String(error));
+      setUpdateProgress(null);
+    } finally {
+      setUpdating(false);
+    }
   };
 
   const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
@@ -381,6 +404,8 @@ export function App() {
               hasModel={Boolean(activeModel)}
               activity={request?.chatId === activeChat.id ? activity : null}
               approval={request?.chatId === activeChat.id ? approval : null}
+              approvalDecision={request?.chatId === activeChat.id ? approvalDecision : null}
+              approvalResolving={approvalResolving}
               settings={settings}
               onOpenModels={() => setView("models")}
               onResolveApproval={resolveApproval}
@@ -415,6 +440,8 @@ export function App() {
               status={status}
               update={update}
               updating={updating}
+              updateProgress={updateProgress}
+              updateError={updateError}
               onSettings={setSettings}
               onMemories={setMemories}
               onRefresh={() => void refreshAll()}
@@ -445,6 +472,25 @@ export function App() {
         onClose={() => setVoiceOpen(false)}
         onSend={(text) => void sendMessage(text)}
       />
+      <AnimatePresence>
+        {update?.available && !updateDismissed && (
+          <motion.div className="update-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <motion.section className="update-dialog" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }}>
+              <span className="eyebrow">Обновление Galen</span>
+              <h2>Доступна версия {update.latestVersion}</h2>
+              <p>{update.notes || "Новая стабильная версия готова к установке."}</p>
+              {updateProgress && (
+                <div className="update-progress"><span style={{ width: `${updateProgress.percent}%` }} /><small>{updateProgress.status === "installing" ? "Устанавливаем…" : `${updateProgress.percent}%`}</small></div>
+              )}
+              {updateError && <p className="inline-error">{updateError}</p>}
+              <div className="update-actions">
+                <button disabled={updating} onClick={() => setUpdateDismissed(true)}>Позже</button>
+                <button className="primary-button" disabled={updating} onClick={() => void installUpdate()}>{updating ? "Обновляем…" : "Обновить и перезапустить"}</button>
+              </div>
+            </motion.section>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

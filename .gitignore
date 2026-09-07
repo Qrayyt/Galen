@@ -7,5 +7,10 @@ src-tauri/target/
 .idea/
 .vscode/
 coverage/
+*.key
+*.key.pub
+.env
+.env.*
+!.env.example
 
 

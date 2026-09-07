@@ -51,3 +51,4 @@ export async function speakText(text: string, settings: AppSettings): Promise<vo
   utterance.rate = settings.voiceRate;
   speechSynthesis.speak(utterance);
 }
+

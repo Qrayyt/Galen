@@ -18,3 +18,4 @@ describe("reasoning isolation", () => {
     expect(result.reasoning).toBe("Скрыто");
   });
 });
+

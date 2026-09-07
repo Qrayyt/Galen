@@ -1,0 +1,73 @@
+name: Galen desktop test release
+on:
+  push:
+    branches: [test-release-0.5.0-beta.1]
+permissions:
+  contents: read
+concurrency:
+  group: galen-test-release
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bundle: nsis
+            artifact: windows-installer
+            path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          - os: ubuntu-24.04
+            bundle: appimage
+            artifact: linux-appimage
+            path: src-tauri/target/release/bundle/appimage/*.AppImage
+    runs-on: ${{ matrix.os }}
+    env:
+      VITE_TEST_RELEASE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: npm run tauri icon src-tauri/icons/icon.png
+      - run: npm run tauri build -- --bundles ${{ matrix.bundle }} --config src-tauri/tauri.test.conf.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.path }}
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Publish downloadable prerelease after both builds pass
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -d '' files < <(find installers -type f \( -name '*-setup.exe' -o -name '*.AppImage' \) -print0)
+          test "${#files[@]}" -eq 2
+          sha256sum "${files[@]}" > installers/SHA256SUMS.txt
+          gh release create v0.5.0-beta.1 "${files[@]}" installers/SHA256SUMS.txt --target "$GITHUB_SHA" --prerelease --title 'Galen 0.5.0-beta.1 — тест на ПК' --notes-file docs/TEST_RELEASE.md

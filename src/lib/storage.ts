@@ -35,10 +35,9 @@ export function loadConversations(): Conversation[] {
 export function saveConversations(chats: Conversation[]): void {
   const stable = chats.map((chat) => ({
     ...chat,
-    messages: chat.messages.filter((message) => !message.pending).slice(-250).map((message) => ({
-      ...message,
-      attachments: message.attachments?.map(({ dataUrl: _dataUrl, text: _text, ...attachment }) => attachment),
-    })),
+    // Attachment payloads are intentionally retained. Tauri updates replace
+    // application binaries, not the WebView profile that owns this storage.
+    messages: chat.messages.filter((message) => !message.pending).slice(-250),
   }));
   try { localStorage.setItem(CHATS_KEY, JSON.stringify(stable)); } catch { /* storage quota must not break chat */ }
 }

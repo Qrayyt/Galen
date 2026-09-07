@@ -248,3 +248,4 @@ function ModelRow({ model, index, variant, fit, installed, active, progress, dis
     </motion.article>
   );
 }
+

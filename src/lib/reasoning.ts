@@ -39,3 +39,4 @@ export function splitReasoningText(input: string): ReasoningSplit {
 export function visibleAnswer(input: string): string {
   return splitReasoningText(input).answer;
 }
+

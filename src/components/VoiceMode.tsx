@@ -137,3 +137,4 @@ export function VoiceMode({
 function visibleVoicePreview(content: string): string {
   return content.replace(/```[\s\S]*?```/g, "").replace(/[*_#>`|]/g, "").trim().slice(0, 180);
 }
+

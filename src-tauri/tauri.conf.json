@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Galen",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "identifier": "ru.galenite.galen",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,6 +32,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "category": "Productivity",
     "shortDescription": "Private local AI desktop",
@@ -46,6 +47,17 @@
     "linux": {
       "appimage": {
         "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYxQkM3Qjg4Q0JBMDEyQzQKUldURUVxRExpSHU4WWEranE0U3FzUEg4VldLaVlEdDN2cld3TVU3S3NIOGttY0Q2U0pXQkRTTm4K",
+      "endpoints": [
+        "https://github.com/Qrayyt/Galen/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

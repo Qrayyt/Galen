@@ -68,3 +68,4 @@ describe("model recommendation", () => {
     expect(recommendModel(workstation).dark).not.toBe(true);
   });
 });
+

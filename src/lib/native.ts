@@ -1,7 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { attachmentPrompt, imagePayloads } from "./attachments";
+import { isStableVersion, updateProgress } from "./update";
 import type {
   AgentEvent,
   AppSettings,
@@ -15,7 +19,10 @@ import type {
   PullProgress,
   ReasoningLevel,
   UpdateInfo,
+  UpdateProgress,
 } from "../types";
+
+let pendingUpdate: Update | null = null;
 
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
 
@@ -100,6 +107,7 @@ export const native = {
           reasoning,
           webEnabled: settings.webEnabled,
           terminalEnabled: settings.terminalEnabled,
+          alwaysAllowTerminal: settings.alwaysAllowTerminal,
           workspaceDirectory: settings.workspaceDirectory || null,
           customInstructions: settings.customInstructions.trim() || null,
         },
@@ -125,7 +133,56 @@ export const native = {
   synthesizeSpeech: (text: string, voice: string, rate: number): Promise<string> =>
     safeInvoke("synthesize_speech", { text, voice, rate }),
 
-  checkUpdate: (): Promise<UpdateInfo> => safeInvoke("check_for_update"),
-  downloadUpdate: (tag: string): Promise<string> => safeInvoke("download_update", { tag }),
-  restartIntoUpdate: (path: string): Promise<void> => safeInvoke("restart_into_update", { path }),
+  checkUpdate: async (): Promise<UpdateInfo> => {
+    if (import.meta.env.VITE_TEST_RELEASE === "true") {
+      return { available: false, currentVersion: "0.5.0-beta.1", error: "Тестовая версия: обновление устанавливается вручную" };
+    }
+    if (!isTauri()) return { available: false, currentVersion: "0.5.0" };
+    const currentVersion = await getVersion().catch(() => "0.5.0");
+    try {
+      pendingUpdate?.close().catch(() => undefined);
+      pendingUpdate = await check({ timeout: 30_000 });
+      if (!pendingUpdate) return { available: false, currentVersion };
+      if (!isStableVersion(pendingUpdate.version)) {
+        await pendingUpdate.close();
+        pendingUpdate = null;
+        return { available: false, currentVersion, error: "Канал обновлений вернул нестабильную версию" };
+      }
+      return {
+        available: true,
+        currentVersion: pendingUpdate.currentVersion,
+        latestVersion: pendingUpdate.version,
+        tag: `v${pendingUpdate.version}`,
+        notes: pendingUpdate.body,
+        date: pendingUpdate.date,
+      };
+    } catch (error) {
+      return {
+        available: false,
+        currentVersion,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  },
+
+  installUpdate: async (onProgress: (progress: UpdateProgress) => void): Promise<void> => {
+    if (import.meta.env.VITE_TEST_RELEASE === "true") throw new Error("В тестовой версии автообновление отключено");
+    const update = pendingUpdate ?? await check({ timeout: 30_000 });
+    if (!update) throw new Error("Новая версия больше недоступна");
+    let downloaded = 0;
+    let total = 0;
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        total = event.data.contentLength ?? 0;
+        onProgress(updateProgress(0, total));
+      } else if (event.event === "Progress") {
+        downloaded += event.data.chunkLength;
+        onProgress(updateProgress(downloaded, total));
+      } else {
+        onProgress(updateProgress(downloaded, total, "installing"));
+      }
+    }, { timeout: 10 * 60_000 });
+    onProgress(updateProgress(downloaded, total, "done"));
+    await relaunch();
+  },
 };

@@ -49,4 +49,6 @@ jobs:
 
       - name: Build Windows installer
         if: runner.os == 'Windows'
-        run: npm run tauri build -- --bundles nsis
+        # Pull requests never receive the updater signing key. The release
+        # workflow performs the signed build after this native build is green.
+        run: npm run tauri build -- --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'

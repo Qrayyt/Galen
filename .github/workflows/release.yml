@@ -3,11 +3,6 @@ name: Release Galen
 # Windows uploads first, then Linux, so release assets cannot race each other.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "README.md"
-      - "docs/**"
   workflow_dispatch:
 
 permissions:
@@ -78,28 +73,35 @@ jobs:
       - name: Generate native icons
         run: npm run tauri icon src-tauri/icons/icon.png
 
+      - name: Require updater signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is not configured"
+          }
+
       - name: Build and upload Windows installer
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.4 is a visual and intelligence upgrade for the local desktop agent.
+            Galen 0.5 adds signed in-app updates, managed local media generation and explicit agent permissions.
 
-            - web search and page reading without API keys
-            - separated reasoning with a collapsible timed thinking block
-            - terminal tools with an explicit approval gate
-            - multiple chats and editable long-term memory
-            - PDF, DOCX and image attachments
-            - natural Russian neural voice plus an optional offline system mode
-            - categorized Model Studio with hardware fit scores
-            - distinct Dark Models in every category, selected only by the user
-            - Galen Core Prompt v1 with editable persistent user instructions
-            - polished ChatGPT-like monochrome interface and Markdown rendering
+            - signed updates through GitHub Releases with automatic restart
+            - preserved chats, memory, settings and user instructions
+            - managed ComfyUI image and video workflows
+            - explicit Confirm / Deny action cards and optional persistent permission
           releaseDraft: true
           prerelease: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
           args: --bundles nsis
 
   linux:
@@ -151,28 +153,31 @@ jobs:
       - name: Generate native icons
         run: npm run tauri icon src-tauri/icons/icon.png
 
+      - name: Require updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
+
       - name: Build and upload Linux AppImage
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.4 is a visual and intelligence upgrade for the local desktop agent.
+            Galen 0.5 adds signed in-app updates, managed local media generation and explicit agent permissions.
 
-            - web search and page reading without API keys
-            - separated reasoning with a collapsible timed thinking block
-            - terminal tools with an explicit approval gate
-            - multiple chats and editable long-term memory
-            - PDF, DOCX and image attachments
-            - natural Russian neural voice plus an optional offline system mode
-            - categorized Model Studio with hardware fit scores
-            - distinct Dark Models in every category, selected only by the user
-            - Galen Core Prompt v1 with editable persistent user instructions
-            - polished ChatGPT-like monochrome interface and Markdown rendering
+            - signed updates through GitHub Releases with automatic restart
+            - preserved chats, memory, settings and user instructions
+            - managed ComfyUI image and video workflows
+            - explicit Confirm / Deny action cards and optional persistent permission
           releaseDraft: true
           prerelease: false
+          uploadUpdaterJson: true
           args: --bundles appimage
 
   publish:
@@ -180,14 +185,17 @@ jobs:
     if: needs.prepare.outputs.publish == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - name: Verify both platform assets
+      - name: Verify installers and signed updater assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           assets="$(gh release view "${{ needs.prepare.outputs.tag }}" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')"
           echo "$assets"
           grep -q -- '-setup.exe$' <<< "$assets"
+          grep -q -- '-setup.exe.sig$' <<< "$assets"
           grep -q -- '.AppImage$' <<< "$assets"
+          grep -q -- '.AppImage.sig$' <<< "$assets"
+          grep -q -- '^latest.json$' <<< "$assets"
 
       - name: Publish release
         env:

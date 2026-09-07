@@ -4,7 +4,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { speakText } from "../lib/speech";
-import type { AppSettings, HardwareInfo, MemoryItem, OllamaStatus, UpdateInfo } from "../types";
+import type { AppSettings, HardwareInfo, MemoryItem, OllamaStatus, UpdateInfo, UpdateProgress } from "../types";
 
 interface SettingsPanelProps {
   settings: AppSettings;
@@ -13,6 +13,8 @@ interface SettingsPanelProps {
   status: OllamaStatus | null;
   update: UpdateInfo | null;
   updating: boolean;
+  updateProgress: UpdateProgress | null;
+  updateError: string | null;
   onSettings: (settings: AppSettings) => void;
   onMemories: (memories: MemoryItem[]) => void;
   onRefresh: () => void;
@@ -27,7 +29,8 @@ const categories: Record<MemoryItem["category"], string> = {
 };
 
 export function SettingsPanel({
-  settings, memories, hardware, status, update, updating, onSettings, onMemories, onRefresh, onInstallUpdate,
+  settings, memories, hardware, status, update, updating, updateProgress, updateError,
+  onSettings, onMemories, onRefresh, onInstallUpdate,
 }: SettingsPanelProps) {
   const [draft, setDraft] = useState({ label: "", value: "" });
   const [voiceTest, setVoiceTest] = useState<"idle" | "playing" | "error">("idle");
@@ -71,9 +74,22 @@ export function SettingsPanel({
             />
             <Toggle
               icon={<TerminalSquare size={18} />} title="Терминал"
-              detail="Каждая команда требует отдельного подтверждения"
+              detail={settings.alwaysAllowTerminal ? "Команды выполняются автоматически" : "Каждая команда требует отдельного подтверждения"}
               checked={settings.terminalEnabled} onChange={(checked) => patch({ terminalEnabled: checked })}
             />
+            <Toggle
+              icon={<Shield size={18} />} title="Всегда разрешать"
+              detail="Не спрашивать подтверждение перед командами терминала"
+              checked={settings.alwaysAllowTerminal}
+              onChange={(checked) => patch({ alwaysAllowTerminal: checked })}
+            />
+            {settings.alwaysAllowTerminal && (
+              <div className="permission-warning">
+                <Shield size={16} />
+                <p><strong>Автоматические действия включены</strong><span>Galen сможет выполнять команды на компьютере без отдельного подтверждения.</span></p>
+                <button onClick={() => patch({ alwaysAllowTerminal: false })}>Сбросить разрешение</button>
+              </div>
+            )}
             <Toggle
               icon={<Database size={18} />} title="Память между чатами"
               detail="Galen предлагает сохранять полезные постоянные факты"
@@ -153,7 +169,7 @@ export function SettingsPanel({
               <span>Путь</span>
               <input value={settings.workspaceDirectory} onChange={(event) => patch({ workspaceDirectory: event.target.value })} placeholder="Например C:\\Users\\Имя\\Projects" />
             </label>
-            <p className="security-note"><Shield size={14} /> Путь не даёт автоматического разрешения: каждую команду всё равно нужно подтвердить.</p>
+            <p className="security-note"><Shield size={14} /> Путь задаёт только рабочую папку. Режим подтверждения управляется настройкой «Всегда разрешать».</p>
           </div>
         </section>
 
@@ -168,10 +184,12 @@ export function SettingsPanel({
           </div>
           <div className="status-card">
             <strong>Обновления</strong>
-            <p>Текущая версия {update?.currentVersion ?? "0.4.0"}</p>
+            <p>Текущая версия {update?.currentVersion ?? "0.5.0"}</p>
             {update?.available ? (
               <button className="primary-button" disabled={updating} onClick={onInstallUpdate}>{updating ? "Загружаем…" : `Установить ${update.latestVersion}`}</button>
-            ) : <span className="up-to-date"><Check size={14} /> Актуальная версия</span>}
+            ) : <span className="up-to-date">{update?.error ?? "Актуальная версия"}</span>}
+            {updateProgress && <div className="settings-update-progress"><i><b style={{ width: `${updateProgress.percent}%` }} /></i><span>{updateProgress.status === "installing" ? "Устанавливаем…" : `${updateProgress.percent}%`}</span></div>}
+            {updateError && <p className="inline-error">{updateError}</p>}
           </div>
           <div className="privacy-card"><Shield size={22} /><strong>Private by design</strong><p>Чаты, документы и память хранятся на этом компьютере. При включённых функциях наружу уходят веб-запросы и текст для нейронной озвучки — это всегда видно в настройках.</p></div>
         </aside>
