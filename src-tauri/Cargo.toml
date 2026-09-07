@@ -28,7 +28,8 @@ serde_json = "1"
 sysinfo = "0.37"
 tauri = { version = "2", features = [] }
 tauri-plugin-process = "2"
-tauri-plugin-updater = "2"
+# Keep the minor release aligned with @tauri-apps/plugin-updater in package-lock.json.
+tauri-plugin-updater = "~2.10"
 tokio = { version = "1", features = ["time", "sync", "process"] }
 url = "2"
 urlencoding = "2"
