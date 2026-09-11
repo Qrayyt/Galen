@@ -1,13 +1,14 @@
 export type ViewId = "chat" | "models" | "settings";
 export type MessageRole = "user" | "assistant" | "system";
 export type ReasoningLevel = "light" | "medium" | "heavy";
-export type AttachmentKind = "image" | "pdf" | "document" | "text";
+export type AttachmentKind = "image" | "video" | "pdf" | "document" | "text";
 export type AgentPhase =
   | "idle"
   | "thinking"
   | "searching"
   | "reading"
   | "terminal"
+  | "generating"
   | "writing"
   | "waiting"
   | "done";
@@ -98,6 +99,42 @@ export interface ContentEngineStatus {
   error?: string;
 }
 
+export interface GenerationStatus {
+  installed: boolean;
+  running: boolean;
+  root?: string;
+  endpoint: string;
+  imageReady: boolean;
+  videoI2vReady: boolean;
+  videoT2vReady: boolean;
+  qwenLoader?: string;
+  models: Record<string, string | null>;
+  missingImage: string[];
+  missingVideoI2v: string[];
+  missingVideoT2v: string[];
+  missingNodes: string[];
+  error?: string;
+}
+
+export interface GenerationInstallProgress {
+  component: string;
+  status: string;
+  downloaded: number;
+  total: number;
+  percent: number;
+  done: boolean;
+  error?: string;
+}
+
+export interface GeneratedMedia {
+  kind: "image" | "video";
+  name: string;
+  mime: string;
+  path: string;
+  dataUrl?: string;
+  engine: string;
+}
+
 export interface HardwareInfo {
   cpu: string;
   cpuCores: number;
@@ -150,12 +187,13 @@ export interface ToolApproval {
 
 export interface AgentEvent {
   requestId: string;
-  kind: "status" | "reasoning" | "token" | "sources" | "approval" | "done" | "error";
+  kind: "status" | "reasoning" | "token" | "sources" | "approval" | "media" | "done" | "error";
   phase?: AgentPhase;
   label?: string;
   content?: string;
   sources?: SourceLink[];
   approval?: ToolApproval;
+  media?: GeneratedMedia;
   tokensPerSecond?: number;
   reasoningSeconds?: number;
   error?: string;
