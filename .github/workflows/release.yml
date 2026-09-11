@@ -86,20 +86,19 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.4.2 makes the local agent substantially more autonomous and adds seamless in-app updates.
+            Galen 0.5 adds one-click local generation and a coding-agent workflow on top of the smarter autonomous runtime introduced in 0.4.2.
 
-            - Galen Core Prompt v2 with execution-first planning, verification and stronger tool use
-            - expanded agent tool loop: 4 / 8 / 14 steps for light, medium and heavy requests
-            - automatic update checks every 5 minutes with in-app download progress and silent restart
-            - Windows NSIS updates run silently without exposing the installer window
-            - Linux AppImage updates use staged replacement with backup and rollback
-            - web search and page reading without API keys
-            - terminal tools with an explicit approval gate
-            - multiple chats and editable long-term memory
-            - PDF, DOCX and image attachments
-            - natural Russian neural voice plus an optional offline system mode
-            - categorized Model Studio with hardware fit scores
-            - distinct Dark Models in every category, selected only by the user
+            - automatic discovery and one-click setup of local ComfyUI
+            - local Qwen image generation/editing pipeline with reference-image support
+            - local WAN 2.2 image-to-video and text-to-video pipelines
+            - automatic model discovery through ComfyUI plus local fallback search
+            - agent tools `generate_image` and `generate_video`
+            - workspace-confined coding tools for listing, reading and searching files
+            - approval-gated file writes and replacements
+            - coding-agent inspect → edit → test → fix loop
+            - expanded tool budgets up to 24 steps for heavy requests
+            - Galen Core Prompt v2 and execution-first tool use
+            - automatic in-app update checks with silent installer replacement
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -161,20 +160,19 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.4.2 makes the local agent substantially more autonomous and adds seamless in-app updates.
+            Galen 0.5 adds one-click local generation and a coding-agent workflow on top of the smarter autonomous runtime introduced in 0.4.2.
 
-            - Galen Core Prompt v2 with execution-first planning, verification and stronger tool use
-            - expanded agent tool loop: 4 / 8 / 14 steps for light, medium and heavy requests
-            - automatic update checks every 5 minutes with in-app download progress and silent restart
-            - Windows NSIS updates run silently without exposing the installer window
-            - Linux AppImage updates use staged replacement with backup and rollback
-            - web search and page reading without API keys
-            - terminal tools with an explicit approval gate
-            - multiple chats and editable long-term memory
-            - PDF, DOCX and image attachments
-            - natural Russian neural voice plus an optional offline system mode
-            - categorized Model Studio with hardware fit scores
-            - distinct Dark Models in every category, selected only by the user
+            - automatic discovery and one-click setup of local ComfyUI
+            - local Qwen image generation/editing pipeline with reference-image support
+            - local WAN 2.2 image-to-video and text-to-video pipelines
+            - automatic model discovery through ComfyUI plus local fallback search
+            - agent tools `generate_image` and `generate_video`
+            - workspace-confined coding tools for listing, reading and searching files
+            - approval-gated file writes and replacements
+            - coding-agent inspect → edit → test → fix loop
+            - expanded tool budgets up to 24 steps for heavy requests
+            - Galen Core Prompt v2 and execution-first tool use
+            - automatic in-app update checks with silent installer replacement
           releaseDraft: true
           prerelease: false
           args: --bundles appimage
