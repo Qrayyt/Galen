@@ -6,8 +6,10 @@ import { NavRail } from "../components/NavRail";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { VoiceMode } from "../components/VoiceMode";
 import { WindowBar } from "../components/WindowBar";
+import { UpdateToast } from "../components/UpdateToast";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
+import { useAppUpdater } from "../lib/updater";
 import { splitReasoningText, visibleAnswer } from "../lib/reasoning";
 import { speakText } from "../lib/speech";
 import {
@@ -18,7 +20,7 @@ import {
 import type {
   AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, HardwareInfo,
   MemoryCandidate, MemoryItem, OllamaModel, OllamaStatus, PullProgress, ReasoningLevel,
-  ToolApproval, UpdateInfo, ViewId,
+  ToolApproval, ViewId,
 } from "../types";
 
 const makeId = () => crypto.randomUUID();
@@ -43,9 +45,7 @@ export function App() {
   const [activity, setActivity] = useState<{ phase: AgentPhase; label: string } | null>(null);
   const [approval, setApproval] = useState<ToolApproval | null>(null);
   const [voiceOpen, setVoiceOpen] = useState(false);
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
-  const [updatePath, setUpdatePath] = useState<string | null>(null);
-  const [updating, setUpdating] = useState(false);
+  const { update, progress: updateProgress, updating, installUpdate } = useAppUpdater();
   const requestRef = useRef(request);
   requestRef.current = request;
 
@@ -98,9 +98,6 @@ export function App() {
 
   useEffect(() => {
     void refreshAll();
-    void native.checkUpdate().then(setUpdate).catch((error) => setUpdate({
-      available: false, currentVersion: "0.4.1", error: error instanceof Error ? error.message : String(error),
-    }));
   }, [refreshAll]);
 
   const selectModel = (model: string) => {
@@ -327,17 +324,6 @@ export function App() {
     setSettings((current) => ({ ...current, reasoning }));
   };
 
-  const installUpdate = async () => {
-    if (updatePath) return native.restartIntoUpdate(updatePath);
-    if (!update?.tag) return;
-    setUpdating(true);
-    try {
-      const path = await native.downloadUpdate(update.tag);
-      setUpdatePath(path);
-      await native.restartIntoUpdate(path);
-    } finally { setUpdating(false); }
-  };
-
   const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
     ?? activeModel ?? undefined;
   const activeVoiceId = settings.voiceEngine === "system"
@@ -436,6 +422,7 @@ export function App() {
           />
         )}
       </div>
+      <UpdateToast update={update} progress={updateProgress} updating={updating} onUpdate={() => void installUpdate()} />
       <VoiceMode
         open={voiceOpen}
         busy={busy}

@@ -15,6 +15,7 @@ import type {
   PullProgress,
   ReasoningLevel,
   UpdateInfo,
+  UpdateProgress,
 } from "../types";
 
 export const isTauri = (): boolean => "__TAURI_INTERNALS__" in window;
@@ -126,6 +127,14 @@ export const native = {
     safeInvoke("synthesize_speech", { text, voice, rate }),
 
   checkUpdate: (): Promise<UpdateInfo> => safeInvoke("check_for_update"),
-  downloadUpdate: (tag: string): Promise<string> => safeInvoke("download_update", { tag }),
+  downloadUpdate: async (tag: string, onProgress: (progress: UpdateProgress) => void): Promise<string> => {
+    let unlisten: UnlistenFn | undefined;
+    try {
+      unlisten = await listen<UpdateProgress>("update-progress", (event) => onProgress(event.payload));
+      return await safeInvoke<string>("download_update", { tag });
+    } finally {
+      unlisten?.();
+    }
+  },
   restartIntoUpdate: (path: string): Promise<void> => safeInvoke("restart_into_update", { path }),
 };
