@@ -171,6 +171,8 @@ export function SettingsPanel({
             <p>Текущая версия {update?.currentVersion ?? "0.4.0"}</p>
             {update?.available ? (
               <button className="primary-button" disabled={updating} onClick={onInstallUpdate}>{updating ? "Загружаем…" : `Установить ${update.latestVersion}`}</button>
+            ) : update?.error ? (
+              <p className="inline-error">Проверка обновлений: {update.error}</p>
             ) : <span className="up-to-date"><Check size={14} /> Актуальная версия</span>}
           </div>
           <div className="privacy-card"><Shield size={22} /><strong>Private by design</strong><p>Чаты, документы и память хранятся на этом компьютере. При включённых функциях наружу уходят веб-запросы и текст для нейронной озвучки — это всегда видно в настройках.</p></div>

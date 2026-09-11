@@ -172,6 +172,17 @@ export interface UpdateInfo {
   currentVersion: string;
   latestVersion?: string;
   tag?: string;
+  assetName?: string;
+  assetSize?: number;
+  error?: string;
+}
+
+export interface UpdateProgress {
+  status: string;
+  downloaded: number;
+  total: number;
+  percent: number;
+  done: boolean;
   error?: string;
 }
 
