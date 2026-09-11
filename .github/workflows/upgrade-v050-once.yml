@@ -9,11 +9,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: galen-v050-upgrade
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-and-validate:
@@ -69,13 +69,36 @@ jobs:
       - name: Test native runtime
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Commit validated Galen 0.5 implementation
+      - name: Prepare validated source artifact
         shell: bash
         run: |
           rm -f scripts/.upgrade_v050.part*
           rm -f .github/workflows/upgrade-v050-once.yml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "Galen 0.5 — smarter agent and seamless auto-updates"
-          git push origin HEAD:feat/galen-core-v2-auto-update
+          mkdir -p /tmp/galen-v050
+          for path in \
+            README.md \
+            package.json \
+            package-lock.json \
+            src-tauri/Cargo.toml \
+            src-tauri/Cargo.lock \
+            src-tauri/tauri.conf.json \
+            src-tauri/src/lib.rs \
+            .github/workflows/release.yml \
+            src/app/App.tsx \
+            src/types.ts \
+            src/lib/native.ts \
+            src/lib/updater.ts \
+            src/components/UpdateToast.tsx \
+            src/components/SettingsPanel.tsx \
+            src/styles.css; do
+            mkdir -p "/tmp/galen-v050/$(dirname "$path")"
+            cp "$path" "/tmp/galen-v050/$path"
+          done
+
+      - name: Upload validated Galen 0.5 source
+        uses: actions/upload-artifact@v4
+        with:
+          name: galen-v050-validated-source
+          path: /tmp/galen-v050
+          if-no-files-found: error
+          retention-days: 1
