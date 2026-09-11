@@ -282,9 +282,9 @@ pub async fn status(client: &Client) -> GenerationStatus {
     let image_keys = ["qwen_unet", "qwen_clip", "qwen_vae"];
     let i2v_keys = ["wan_i2v_high", "wan_i2v_low", "wan_clip", "wan_vae"];
     let t2v_keys = ["wan_t2v_high", "wan_t2v_low", "wan_clip", "wan_vae"];
-    let missing_image = image_keys.iter().filter(|key| models.get(*key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
-    let missing_video_i2v = i2v_keys.iter().filter(|key| models.get(*key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
-    let missing_video_t2v = t2v_keys.iter().filter(|key| models.get(*key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
+    let missing_image = image_keys.iter().filter(|key| models.get(**key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
+    let missing_video_i2v = i2v_keys.iter().filter(|key| models.get(**key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
+    let missing_video_t2v = t2v_keys.iter().filter(|key| models.get(**key).and_then(|v| v.as_ref()).is_none()).map(|v| v.to_string()).collect::<Vec<_>>();
     let video_base = ["UNETLoader", "ModelSamplingSD3", "CLIPLoader", "VAELoader", "CLIPTextEncode", "KSamplerAdvanced", "VAEDecode", "CreateVideo", "SaveVideo"];
     let video_nodes_ok = video_base.iter().all(|node| has_node(node));
     let image_nodes_ok = missing_nodes.is_empty();
