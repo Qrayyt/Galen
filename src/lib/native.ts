@@ -7,6 +7,9 @@ import type {
   AppSettings,
   ChatMessage,
   ContentEngineStatus,
+  GenerationInstallProgress,
+  GenerationStatus,
+  GeneratedMedia,
   HardwareInfo,
   MemoryCandidate,
   MemoryItem,
@@ -60,7 +63,23 @@ export const native = {
   getOllamaStatus: (): Promise<OllamaStatus> => safeInvoke("get_ollama_status"),
   startOllama: (): Promise<OllamaStatus> => safeInvoke("start_ollama"),
   getComfyStatus: (): Promise<ContentEngineStatus> => safeInvoke("get_comfyui_status"),
+  getGenerationStatus: (): Promise<GenerationStatus> => safeInvoke("get_generation_status"),
+  startComfy: (): Promise<GenerationStatus> => safeInvoke("start_comfyui_engine"),
   openComfy: (): Promise<void> => safeInvoke("open_comfyui"),
+  installComfy: async (onProgress: (progress: GenerationInstallProgress) => void): Promise<GenerationStatus> => {
+    let unlisten: UnlistenFn | undefined;
+    try {
+      unlisten = await listen<GenerationInstallProgress>("generation-install-progress", (event) => onProgress(event.payload));
+      return await safeInvoke<GenerationStatus>("install_comfyui");
+    } finally { unlisten?.(); }
+  },
+  installGenerationPack: async (pack: "image" | "video", onProgress: (progress: GenerationInstallProgress) => void): Promise<GenerationStatus> => {
+    let unlisten: UnlistenFn | undefined;
+    try {
+      unlisten = await listen<GenerationInstallProgress>("generation-install-progress", (event) => onProgress(event.payload));
+      return await safeInvoke<GenerationStatus>("install_generation_pack", { pack });
+    } finally { unlisten?.(); }
+  },
   listModels: (): Promise<OllamaModel[]> => safeInvoke("list_models"),
   deleteModel: (model: string): Promise<void> => safeInvoke("delete_model", { model }),
 
@@ -86,9 +105,13 @@ export const native = {
     onEvent: (event: AgentEvent) => void,
   ): Promise<void> => {
     let unlisten: UnlistenFn | undefined;
+    let unlistenMedia: UnlistenFn | undefined;
     try {
       unlisten = await listen<AgentEvent>("agent-event", (event) => {
         if (event.payload.requestId === requestId) onEvent(event.payload);
+      });
+      unlistenMedia = await listen<{ requestId: string; media: GeneratedMedia }>("generated-media", (event) => {
+        if (event.payload.requestId === requestId) onEvent({ requestId, kind: "media", media: event.payload.media });
       });
       await safeInvoke<void>("agent_chat", {
         request: {
@@ -107,6 +130,7 @@ export const native = {
       });
     } finally {
       unlisten?.();
+      unlistenMedia?.();
     }
   },
 
