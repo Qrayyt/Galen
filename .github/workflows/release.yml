@@ -86,7 +86,7 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.5 makes the local agent substantially more autonomous and adds seamless in-app updates.
+            Galen 0.4.2 makes the local agent substantially more autonomous and adds seamless in-app updates.
 
             - Galen Core Prompt v2 with execution-first planning, verification and stronger tool use
             - expanded agent tool loop: 4 / 8 / 14 steps for light, medium and heavy requests
@@ -161,7 +161,7 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.5 makes the local agent substantially more autonomous and adds seamless in-app updates.
+            Galen 0.4.2 makes the local agent substantially more autonomous and adds seamless in-app updates.
 
             - Galen Core Prompt v2 with execution-first planning, verification and stronger tool use
             - expanded agent tool loop: 4 / 8 / 14 steps for light, medium and heavy requests

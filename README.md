@@ -10,7 +10,7 @@
   ![Ollama](https://img.shields.io/badge/Ollama-local_models-111111?style=flat-square)
 </div>
 
-## Что умеет Galen 0.5.0
+## Что умеет Galen 0.4.2
 
 - Локальный агентный цикл на Ollama с вызовом инструментов.
 - Актуальный веб-поиск и чтение страниц без API-ключа.
