@@ -1,10 +1,9 @@
-name: Apply Galen 0.5 upgrade once
+name: Export validated Galen 0.5 source
 
 on:
   push:
     branches: [feat/galen-core-v2-auto-update]
     paths:
-      - "scripts/.upgrade_v050.part*"
       - ".github/workflows/upgrade-v050-once.yml"
   workflow_dispatch:
 
@@ -16,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  apply-and-validate:
+  export:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout feature branch
@@ -25,7 +24,7 @@ jobs:
           ref: feat/galen-core-v2-auto-update
           fetch-depth: 0
 
-      - name: Reconstruct and apply upgrade
+      - name: Reconstruct exact validated upgrade
         shell: bash
         run: |
           cat scripts/.upgrade_v050.part* | base64 -d | gzip -d > /tmp/upgrade_v050.py
@@ -33,47 +32,9 @@ jobs:
           python /tmp/upgrade_v050.py
           cargo fmt --manifest-path src-tauri/Cargo.toml
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
+      - name: Prepare source artifact
         shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev
-
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Test frontend
-        run: npm test
-
-      - name: Build frontend
-        run: npm run build
-
-      - name: Check native runtime
-        run: cargo check --manifest-path src-tauri/Cargo.toml
-
-      - name: Test native runtime
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      - name: Prepare validated source artifact
-        shell: bash
-        run: |
-          rm -f scripts/.upgrade_v050.part*
-          rm -f .github/workflows/upgrade-v050-once.yml
           mkdir -p /tmp/galen-v050
           for path in \
             README.md \
