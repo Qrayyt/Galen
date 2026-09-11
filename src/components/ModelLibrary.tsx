@@ -3,13 +3,13 @@ import {
   AudioLines, Check, ChevronRight, Cpu, Download, ExternalLink, Eye, Film, Gauge,
   HardDrive, Image, LoaderCircle, MessageCircle, RefreshCw, Search, Sparkles, Star, Trash2, X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   MODEL_CATALOG, MODEL_CATEGORIES, formatBytes, modelFit, recommendModel, scoreModel,
 } from "../data/models";
 import { native } from "../lib/native";
 import type {
-  ContentEngineStatus, HardwareInfo, ModelCatalogItem, OllamaModel, OllamaStatus, PullProgress,
+  ContentEngineStatus, GenerationStatus, HardwareInfo, ModelCatalogItem, OllamaModel, OllamaStatus, PullProgress,
 } from "../types";
 
 interface ModelLibraryProps {
@@ -64,8 +64,54 @@ export function ModelLibrary(props: ModelLibraryProps) {
   const [query, setQuery] = useState("");
   const [darkOnly, setDarkOnly] = useState(false);
   const [customModel, setCustomModel] = useState("");
+  const [generation, setGeneration] = useState<GenerationStatus | null>(null);
+  const [generationBusy, setGenerationBusy] = useState<"comfy" | "image" | "video" | null>(null);
+  const [generationProgress, setGenerationProgress] = useState("");
   const installedNames = useMemo(() => new Set(installed.map((model) => normalized(model.name))), [installed]);
   const categoryMeta = MODEL_CATEGORIES.find((entry) => entry.id === category)!;
+
+  const refreshGeneration = async () => {
+    try { setGeneration(await native.getGenerationStatus()); } catch { setGeneration(null); }
+  };
+
+  useEffect(() => {
+    if (category === "image" || category === "video") void refreshGeneration();
+  }, [category]);
+
+  const installComfy = async () => {
+    setGenerationBusy("comfy");
+    setGenerationProgress("Подготавливаем ComfyUI…");
+    try {
+      const next = await native.installComfy((progress) => {
+        setGenerationProgress(`${progress.component}: ${progress.status}${progress.total ? ` · ${progress.percent.toFixed(0)}%` : ""}`);
+      });
+      setGeneration(next);
+      onRetryComfy();
+    } finally {
+      setGenerationBusy(null);
+    }
+  };
+
+  const installGenerationPack = async (pack: "image" | "video") => {
+    setGenerationBusy(pack);
+    setGenerationProgress(pack === "image" ? "Подготавливаем Qwen image pack…" : "Подготавливаем WAN video pack…");
+    try {
+      let current = generation ?? await native.getGenerationStatus();
+      if (!current.installed) {
+        current = await native.installComfy((progress) => {
+          setGenerationProgress(`${progress.component}: ${progress.status}${progress.total ? ` · ${progress.percent.toFixed(0)}%` : ""}`);
+        });
+      }
+      if (!current.running) current = await native.startComfy();
+      const next = await native.installGenerationPack(pack, (progress) => {
+        setGenerationProgress(`${progress.component}: ${progress.status}${progress.total ? ` · ${progress.percent.toFixed(0)}%` : ""}`);
+      });
+      setGeneration(next);
+      onRetryComfy();
+    } finally {
+      setGenerationBusy(null);
+    }
+  };
 
   const models = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -76,10 +122,7 @@ export function ModelLibrary(props: ModelLibraryProps) {
 
   const regularModels = models.filter((model) => !model.dark);
   const darkModels = models.filter((model) => model.dark);
-
-  const recommended = hardware && regularModels.length
-    ? recommendModel(hardware, category)
-    : regularModels[0];
+  const recommended = hardware && regularModels.length ? recommendModel(hardware, category) : regularModels[0];
   const qualityPick = [...regularModels]
     .filter((model) => model.id !== recommended?.id && model.quality > (recommended?.quality ?? 0))
     .sort((a, b) => b.quality - a.quality)[0];
@@ -139,20 +182,37 @@ export function ModelLibrary(props: ModelLibraryProps) {
       )}
 
       {(category === "image" || category === "video") && (
-        <section className={`engine-banner ${comfyStatus?.running ? "engine-banner--online" : ""}`}>
+        <section className={`engine-banner ${generation?.running || comfyStatus?.running ? "engine-banner--online" : ""}`}>
           <div className="engine-status-dot" />
           <div>
-            <strong>{comfyStatus?.running ? "ComfyUI подключён" : "Для генерации нужен ComfyUI"}</strong>
-            <p>{comfyStatus?.running
-              ? "Galen видит локальный движок. Template Library устанавливает модели вместе с готовыми workflow."
-              : "Ollama генерирует текст и анализирует фото, но не создаёт изображения или видео. ComfyUI отвечает именно за генерацию."}</p>
+            <strong>{generation?.running || comfyStatus?.running ? "ComfyUI подключён" : generation?.installed || comfyStatus?.installed ? "ComfyUI установлен" : "Для генерации нужен ComfyUI"}</strong>
+            <p>{generation?.running || comfyStatus?.running
+              ? category === "image"
+                ? generation?.imageReady ? "Qwen pipeline готов — можно просить Galen генерировать изображения прямо в чате." : "ComfyUI работает. Установи готовый Qwen pack одной кнопкой."
+                : generation?.videoI2vReady && generation?.videoT2vReady ? "WAN 2.2 pipeline готов — доступны T2V и I2V прямо из чата." : "ComfyUI работает. Установи готовый WAN pack одной кнопкой."
+              : "Galen может сам установить локальный движок и готовые пайплайны — ручная настройка ComfyUI не нужна."}</p>
           </div>
           <div className="engine-actions">
-            <button className="subtle-button" onClick={onRetryComfy}><RefreshCw size={15} /> Проверить</button>
-            {comfyStatus?.running
-              ? <button className="black-button" onClick={onOpenComfy}>Открыть ComfyUI <ExternalLink size={14} /></button>
-              : <button className="black-button" onClick={() => void native.openUrl("https://www.comfy.org/download")}>Установить движок <ExternalLink size={14} /></button>}
+            <button className="subtle-button" onClick={() => { onRetryComfy(); void refreshGeneration(); }}><RefreshCw size={15} /> Проверить</button>
+            {!generation?.installed && !comfyStatus?.installed ? (
+              <button className="black-button" disabled={generationBusy !== null} onClick={() => void installComfy()}><Download size={14} /> {generationBusy === "comfy" ? "Устанавливаем…" : "Установить ComfyUI"}</button>
+            ) : !(generation?.running || comfyStatus?.running) ? (
+              <button className="black-button" disabled={generationBusy !== null} onClick={() => void native.startComfy().then(setGeneration)}><span>Запустить ComfyUI</span><ChevronRight size={14} /></button>
+            ) : (
+              <button className="black-button" onClick={onOpenComfy}>Открыть ComfyUI <ExternalLink size={14} /></button>
+            )}
+            {category === "image" && (
+              <button className="model-secondary" disabled={generationBusy !== null || Boolean(generation?.imageReady)} onClick={() => void installGenerationPack("image")}>
+                {generation?.imageReady ? "Qwen готов" : generationBusy === "image" ? "Ставим Qwen…" : "Установить Qwen pack"}
+              </button>
+            )}
+            {category === "video" && (
+              <button className="model-secondary" disabled={generationBusy !== null || Boolean(generation?.videoI2vReady && generation?.videoT2vReady)} onClick={() => void installGenerationPack("video")}>
+                {generation?.videoI2vReady && generation?.videoT2vReady ? "WAN готов" : generationBusy === "video" ? "Ставим WAN…" : "Установить WAN pack"}
+              </button>
+            )}
           </div>
+          {generationBusy && generationProgress && <p className="catalog-method"><LoaderCircle size={12} /> {generationProgress}</p>}
         </section>
       )}
 
@@ -233,8 +293,8 @@ function ModelRow({ model, index, variant, fit, installed, active, progress, dis
           <div className="row-progress"><div><span>{progress.status || "Скачиваем"}</span><strong>{Math.round(progress.percent)}%</strong></div><i><b style={{ width: `${progress.percent}%` }} /></i><small>{progress.total ? `${formatBytes(progress.completed)} из ${formatBytes(progress.total)}` : "Подготавливаем…"}</small></div>
         ) : isComfy ? (
           <div className="model-buttons">
-            <button className={comfyRunning ? "black-button" : "model-secondary"} onClick={comfyRunning ? onOpenComfy : () => void native.openUrl("https://www.comfy.org/download")}><span>{comfyRunning ? "Открыть ComfyUI" : "Установить ComfyUI"}</span><ChevronRight size={16} /></button>
-            <button className="model-secondary" onClick={() => void native.openUrl(comfyGuide)}><span>Модель и workflow</span><ExternalLink size={14} /></button>
+            <button className={comfyRunning ? "black-button" : "model-secondary"} onClick={comfyRunning ? onOpenComfy : onOpenSettings}><span>{comfyRunning ? "Открыть ComfyUI" : "Настроить генерацию"}</span><ChevronRight size={16} /></button>
+            <button className="model-secondary" onClick={() => void native.openUrl(comfyGuide)}><span>О модели</span><ExternalLink size={14} /></button>
           </div>
         ) : isVoice ? (
           <div className="model-buttons"><button className={active ? "model-secondary" : "black-button"} onClick={onSelectVoice}><span>{active ? "Используется" : "Подключить"}</span><ChevronRight size={16} /></button><button className="model-secondary" onClick={onOpenSettings}>Настроить</button></div>
