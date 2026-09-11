@@ -50,6 +50,13 @@ function apiMessages(messages: ChatMessage[]) {
     }));
 }
 
+function mediaAsStreamText(media: GeneratedMedia): string {
+  if (media.kind === "image" && media.dataUrl) {
+    return `\n\n![${media.name}](${media.dataUrl})\n\nСохранено: \`${media.path}\``;
+  }
+  return `\n\n${media.kind === "video" ? "Видео" : "Медиа"} сохранено: \`${media.path}\``;
+}
+
 export const native = {
   minimize: () => (isTauri() ? getCurrentWindow().minimize() : Promise.resolve()),
   toggleMaximize: () => (isTauri() ? getCurrentWindow().toggleMaximize() : Promise.resolve()),
@@ -111,7 +118,14 @@ export const native = {
         if (event.payload.requestId === requestId) onEvent(event.payload);
       });
       unlistenMedia = await listen<{ requestId: string; media: GeneratedMedia }>("generated-media", (event) => {
-        if (event.payload.requestId === requestId) onEvent({ requestId, kind: "media", media: event.payload.media });
+        if (event.payload.requestId !== requestId) return;
+        onEvent({
+          requestId,
+          kind: "token",
+          phase: "writing",
+          content: mediaAsStreamText(event.payload.media),
+          media: event.payload.media,
+        });
       });
       await safeInvoke<void>("agent_chat", {
         request: {
