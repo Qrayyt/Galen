@@ -1,6 +1,6 @@
 import {
   ArrowUp, Brain, ChevronDown, FileText, Globe2, Headphones, Image as ImageIcon,
-  LoaderCircle, Mic, Paperclip, Square, X,
+  LoaderCircle, Mic, Paperclip, Square, WandSparkles, X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
@@ -30,6 +30,7 @@ interface ComposerProps {
   onSend: (message: string, attachments: Attachment[]) => void;
   onStop: () => void;
   onVoiceMode: () => void;
+  onOpenStudio: () => void;
 }
 
 const LEVELS: Array<{ id: ReasoningLevel; label: string; detail: string }> = [
@@ -39,7 +40,7 @@ const LEVELS: Array<{ id: ReasoningLevel; label: string; detail: string }> = [
 ];
 
 export function Composer({
-  disabled, busy, modelLabel, reasoning, webEnabled, visionModelLabel, onReasoningChange, onSend, onStop, onVoiceMode,
+  disabled, busy, modelLabel, reasoning, webEnabled, visionModelLabel, onReasoningChange, onSend, onStop, onVoiceMode, onOpenStudio,
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -211,6 +212,7 @@ export function Composer({
             </button>
             <button className={listening ? "active" : ""} onClick={() => void toggleListening()} title="Голосовой ввод"><Mic size={18} /></button>
             <button onClick={onVoiceMode} title="Голосовой чат"><Headphones size={18} /></button>
+            <button onClick={onOpenStudio} title="Galen Studio"><WandSparkles size={18} /></button>
             {webEnabled && <span className="tool-indicator" title="Интернет включён"><Globe2 size={14} /> Веб</span>}
             {attachments.some((attachment) => attachment.kind === "image") && (
               <span className={`tool-indicator ${visionModelLabel ? "tool-indicator--vision" : "tool-indicator--warning"}`}>

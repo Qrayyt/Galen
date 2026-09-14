@@ -1,6 +1,6 @@
 [package]
 name = "galen"
-version = "0.7.0"
+version = "0.8.0"
 description = "Private local AI desktop for Windows and Arch Linux"
 authors = ["Galenite"]
 edition = "2021"

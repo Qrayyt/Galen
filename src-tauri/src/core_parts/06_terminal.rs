@@ -5,6 +5,7 @@ async fn ask_terminal_approval(
     command: &str,
     cwd: Option<&str>,
     reason: &str,
+    kind: &str,
 ) -> Result<bool, String> {
     let approval_id = Uuid::new_v4().to_string();
     let key = format!("{request_id}:{approval_id}");
@@ -14,8 +15,8 @@ async fn ask_terminal_approval(
     app.emit("agent-event", AgentEvent {
         request_id: request_id.to_string(), kind: "approval".to_string(), phase: Some("waiting".to_string()), label: Some("Нужно подтверждение".to_string()),
         content: None, sources: None,
-        approval: Some(ToolApproval { request_id: request_id.to_string(), approval_id: approval_id.clone(), command: command.to_string(), cwd: cwd.map(str::to_string), reason: if reason.is_empty() { None } else { Some(reason.to_string()) } }),
-        tokens_per_second: None, reasoning_seconds: None, error: None,
+        approval: Some(ToolApproval { request_id: request_id.to_string(), approval_id: approval_id.clone(), command: command.to_string(), cwd: cwd.map(str::to_string), reason: if reason.is_empty() { None } else { Some(reason.to_string()) }, kind: Some(kind.to_string()) }),
+        tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
     }).map_err(|error| error.to_string())?;
     let resolved = tokio::time::timeout(Duration::from_secs(300), receiver).await;
     state.approvals.lock().await.remove(&key);
@@ -39,24 +40,10 @@ async fn cancel_agent(request_id: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
-async fn run_terminal(command: &str, cwd: Option<&str>, timeout_seconds: u64) -> Result<String, String> {
-    if command.trim().is_empty() { return Err("Пустая команда".to_string()); }
-    let mut process = if cfg!(windows) {
-        let mut value = tokio::process::Command::new("cmd.exe"); value.args(["/D", "/S", "/C", command]); value
-    } else {
-        let mut value = tokio::process::Command::new("sh"); value.args(["-lc", command]); value
-    };
-    process.kill_on_drop(true);
-    if let Some(directory) = cwd.filter(|value| !value.trim().is_empty()) {
-        let path = PathBuf::from(directory);
-        if !path.is_dir() { return Err(format!("Рабочая папка не найдена: {directory}")); }
-        process.current_dir(path);
-    }
-    let timeout_seconds = timeout_seconds.clamp(10, 600);
-    let output = tokio::time::timeout(Duration::from_secs(timeout_seconds), process.output()).await
-        .map_err(|_| format!("Команда остановлена по таймауту {timeout_seconds} секунд"))?.map_err(|error| error.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("Код завершения: {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}", output.status.code().unwrap_or(-1), stdout, stderr);
-    Ok(truncate(&combined, MAX_TOOL_OUTPUT))
+async fn run_terminal(command: &str, cwd: Option<&str>, shell: &str, timeout_seconds: u64) -> Result<String, String> {
+    let result = execute_command_process(command, cwd, shell, timeout_seconds).await?;
+    Ok(format!(
+        "Shell: {}\nКод завершения: {}\nДлительность: {} мс\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+        result.shell, result.exit_code, result.duration_ms, result.stdout, result.stderr,
+    ))
 }

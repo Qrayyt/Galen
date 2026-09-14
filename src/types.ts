@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "models" | "settings";
+export type ViewId = "chat" | "studio" | "models" | "settings";
 export type MessageRole = "user" | "assistant" | "system";
 export type ReasoningLevel = "light" | "medium" | "heavy";
 export type AttachmentKind = "image" | "video" | "pdf" | "document" | "text";
@@ -44,6 +44,16 @@ export interface ChatMessage {
   usedModel?: string;
   reasoning?: string;
   reasoningSeconds?: number;
+  toolRuns?: ToolRun[];
+}
+
+export interface ToolRun {
+  id: string;
+  name: string;
+  label: string;
+  status: "running" | "success" | "error" | "denied";
+  detail?: string;
+  durationMs?: number;
 }
 
 export interface Conversation {
@@ -70,6 +80,7 @@ export interface AppSettings {
   reasoning: ReasoningLevel;
   webEnabled: boolean;
   terminalEnabled: boolean;
+  computerEnabled: boolean;
   memoryEnabled: boolean;
   autoSpeak: boolean;
   workspaceDirectory: string;
@@ -139,6 +150,25 @@ export interface GeneratedMedia {
   engine: string;
 }
 
+export interface InstalledApplication {
+  id: string;
+  name: string;
+  path: string;
+  source: string;
+}
+
+export interface CommandRunResult {
+  command: string;
+  shell: string;
+  cwd?: string;
+  exitCode: number;
+  success: boolean;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+  truncated: boolean;
+}
+
 export interface HardwareInfo {
   cpu: string;
   cpuCores: number;
@@ -187,11 +217,12 @@ export interface ToolApproval {
   command: string;
   cwd?: string;
   reason?: string;
+  kind?: "terminal" | "file" | "application";
 }
 
 export interface AgentEvent {
   requestId: string;
-  kind: "status" | "reasoning" | "token" | "sources" | "approval" | "media" | "done" | "error";
+  kind: "status" | "reasoning" | "token" | "sources" | "approval" | "tool" | "media" | "done" | "error";
   phase?: AgentPhase;
   label?: string;
   content?: string;
@@ -201,6 +232,7 @@ export interface AgentEvent {
   tokensPerSecond?: number;
   reasoningSeconds?: number;
   error?: string;
+  tool?: ToolRun;
 }
 
 export interface MemoryCandidate {
@@ -232,6 +264,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   reasoning: "medium",
   webEnabled: true,
   terminalEnabled: true,
+  computerEnabled: true,
   memoryEnabled: true,
   autoSpeak: false,
   workspaceDirectory: "",

@@ -5,6 +5,7 @@ import { ContextPanel } from "../components/ContextPanel";
 import { ModelLibrary } from "../components/ModelLibrary";
 import { NavRail } from "../components/NavRail";
 import { SettingsPanel } from "../components/SettingsPanel";
+import { StudioPanel } from "../components/StudioPanel";
 import { VoiceMode } from "../components/VoiceMode";
 import { WindowBar } from "../components/WindowBar";
 import { UpdateToast } from "../components/UpdateToast";
@@ -20,7 +21,7 @@ import {
   saveActiveVisionModel, saveSettings, titleFromMessage,
 } from "../lib/storage";
 import type {
-  AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, HardwareInfo,
+  AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, GenerationStatus, HardwareInfo,
   MemoryCandidate, MemoryItem, OllamaModel, OllamaStatus, PullProgress, ReasoningLevel,
   ToolApproval, ViewId,
 } from "../types";
@@ -37,6 +38,7 @@ export function App() {
   const [hardware, setHardware] = useState<HardwareInfo | null>(null);
   const [status, setStatus] = useState<OllamaStatus | null>(null);
   const [comfyStatus, setComfyStatus] = useState<ContentEngineStatus | null>(null);
+  const [generationStatus, setGenerationStatus] = useState<GenerationStatus | null>(null);
   const [installed, setInstalled] = useState<OllamaModel[]>([]);
   const [activeModel, setActiveModel] = useState<string | null>(() => loadActiveModel());
   const [activeVisionModel, setActiveVisionModel] = useState<string | null>(() => loadActiveVisionModel());
@@ -96,6 +98,7 @@ export function App() {
     await Promise.all([
       native.getHardware().then(setHardware).catch(() => undefined),
       native.getComfyStatus().then(setComfyStatus).catch(() => undefined),
+      native.getGenerationStatus().then(setGenerationStatus).catch(() => undefined),
       refreshRuntime(),
     ]);
   }, [refreshRuntime]);
@@ -256,6 +259,20 @@ export function App() {
             }));
           }
           if (event.kind === "approval" && event.approval && requestRef.current?.id === requestId) setApproval(event.approval);
+          if (event.kind === "tool" && event.tool) {
+            updateChat(chatId, (chat) => ({
+              ...chat,
+              messages: chat.messages.map((message) => message.id === assistantId
+                ? {
+                    ...message,
+                    toolRuns: [
+                      ...(message.toolRuns ?? []).filter((tool) => tool.id !== event.tool!.id),
+                      event.tool!,
+                    ],
+                  }
+                : message),
+            }));
+          }
           if (event.kind === "error") {
             updateChat(chatId, (chat) => ({
               ...chat,
@@ -395,7 +412,7 @@ export function App() {
         <WindowBar
           sidebarOpen={sidebarOpen}
           onMenu={() => setSidebarOpen(true)}
-          title={view === "chat" ? activeChat?.title : view === "models" ? "Модели" : "Настройки"}
+          title={view === "chat" ? activeChat?.title : view === "studio" ? "Studio" : view === "models" ? "Модели" : "Настройки"}
           subtitle={view === "chat" ? `Galen · ${activeLabel ?? "локальная модель"}` : undefined}
         />
         <div className="workspace-body">
@@ -435,6 +452,15 @@ export function App() {
                   onOpenSettings={() => setView("settings")}
                 />
               )}
+              {view === "studio" && (
+                <StudioPanel
+                  generation={generationStatus}
+                  settings={settings}
+                  onRefresh={() => void refreshAll()}
+                  onOpenModels={() => setView("models")}
+                  onAskGalen={(prompt) => { setView("chat"); void sendMessage(prompt); }}
+                />
+              )}
               {view === "settings" && (
                 <SettingsPanel
                   settings={settings}
@@ -462,6 +488,7 @@ export function App() {
                 onSend={(message, attachments) => void sendMessage(message, attachments)}
                 onStop={stopAgent}
                 onVoiceMode={() => setVoiceOpen(true)}
+                onOpenStudio={() => setView("studio")}
               />
             )}
           </div>
@@ -475,6 +502,7 @@ export function App() {
               lastResponse={lastAssistant}
               onOpenModels={() => setView("models")}
               onOpenSettings={() => setView("settings")}
+              onOpenStudio={() => setView("studio")}
               onRefresh={() => void refreshAll()}
               onAction={(prompt) => void sendMessage(prompt)}
             />

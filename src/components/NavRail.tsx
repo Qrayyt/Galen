@@ -1,5 +1,5 @@
 import { motion } from "motion/react";
-import { Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Trash2, X } from "lucide-react";
+import { Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Sparkles, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import galenLogo from "../assets/galen.svg";
 import type { Conversation, ViewId } from "../types";
@@ -51,6 +51,9 @@ export function NavRail({
       )}
 
       <nav className="sidebar-nav sidebar-nav--primary">
+        <button className={view === "studio" ? "active" : ""} onClick={() => onChange("studio")} title="Studio">
+          <Sparkles size={18} /><span>Studio</span>
+        </button>
         <button className={view === "models" ? "active" : ""} onClick={() => onChange("models")} title="Модели">
           <Boxes size={18} /><span>Модели</span>
         </button>

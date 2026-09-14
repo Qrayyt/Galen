@@ -50,14 +50,14 @@ async fn agent_chat(
                 app.emit("agent-event", AgentEvent {
                     request_id: request.request_id.clone(), kind: "reasoning".to_string(), phase: Some("thinking".to_string()),
                     label: Some(format!("Думал {}", format_duration(reasoning_seconds))), content: Some(all_reasoning.join("\n\n")),
-                    sources: None, approval: None, tokens_per_second: None, reasoning_seconds: Some(reasoning_seconds), error: None,
+                    sources: None, approval: None, tokens_per_second: None, reasoning_seconds: Some(reasoning_seconds), error: None, tool: None,
                 }).map_err(|error| error.to_string())?;
             }
             for chunk in chunk_text(&answer, 28) {
                 if is_cancelled(&state, &request.request_id).await { return Ok(()); }
                 app.emit("agent-event", AgentEvent {
                     request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
-                    content: Some(chunk), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                    content: Some(chunk), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
                 }).map_err(|error| error.to_string())?;
                 tokio::time::sleep(Duration::from_millis(8)).await;
             }
@@ -68,12 +68,12 @@ async fn agent_chat(
             if !all_sources.is_empty() {
                 app.emit("agent-event", AgentEvent {
                     request_id: request.request_id.clone(), kind: "sources".to_string(), phase: None, label: None, content: None,
-                    sources: Some(deduplicate_sources(all_sources)), approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                    sources: Some(deduplicate_sources(all_sources)), approval: None, tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
                 }).map_err(|error| error.to_string())?;
             }
             app.emit("agent-event", AgentEvent {
                 request_id: request.request_id.clone(), kind: "done".to_string(), phase: Some("done".to_string()), label: Some("Готово".to_string()),
-                content: None, sources: None, approval: None, tokens_per_second: speed, reasoning_seconds: Some(reasoning_seconds), error: None,
+                content: None, sources: None, approval: None, tokens_per_second: speed, reasoning_seconds: Some(reasoning_seconds), error: None, tool: None,
             }).map_err(|error| error.to_string())?;
             state.cancelled.lock().await.remove(&request.request_id);
             return Ok(());
