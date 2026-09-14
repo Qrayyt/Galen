@@ -1,5 +1,5 @@
 import {
-  Bot, Check, Database, Globe2, HardDrive, MemoryStick, Mic2,
+  AppWindow, Bot, Check, Database, Globe2, HardDrive, MemoryStick, Mic2,
   Plus, RefreshCw, Shield, TerminalSquare, Trash2, Volume2,
 } from "lucide-react";
 import { useState } from "react";
@@ -73,6 +73,11 @@ export function SettingsPanel({
               icon={<TerminalSquare size={18} />} title="Терминал"
               detail="Каждая команда требует отдельного подтверждения"
               checked={settings.terminalEnabled} onChange={(checked) => patch({ terminalEnabled: checked })}
+            />
+            <Toggle
+              icon={<AppWindow size={18} />} title="Запуск приложений"
+              detail="Galen ищет программы локально и спрашивает перед открытием"
+              checked={settings.computerEnabled} onChange={(checked) => patch({ computerEnabled: checked })}
             />
             <Toggle
               icon={<Database size={18} />} title="Память между чатами"
@@ -168,7 +173,7 @@ export function SettingsPanel({
           </div>
           <div className="status-card">
             <strong>Обновления</strong>
-            <p>Текущая версия {update?.currentVersion ?? "0.4.0"}</p>
+            <p>Текущая версия {update?.currentVersion ?? "0.8.0"}</p>
             {update?.available ? (
               <button className="primary-button" disabled={updating} onClick={onInstallUpdate}>{updating ? "Загружаем…" : `Установить ${update.latestVersion}`}</button>
             ) : update?.error ? (

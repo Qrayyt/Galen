@@ -86,15 +86,14 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.7 makes local image work frictionless and exposes real performance instead of hiding it.
+            Galen 0.8 turns the local assistant into a visible action workspace.
 
-            - paste images from the clipboard or drag files directly into the composer
-            - normalize oversized and uncommon image formats before sending them to Ollama
-            - show time-to-first-token, generation speed, and the model used for every answer
-            - display a clear system-ready state and last-response performance in the context panel
-            - parallel Ollama capability discovery for faster startup with multiple installed models
-            - tested Vision routing that trusts real model capabilities with safe family-name fallback
-            - smaller 2K streaming context for short Light-mode conversations
+            - direct local image and video generation in the new Galen Studio
+            - discover and launch installed Windows/Linux applications with approval gates
+            - PowerShell, CMD, and sh console with exit code, stdout, stderr, and duration
+            - visible action receipts for agent tools instead of black-box execution
+            - intent-routed tools and compact Core Prompt v3 for faster small local models
+            - polished monochrome Studio interface with readiness diagnostics
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -156,15 +155,14 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.7 makes local image work frictionless and exposes real performance instead of hiding it.
+            Galen 0.8 turns the local assistant into a visible action workspace.
 
-            - paste images from the clipboard or drag files directly into the composer
-            - normalize oversized and uncommon image formats before sending them to Ollama
-            - show time-to-first-token, generation speed, and the model used for every answer
-            - display a clear system-ready state and last-response performance in the context panel
-            - parallel Ollama capability discovery for faster startup with multiple installed models
-            - tested Vision routing that trusts real model capabilities with safe family-name fallback
-            - smaller 2K streaming context for short Light-mode conversations
+            - direct local image and video generation in the new Galen Studio
+            - discover and launch installed Windows/Linux applications with approval gates
+            - PowerShell, CMD, and sh console with exit code, stdout, stderr, and duration
+            - visible action receipts for agent tools instead of black-box execution
+            - intent-routed tools and compact Core Prompt v3 for faster small local models
+            - polished monochrome Studio interface with readiness diagnostics
           releaseDraft: true
           prerelease: false
           args: --bundles appimage

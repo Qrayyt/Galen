@@ -1,4 +1,4 @@
-import { ChevronRight, Eye, FileSearch, Gauge, Globe2, MonitorCog, RefreshCw, Settings2, Sparkles, TerminalSquare, Timer } from "lucide-react";
+import { AppWindow, ChevronRight, Eye, FileSearch, Gauge, Globe2, MonitorCog, RefreshCw, Settings2, Sparkles, TerminalSquare, Timer } from "lucide-react";
 import galenLogo from "../assets/galen.svg";
 import type { AppSettings, ChatMessage, ContentEngineStatus, OllamaStatus } from "../types";
 
@@ -11,12 +11,13 @@ interface ContextPanelProps {
   lastResponse?: ChatMessage;
   onOpenModels: () => void;
   onOpenSettings: () => void;
+  onOpenStudio: () => void;
   onRefresh: () => void;
   onAction: (prompt: string) => void;
 }
 
 export function ContextPanel({
-  model, visionModel, status, comfyStatus, settings, lastResponse, onOpenModels, onOpenSettings, onRefresh, onAction,
+  model, visionModel, status, comfyStatus, settings, lastResponse, onOpenModels, onOpenSettings, onOpenStudio, onRefresh, onAction,
 }: ContextPanelProps) {
   const ready = Boolean(status?.running && model);
   return (
@@ -46,12 +47,14 @@ export function ContextPanel({
         <StatusRow icon={MonitorCog} label="Локальная модель" active={Boolean(status?.running)} />
         <StatusRow icon={Globe2} label="Веб-поиск" active={settings.webEnabled} />
         <StatusRow icon={TerminalSquare} label="Терминал" active={settings.terminalEnabled} />
+        <StatusRow icon={AppWindow} label="Приложения" active={settings.computerEnabled} />
         <StatusRow icon={Sparkles} label="Генерация" active={Boolean(comfyStatus?.running)} />
       </section>
 
       <section className="context-card context-actions">
         <div className="context-card-title"><span>Быстрые действия</span></div>
         <button onClick={() => onAction("Найди актуальную информацию по моему вопросу")}><Globe2 size={15} /> Найти в интернете</button>
+        <button onClick={onOpenStudio}><Sparkles size={15} /> Открыть Galen Studio</button>
         <button onClick={() => onAction("Помоги проанализировать файл — я прикреплю его следующим сообщением")}><FileSearch size={15} /> Разобрать файл</button>
         <button onClick={() => onAction("Проверь состояние этого компьютера и подскажи, что можно улучшить")}><MonitorCog size={15} /> Проверить компьютер</button>
       </section>

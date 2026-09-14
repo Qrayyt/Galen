@@ -154,6 +154,7 @@ struct AgentRequest {
     reasoning: String,
     web_enabled: bool,
     terminal_enabled: bool,
+    computer_enabled: bool,
     workspace_directory: Option<String>,
     custom_instructions: Option<String>,
 }
@@ -219,6 +220,18 @@ struct ToolApproval {
     command: String,
     cwd: Option<String>,
     reason: Option<String>,
+    kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolRun {
+    id: String,
+    name: String,
+    label: String,
+    status: String,
+    detail: Option<String>,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +247,7 @@ struct AgentEvent {
     tokens_per_second: Option<f64>,
     reasoning_seconds: Option<f64>,
     error: Option<String>,
+    tool: Option<ToolRun>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,6 +314,7 @@ fn emit_status(app: &AppHandle, request_id: &str, phase: &str, label: &str) {
             tokens_per_second: None,
             reasoning_seconds: None,
             error: None,
+            tool: None,
         },
     );
 }
@@ -318,6 +333,7 @@ fn emit_error(app: &AppHandle, request_id: &str, error: &str) {
             tokens_per_second: None,
             reasoning_seconds: None,
             error: Some(error.to_string()),
+            tool: None,
         },
     );
 }

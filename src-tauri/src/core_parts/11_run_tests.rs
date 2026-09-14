@@ -25,6 +25,10 @@ pub fn run() {
             generation::install_comfyui,
             generation::start_comfyui_engine,
             generation::install_generation_pack,
+            list_applications,
+            launch_application,
+            run_command,
+            generate_media,
             list_models,
             delete_model,
             pull_model,
@@ -97,11 +101,11 @@ mod tests {
         let request = AgentRequest {
             request_id: "test".to_string(), model: "huihui_ai/qwen3.5-abliterated:9b".to_string(), messages: vec![],
             memories: vec![MemoryRecord { label: "Стиль".to_string(), value: "Кратко".to_string() }],
-            reasoning: "heavy".to_string(), web_enabled: true, terminal_enabled: true, workspace_directory: None,
+            reasoning: "heavy".to_string(), web_enabled: true, terminal_enabled: true, computer_enabled: true, workspace_directory: None,
             custom_instructions: Some("Всегда начинай с результата.".to_string()),
         };
         let prompt = system_prompt(&request);
-        assert!(prompt.contains("GALEN CORE PROMPT v2"));
+        assert!(prompt.contains("GALEN CORE PROMPT v3"));
         assert!(prompt.contains("ПРОФИЛЬ: DARK"));
         assert!(prompt.contains("РЕЖИМ: ТЯЖЁЛЫЙ"));
         assert!(prompt.contains("Всегда начинай с результата."));
@@ -137,7 +141,7 @@ mod tests {
         let mut request = AgentRequest {
             request_id: "test".to_string(), model: "qwen3:4b".to_string(),
             messages: vec![AgentMessage { role: "user".to_string(), content: "Привет!".to_string(), images: vec![] }],
-            memories: vec![], reasoning: "light".to_string(), web_enabled: true, terminal_enabled: true,
+            memories: vec![], reasoning: "light".to_string(), web_enabled: true, terminal_enabled: true, computer_enabled: true,
             workspace_directory: None, custom_instructions: None,
         };
         assert!(is_fast_conversation(&request));
@@ -146,5 +150,26 @@ mod tests {
         request.messages[0].content = "Что на этой картинке?".to_string();
         request.messages[0].images.push("YWJj".to_string());
         assert!(!is_fast_conversation(&request));
+    }
+
+    #[test]
+    fn light_mode_only_offers_tools_for_the_current_intent() {
+        let mut request = AgentRequest {
+            request_id: "test".to_string(), model: "qwen3:4b".to_string(),
+            messages: vec![AgentMessage { role: "user".to_string(), content: "Нарисуй минималистичный постер".to_string(), images: vec![] }],
+            memories: vec![], reasoning: "light".to_string(), web_enabled: true, terminal_enabled: true, computer_enabled: true,
+            workspace_directory: Some("C:/workspace".to_string()), custom_instructions: None,
+        };
+        let names = |tools: Vec<Value>| tools.into_iter().filter_map(|tool| tool["function"]["name"].as_str().map(str::to_string)).collect::<Vec<_>>();
+        let media = names(tool_definitions(&request));
+        assert!(media.contains(&"generate_image".to_string()));
+        assert!(!media.contains(&"run_terminal".to_string()));
+        assert!(!media.contains(&"open_app".to_string()));
+
+        request.messages[0].content = "Открой калькулятор".to_string();
+        let apps = names(tool_definitions(&request));
+        assert!(apps.contains(&"find_app".to_string()));
+        assert!(apps.contains(&"open_app".to_string()));
+        assert!(!apps.contains(&"generate_video".to_string()));
     }
 }

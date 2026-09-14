@@ -9,4 +9,5 @@ include!("core_parts/07_web_memory.rs");
 include!("core_parts/08_voice.rs");
 include!("core_parts/09_updater.rs");
 include!("core_parts/10_restart.rs");
+include!("core_parts/12_desktop.rs");
 include!("core_parts/11_run_tests.rs");

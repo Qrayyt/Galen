@@ -1,21 +1,35 @@
 fn tool_definitions(request: &AgentRequest) -> Vec<Value> {
     let mut tools = Vec::new();
-    if request.web_enabled {
+    let latest = request.messages.iter().rev().find(|message| message.role == "user")
+        .map(|message| message.content.to_lowercase()).unwrap_or_default();
+    let focused = request.reasoning == "light";
+    let mentions = |words: &[&str]| words.iter().any(|word| latest.contains(word));
+    let offer_web = !focused || mentions(&["найд", "поищ", "интернет", "актуаль", "сегодня", "новост", "цен", "погод", "search", "latest", "web"]);
+    let offer_terminal = !focused || mentions(&["команд", "терминал", "консол", "powershell", "cmd", "shell", "код", "проект", "файл", "папк", "сбор", "тест", "почин", "создай", "измени", "удали"]);
+    let offer_apps = !focused || mentions(&["открой", "запусти", "прилож", "программ", "калькулятор", "браузер", "open", "launch", "start app"]);
+    let offer_media = !focused || mentions(&["сгенер", "нарис", "создай изображ", "создай карт", "фото", "изображ", "видео", "render", "generate image", "draw"]);
+    if request.web_enabled && offer_web {
         tools.push(json!({"type":"function","function":{"name":"web_search","description":"Ищет актуальную информацию в интернете. Используй для новостей, текущих фактов, цен, документации и незнакомых тем.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Точный поисковый запрос"}},"required":["query"]}}}));
         tools.push(json!({"type":"function","function":{"name":"read_webpage","description":"Читает содержимое найденной веб-страницы по URL.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}));
     }
-    if request.terminal_enabled {
-        tools.push(json!({"type":"function","function":{"name":"run_terminal","description":"Запускает команду в терминале компьютера после явного подтверждения пользователя.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Полная команда для shell"},"cwd":{"type":"string","description":"Рабочая папка, если нужна"},"reason":{"type":"string","description":"Коротко зачем нужна команда"},"timeoutSeconds":{"type":"integer","description":"Таймаут 10-600 секунд; для сборок можно увеличить"}},"required":["command","reason"]}}}));
+    if request.terminal_enabled && offer_terminal {
+        tools.push(json!({"type":"function","function":{"name":"run_terminal","description":"Надёжно запускает команду после явного подтверждения и возвращает stdout, stderr, код выхода и длительность.","parameters":{"type":"object","properties":{"command":{"type":"string","description":"Полная команда без markdown-обёртки"},"shell":{"type":"string","enum":["powershell","cmd","sh"],"description":"На Windows предпочитай powershell; на Linux sh"},"cwd":{"type":"string","description":"Рабочая папка, если нужна"},"reason":{"type":"string","description":"Коротко зачем нужна команда"},"timeoutSeconds":{"type":"integer","description":"Таймаут 10-600 секунд; для сборок можно увеличить"}},"required":["command","reason"]}}}));
     }
-    if request.terminal_enabled && request.workspace_directory.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some() {
+    if request.computer_enabled && offer_apps {
+        tools.push(json!({"type":"function","function":{"name":"find_app","description":"Ищет реально установленные приложения в меню Пуск или системном каталоге. Используй перед open_app, если точный appId неизвестен.","parameters":{"type":"object","properties":{"query":{"type":"string","description":"Название приложения или его часть"}},"required":["query"]}}}));
+        tools.push(json!({"type":"function","function":{"name":"open_app","description":"Открывает найденное установленное приложение после подтверждения пользователя. Не подставляй путь — используй appId из find_app.","parameters":{"type":"object","properties":{"appId":{"type":"string"},"query":{"type":"string"},"reason":{"type":"string"}},"required":["reason"]}}}));
+    }
+    if request.terminal_enabled && offer_terminal && request.workspace_directory.as_deref().map(str::trim).filter(|v| !v.is_empty()).is_some() {
         tools.push(json!({"type":"function","function":{"name":"list_directory","description":"Показывает дерево файлов внутри выбранного workspace без запуска shell.","parameters":{"type":"object","properties":{"path":{"type":"string","description":"Путь относительно workspace; по умолчанию ."},"depth":{"type":"integer","description":"Глубина 1-5"}},"required":[]}}}));
         tools.push(json!({"type":"function","function":{"name":"read_file","description":"Читает текстовый файл внутри workspace с номерами строк. Для больших файлов указывай диапазон.","parameters":{"type":"object","properties":{"path":{"type":"string"},"startLine":{"type":"integer"},"endLine":{"type":"integer"}},"required":["path"]}}}));
         tools.push(json!({"type":"function","function":{"name":"search_files","description":"Ищет точный текст по файлам workspace, пропуская node_modules/.git/target и бинарные файлы.","parameters":{"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string","description":"Подпапка, по умолчанию ."}},"required":["query"]}}}));
         tools.push(json!({"type":"function","function":{"name":"write_file","description":"Создаёт или полностью перезаписывает текстовый файл внутри workspace после подтверждения пользователя.","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"},"reason":{"type":"string"}},"required":["path","content","reason"]}}}));
         tools.push(json!({"type":"function","function":{"name":"replace_in_file","description":"Делает точную замену фрагмента в файле workspace после подтверждения. Предпочтительнее полного rewrite для небольших правок.","parameters":{"type":"object","properties":{"path":{"type":"string"},"find":{"type":"string"},"replace":{"type":"string"},"replaceAll":{"type":"boolean"},"reason":{"type":"string"}},"required":["path","find","replace","reason"]}}}));
     }
-    tools.push(json!({"type":"function","function":{"name":"generate_image","description":"Генерирует реальное изображение через локальный ComfyUI/Qwen pipeline. Если в последнем сообщении есть изображения, использует их как references.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"Подробный prompt результата"}},"required":["prompt"]}}}));
-    tools.push(json!({"type":"function","function":{"name":"generate_video","description":"Генерирует реальное видео через локальный ComfyUI/WAN 2.2. При наличии reference image использует I2V, иначе T2V.","parameters":{"type":"object","properties":{"prompt":{"type":"string"},"seconds":{"type":"integer","minimum":2,"maximum":8}},"required":["prompt"]}}}));
+    if offer_media {
+        tools.push(json!({"type":"function","function":{"name":"generate_image","description":"Генерирует реальное изображение через локальный ComfyUI/Qwen pipeline. Если в последнем сообщении есть изображения, использует их как references.","parameters":{"type":"object","properties":{"prompt":{"type":"string","description":"Подробный prompt результата"}},"required":["prompt"]}}}));
+        tools.push(json!({"type":"function","function":{"name":"generate_video","description":"Генерирует реальное видео через локальный ComfyUI/WAN 2.2. При наличии reference image использует I2V, иначе T2V.","parameters":{"type":"object","properties":{"prompt":{"type":"string"},"seconds":{"type":"integer","minimum":2,"maximum":8}},"required":["prompt"]}}}));
+    }
     tools
 }
 
@@ -94,7 +108,7 @@ async fn ollama_stream_answer(
                 answer.push_str(&chunk.message.content);
                 app.emit("agent-event", AgentEvent {
                     request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
-                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
                 }).map_err(|error| error.to_string())?;
             }
             if chunk.eval_count.is_some() { eval_count = chunk.eval_count; }
@@ -109,7 +123,7 @@ async fn ollama_stream_answer(
                 answer.push_str(&chunk.message.content);
                 app.emit("agent-event", AgentEvent {
                     request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
-                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
                 }).map_err(|error| error.to_string())?;
             }
             eval_count = chunk.eval_count.or(eval_count);
@@ -121,14 +135,14 @@ async fn ollama_stream_answer(
         app.emit("agent-event", AgentEvent {
             request_id: request.request_id.clone(), kind: "reasoning".to_string(), phase: Some("thinking".to_string()),
             label: Some("Короткий ответ".to_string()), content: Some(hidden), sources: None, approval: None,
-            tokens_per_second: None, reasoning_seconds: None, error: None,
+            tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
         }).map_err(|error| error.to_string())?;
     }
     if answer.trim().is_empty() {
         app.emit("agent-event", AgentEvent {
             request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
             content: Some("Не получилось сформировать ответ. Попробуй ещё раз.".to_string()), sources: None, approval: None,
-            tokens_per_second: None, reasoning_seconds: None, error: None,
+            tokens_per_second: None, reasoning_seconds: None, error: None, tool: None,
         }).map_err(|error| error.to_string())?;
     }
     let speed = match (eval_count, eval_duration) {
@@ -137,7 +151,7 @@ async fn ollama_stream_answer(
     };
     app.emit("agent-event", AgentEvent {
         request_id: request.request_id.clone(), kind: "done".to_string(), phase: Some("done".to_string()), label: Some("Готово".to_string()),
-        content: None, sources: None, approval: None, tokens_per_second: speed, reasoning_seconds: None, error: None,
+        content: None, sources: None, approval: None, tokens_per_second: speed, reasoning_seconds: None, error: None, tool: None,
     }).map_err(|error| error.to_string())?;
     Ok(())
 }

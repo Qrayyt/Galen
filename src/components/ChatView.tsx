@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  AlertCircle, Brain, Check, CheckCircle2, ChevronDown, Clipboard, ExternalLink, Gauge, ShieldCheck,
-  TerminalSquare, Timer, Volume2, XCircle,
+  AlertCircle, AppWindow, Brain, Check, CheckCircle2, ChevronDown, Clipboard, ExternalLink, Gauge, LoaderCircle, ShieldCheck,
+  Sparkles, TerminalSquare, Timer, Volume2, XCircle,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -26,9 +26,9 @@ interface ChatViewProps {
 }
 
 const SUGGESTIONS = [
-  "Найди главные новости об ИИ за сегодня",
-  "Помоги разобраться с проектом на компьютере",
-  "Проанализируй документ и выдели главное",
+  "Нарисуй минималистичный постер для моего проекта",
+  "Открой калькулятор на компьютере",
+  "Проверь проект и запусти его тесты",
 ];
 
 export function ChatView({
@@ -128,6 +128,18 @@ export function ChatView({
                     <div><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.reasoning}</ReactMarkdown></div>
                   </details>
                 )}
+                {!!message.toolRuns?.length && (
+                  <div className="tool-ledger">
+                    {message.toolRuns.map((tool) => (
+                      <div className={`tool-ledger-row tool-ledger-row--${tool.status}`} key={tool.id}>
+                        <span>{tool.name.includes("app") ? <AppWindow size={14} /> : tool.name.includes("generate") ? <Sparkles size={14} /> : <TerminalSquare size={14} />}</span>
+                        <div><strong>{tool.label}</strong>{tool.detail && <small>{tool.detail}</small>}</div>
+                        {tool.status === "running" ? <LoaderCircle className="spin" size={14} /> : tool.status === "success" ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
+                        {tool.durationMs != null && <time>{formatToolDuration(tool.durationMs)}</time>}
+                      </div>
+                    ))}
+                  </div>
+                )}
                 <div className="markdown">
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -186,7 +198,7 @@ export function ChatView({
             <motion.section className="approval-card" initial={{ opacity: 0, y: 12, scale: 0.985 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0 }}>
               <div className="approval-head">
                 <span><TerminalSquare size={18} /></span>
-                <div><strong>Разрешить команду?</strong><p>{approval.reason ?? "Galen хочет использовать терминал"}</p></div>
+                <div><strong>{approval.kind === "application" ? "Открыть приложение?" : approval.kind === "file" ? "Изменить файл?" : "Выполнить команду?"}</strong><p>{approval.reason ?? "Galen просит разрешение на действие"}</p></div>
                 <ShieldCheck size={20} />
               </div>
               <pre>{approval.command}</pre>
@@ -211,6 +223,10 @@ function formatReasoningTime(seconds?: number): string {
 }
 
 function formatLatency(milliseconds: number): string {
+  return milliseconds < 1000 ? `${milliseconds} мс` : `${(milliseconds / 1000).toFixed(1)} с`;
+}
+
+function formatToolDuration(milliseconds: number): string {
   return milliseconds < 1000 ? `${milliseconds} мс` : `${(milliseconds / 1000).toFixed(1)} с`;
 }
 

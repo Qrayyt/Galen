@@ -6,11 +6,13 @@ import type {
   AgentEvent,
   AppSettings,
   ChatMessage,
+  CommandRunResult,
   ContentEngineStatus,
   GenerationInstallProgress,
   GenerationStatus,
   GeneratedMedia,
   HardwareInfo,
+  InstalledApplication,
   MemoryCandidate,
   MemoryItem,
   OllamaModel,
@@ -139,6 +141,7 @@ export const native = {
           reasoning,
           webEnabled: settings.webEnabled,
           terminalEnabled: settings.terminalEnabled,
+          computerEnabled: settings.computerEnabled,
           workspaceDirectory: settings.workspaceDirectory || null,
           customInstructions: settings.customInstructions.trim() || null,
         },
@@ -151,6 +154,17 @@ export const native = {
 
   resolveApproval: (requestId: string, approvalId: string, approved: boolean): Promise<void> =>
     safeInvoke("resolve_tool_approval", { requestId, approvalId, approved }),
+
+  listApplications: (): Promise<InstalledApplication[]> => safeInvoke("list_applications"),
+  launchApplication: (appId: string): Promise<void> => safeInvoke("launch_application", { appId }),
+  runCommand: (command: string, cwd: string, shell: "powershell" | "cmd" | "sh"): Promise<CommandRunResult> =>
+    safeInvoke("run_command", { command, cwd: cwd.trim() || null, shell, timeoutSeconds: 180 }),
+  generateMedia: (
+    prompt: string,
+    images: string[],
+    mode: "image" | "video",
+    seconds = 4,
+  ): Promise<GeneratedMedia> => safeInvoke("generate_media", { prompt, images, mode, seconds }),
 
   cancelAgent: (requestId: string): Promise<void> => safeInvoke("cancel_agent", { requestId }),
 
