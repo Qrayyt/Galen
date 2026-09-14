@@ -140,8 +140,10 @@ export function Composer({
           <motion.div className="attachment-strip" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
             {attachments.map((attachment) => (
               <div className="attachment-chip" key={attachment.id}>
-                {attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
-                <span>{attachment.name}</span>
+                {attachment.kind === "image" && attachment.dataUrl
+                  ? <img src={attachment.dataUrl} alt="" />
+                  : attachment.kind === "image" ? <ImageIcon size={15} /> : <FileText size={15} />}
+                <span><strong>{attachment.name}</strong><small>{attachment.kind === "image" ? "Изображение для Vision" : "Вложение"}</small></span>
                 <button onClick={() => setAttachments((items) => items.filter((item) => item.id !== attachment.id))}><X size={13} /></button>
               </div>
             ))}

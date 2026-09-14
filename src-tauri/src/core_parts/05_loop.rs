@@ -5,12 +5,21 @@ async fn agent_chat(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.cancelled.lock().await.remove(&request.request_id);
-    let mut messages = vec![json!({ "role": "system", "content": system_prompt(&request) })];
-    messages.extend(request.messages.iter().map(|message| {
+    let fast_conversation = is_fast_conversation(&request);
+    let mut messages = vec![json!({ "role": "system", "content": if fast_conversation { compact_system_prompt(&request) } else { system_prompt(&request) } })];
+    let history_start = if fast_conversation { request.messages.len().saturating_sub(12) } else { 0 };
+    messages.extend(request.messages[history_start..].iter().map(|message| {
         let mut value = json!({ "role": message.role, "content": message.content });
         if !message.images.is_empty() { value["images"] = json!(message.images); }
         value
     }));
+    if fast_conversation {
+        emit_status(&app, &request.request_id, "thinking", "Готовлю ответ");
+        let result = ollama_stream_answer(&state, &request, &messages, &app).await;
+        state.cancelled.lock().await.remove(&request.request_id);
+        if let Err(error) = &result { emit_error(&app, &request.request_id, error); }
+        return result;
+    }
     let tools = tool_definitions(&request);
     let max_steps = match request.reasoning.as_str() { "light" => 6, "heavy" => 24, _ => 12 };
     let mut all_sources = Vec::<SourceLink>::new();

@@ -86,19 +86,16 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.5 adds one-click local generation and a coding-agent workflow on top of the smarter autonomous runtime introduced in 0.4.2.
+            Galen 0.6 makes the local assistant visibly faster, reliable with images, and calmer to use.
 
-            - automatic discovery and one-click setup of local ComfyUI
-            - local Qwen image generation/editing pipeline with reference-image support
-            - local WAN 2.2 image-to-video and text-to-video pipelines
-            - automatic model discovery through ComfyUI plus local fallback search
-            - agent tools `generate_image` and `generate_video`
-            - workspace-confined coding tools for listing, reading and searching files
-            - approval-gated file writes and replacements
-            - coding-agent inspect → edit → test → fix loop
-            - expanded tool budgets up to 24 steps for heavy requests
-            - Galen Core Prompt v2 and execution-first tool use
-            - automatic in-app update checks with silent installer replacement
+            - rebuilt light three-pane workspace in the Galenite visual system
+            - the supplied Galen mark replaces the generic black orb throughout the product
+            - lossless token assembly fixes joined words and broken Markdown during streaming
+            - dedicated persisted Vision model routing, independent from the chat model
+            - Ollama capability detection verifies Vision support instead of guessing from a model name
+            - real streaming fast path for short prompts in Light mode
+            - smaller Light-mode context and response budgets for lower latency
+            - background model warm-up and a 30-minute keep-alive
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -160,19 +157,16 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.5 adds one-click local generation and a coding-agent workflow on top of the smarter autonomous runtime introduced in 0.4.2.
+            Galen 0.6 makes the local assistant visibly faster, reliable with images, and calmer to use.
 
-            - automatic discovery and one-click setup of local ComfyUI
-            - local Qwen image generation/editing pipeline with reference-image support
-            - local WAN 2.2 image-to-video and text-to-video pipelines
-            - automatic model discovery through ComfyUI plus local fallback search
-            - agent tools `generate_image` and `generate_video`
-            - workspace-confined coding tools for listing, reading and searching files
-            - approval-gated file writes and replacements
-            - coding-agent inspect → edit → test → fix loop
-            - expanded tool budgets up to 24 steps for heavy requests
-            - Galen Core Prompt v2 and execution-first tool use
-            - automatic in-app update checks with silent installer replacement
+            - rebuilt light three-pane workspace in the Galenite visual system
+            - the supplied Galen mark replaces the generic black orb throughout the product
+            - lossless token assembly fixes joined words and broken Markdown during streaming
+            - dedicated persisted Vision model routing, independent from the chat model
+            - Ollama capability detection verifies Vision support instead of guessing from a model name
+            - real streaming fast path for short prompts in Light mode
+            - smaller Light-mode context and response budgets for lower latency
+            - background model warm-up and a 30-minute keep-alive
           releaseDraft: true
           prerelease: false
           args: --bundles appimage

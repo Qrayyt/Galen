@@ -18,6 +18,7 @@ pub fn run() {
             get_hardware_info,
             get_ollama_status,
             start_ollama,
+            warm_model,
             get_comfyui_status,
             open_comfyui,
             generation::get_generation_status,
@@ -129,5 +130,21 @@ mod tests {
         let html = r##"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&amp;rut=x">Docs &amp; help</a><a class="result__snippet" href="#">Fresh <b>documentation</b></a>"##;
         let results = parse_search_results(html);
         assert_eq!(results.len(), 1); assert_eq!(results[0].title, "Docs & help"); assert_eq!(results[0].url, "https://example.com/docs"); assert_eq!(results[0].snippet.as_deref(), Some("Fresh documentation"));
+    }
+
+    #[test]
+    fn light_small_talk_uses_the_fast_path() {
+        let mut request = AgentRequest {
+            request_id: "test".to_string(), model: "qwen3:4b".to_string(),
+            messages: vec![AgentMessage { role: "user".to_string(), content: "Привет!".to_string(), images: vec![] }],
+            memories: vec![], reasoning: "light".to_string(), web_enabled: true, terminal_enabled: true,
+            workspace_directory: None, custom_instructions: None,
+        };
+        assert!(is_fast_conversation(&request));
+        request.messages[0].content = "Найди свежие новости".to_string();
+        assert!(!is_fast_conversation(&request));
+        request.messages[0].content = "Что на этой картинке?".to_string();
+        request.messages[0].images.push("YWJj".to_string());
+        assert!(!is_fast_conversation(&request));
     }
 }

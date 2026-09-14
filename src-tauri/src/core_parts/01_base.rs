@@ -93,6 +93,12 @@ struct TagDetails {
     quantization_level: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ShowResponse {
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InstalledModel {
@@ -101,6 +107,7 @@ struct InstalledModel {
     modified_at: String,
     parameter_size: Option<String>,
     quantization: Option<String>,
+    capabilities: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,7 +165,7 @@ struct OllamaResponse {
     eval_duration: Option<f64>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct OllamaResponseMessage {
     #[serde(default = "assistant_role")]
     role: String,
@@ -168,6 +175,16 @@ struct OllamaResponseMessage {
     thinking: String,
     #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaStreamChunk {
+    #[serde(default)]
+    message: OllamaResponseMessage,
+    #[serde(default)]
+    eval_count: Option<f64>,
+    #[serde(default)]
+    eval_duration: Option<f64>,
 }
 
 fn assistant_role() -> String {

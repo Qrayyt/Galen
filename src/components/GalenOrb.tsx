@@ -1,4 +1,5 @@
 import { motion } from "motion/react";
+import galenLogo from "../assets/galen.svg";
 
 interface GalenOrbProps {
   active?: boolean;
@@ -15,13 +16,10 @@ export function GalenOrb({ active = false, thinking = false, compact = false }: 
       transition={{ type: "spring", stiffness: 150, damping: 18 }}
       aria-hidden="true"
     >
-      <span className="orb-halo orb-halo--four" />
-      <span className="orb-halo orb-halo--three" />
-      <span className="orb-halo orb-halo--two" />
-      <span className="orb-halo orb-halo--one" />
-      <span className="orb-core" />
+      <span className="orb-aura orb-aura--outer" />
+      <span className="orb-aura orb-aura--inner" />
+      <img src={galenLogo} alt="" />
     </motion.div>
   );
 }
-
 

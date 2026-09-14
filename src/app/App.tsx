@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatView } from "../components/ChatView";
 import { Composer } from "../components/Composer";
+import { ContextPanel } from "../components/ContextPanel";
 import { ModelLibrary } from "../components/ModelLibrary";
 import { NavRail } from "../components/NavRail";
 import { SettingsPanel } from "../components/SettingsPanel";
@@ -10,12 +11,12 @@ import { UpdateToast } from "../components/UpdateToast";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
 import { useAppUpdater } from "../lib/updater";
-import { splitReasoningText, visibleAnswer } from "../lib/reasoning";
+import { splitReasoningText, streamingVisibleAnswer, visibleAnswer } from "../lib/reasoning";
 import { speakText } from "../lib/speech";
 import {
-  createConversation, loadActiveChatId, loadActiveModel, loadConversations, loadMemories,
+  createConversation, loadActiveChatId, loadActiveModel, loadActiveVisionModel, loadConversations, loadMemories,
   loadSettings, saveActiveChatId, saveActiveModel, saveConversations, saveMemories,
-  saveSettings, titleFromMessage,
+  saveActiveVisionModel, saveSettings, titleFromMessage,
 } from "../lib/storage";
 import type {
   AgentPhase, AppSettings, Attachment, ChatMessage, ContentEngineStatus, Conversation, HardwareInfo,
@@ -25,7 +26,11 @@ import type {
 
 const makeId = () => crypto.randomUUID();
 const normalized = (name: string) => name.replace(":latest", "").toLowerCase();
-const isVisionModel = (name: string) => /gemma[34]|qwen3\.5|qwen(?:2\.5|3)-?vl|llava|minicpm-v/i.test(name);
+const isVisionModel = (model: OllamaModel | string) => {
+  if (typeof model !== "string" && model.capabilities?.some((capability) => capability.toLowerCase() === "vision")) return true;
+  const name = typeof model === "string" ? model : model.name;
+  return /gemma[34]|qwen3\.5|qwen(?:2\.5|3)-?vl|llava|llama3\.2-vision|minicpm-v|moondream|bakllava/i.test(name);
+};
 
 export function App() {
   const initialChats = useMemo(() => loadConversations(), []);
@@ -40,6 +45,7 @@ export function App() {
   const [comfyStatus, setComfyStatus] = useState<ContentEngineStatus | null>(null);
   const [installed, setInstalled] = useState<OllamaModel[]>([]);
   const [activeModel, setActiveModel] = useState<string | null>(() => loadActiveModel());
+  const [activeVisionModel, setActiveVisionModel] = useState<string | null>(() => loadActiveVisionModel());
   const [pulls, setPulls] = useState<Record<string, PullProgress>>({});
   const [request, setRequest] = useState<{ id: string; chatId: string } | null>(null);
   const [activity, setActivity] = useState<{ phase: AgentPhase; label: string } | null>(null);
@@ -82,6 +88,12 @@ export function App() {
         : models[0]?.name ?? null;
       setActiveModel(selected);
       if (selected) saveActiveModel(selected);
+      const savedVision = loadActiveVisionModel();
+      const selectedVision = savedVision && models.some((model) => normalized(model.name) === normalized(savedVision) && isVisionModel(model))
+        ? savedVision
+        : models.find(isVisionModel)?.name ?? null;
+      setActiveVisionModel(selectedVision);
+      if (selectedVision) saveActiveVisionModel(selectedVision);
       if (!models.length) setView("models");
     } catch (error) {
       setStatus({ installed: false, running: false, error: error instanceof Error ? error.message : String(error) });
@@ -100,14 +112,25 @@ export function App() {
     void refreshAll();
   }, [refreshAll]);
 
-  const selectModel = (model: string) => {
+  useEffect(() => {
+    if (!activeModel) return;
+    void native.warmModel(activeModel).catch(() => undefined);
+  }, [activeModel]);
+
+  const selectModel = (model: string, category: "chat" | "vision" = "chat") => {
+    if (category === "vision") {
+      setActiveVisionModel(model);
+      saveActiveVisionModel(model);
+      setView("chat");
+      return;
+    }
     setActiveModel(model);
     saveActiveModel(model);
     updateChat(activeChatId, (chat) => ({ ...chat, model, updatedAt: Date.now() }));
     setView("chat");
   };
 
-  const pullModel = async (model: string) => {
+  const pullModel = async (model: string, category: "chat" | "vision" = "chat") => {
     setPulls((current) => ({
       ...current,
       [model]: { model, status: "Подготавливаем загрузку", completed: 0, total: 0, percent: 0, done: false },
@@ -115,7 +138,7 @@ export function App() {
     try {
       await native.pullModel(model, (progress) => setPulls((current) => ({ ...current, [model]: progress })));
       await refreshRuntime();
-      selectModel(model);
+      selectModel(model, category);
     } catch (error) {
       setPulls((current) => ({
         ...current,
@@ -151,15 +174,15 @@ export function App() {
   const sendMessage = async (content: string, attachments: Attachment[] = []) => {
     if (!activeModel || request || !activeChat) return;
     const needsVision = attachments.some((attachment) => attachment.kind === "image");
-    const visionModel = isVisionModel(activeModel)
-      ? activeModel
-      : installed.find((model) => isVisionModel(model.name))?.name;
+    const selectedVision = installed.find((model) => normalized(model.name) === normalized(activeVisionModel ?? "") && isVisionModel(model));
+    const activeText = installed.find((model) => normalized(model.name) === normalized(activeModel));
+    const visionModel = selectedVision?.name ?? (activeText && isVisionModel(activeText) ? activeText.name : installed.find(isVisionModel)?.name);
     if (needsVision && !visionModel) {
       const now = Date.now();
       const userMessage: ChatMessage = { id: makeId(), role: "user", content, attachments, createdAt: now };
       const warning: ChatMessage = {
         id: makeId(), role: "assistant", createdAt: now + 1, error: true,
-        content: "Для анализа изображений нужна vision-модель. Скачай **Gemma 3 4B** в библиотеке моделей — после этого Galen будет автоматически использовать её для картинок.",
+        content: "Для анализа изображений нужна vision-модель. Открой раздел **Vision**, скачай подходящую модель и нажми «Подключить». Galen запомнит её отдельно от разговорной модели.",
       };
       updateChat(activeChat.id, (chat) => ({
         ...chat,
@@ -216,12 +239,13 @@ export function App() {
             }));
           }
           if (event.kind === "token" && event.content) {
-            answerBuffer = visibleAnswer(`${answerBuffer}${event.content}`);
+            answerBuffer += event.content;
+            const visible = streamingVisibleAnswer(answerBuffer);
             updateChat(chatId, (chat) => ({
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, content: visibleAnswer(`${message.content}${event.content}`) }
+                ? { ...message, content: visible }
                 : message),
             }));
           }
@@ -246,18 +270,19 @@ export function App() {
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, pending: false, tokensPerSecond: event.tokensPerSecond }
+                ? { ...message, content: visibleAnswer(answerBuffer) || message.content, pending: false, tokensPerSecond: event.tokensPerSecond }
                 : message),
             }));
           }
         },
       );
 
-      if (completed && answerBuffer && settings.memoryEnabled) {
-        void native.extractMemories(requestModel, content, answerBuffer).then(mergeMemoryCandidates).catch(() => undefined);
+      const finalAnswer = visibleAnswer(answerBuffer);
+      if (completed && finalAnswer && settings.memoryEnabled) {
+        void native.extractMemories(requestModel, content, finalAnswer).then(mergeMemoryCandidates).catch(() => undefined);
       }
-      if (completed && answerBuffer && settings.autoSpeak && !voiceOpen) {
-        void speakText(answerBuffer, settings).catch(() => undefined);
+      if (completed && finalAnswer && settings.autoSpeak && !voiceOpen) {
+        void speakText(finalAnswer, settings).catch(() => undefined);
       }
     } catch (error) {
       updateChat(chatId, (chat) => ({
@@ -326,6 +351,8 @@ export function App() {
 
   const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
     ?? activeModel ?? undefined;
+  const visionLabel = MODEL_CATALOG.find((model) => model.category === "vision" && normalized(model.id) === normalized(activeVisionModel ?? ""))?.name
+    ?? activeVisionModel ?? undefined;
   const activeVoiceId = settings.voiceEngine === "system"
     ? settings.voiceRate <= 0.9 ? "voice:dark-offline" : "voice:system"
     : settings.voiceId === "ru-RU-DmitryNeural" && settings.voiceRate <= 0.9
@@ -358,69 +385,91 @@ export function App() {
         onDeleteChat={deleteChat}
       />
       <div className="workspace">
-        <WindowBar sidebarOpen={sidebarOpen} onMenu={() => setSidebarOpen(true)} title={view === "chat" ? activeChat?.title : view === "models" ? "Модели" : "Настройки"} />
-        <div className="view-stage">
-          {view === "chat" && activeChat && (
-            <ChatView
-              messages={activeChat.messages}
-              busy={request?.chatId === activeChat.id}
-              hasModel={Boolean(activeModel)}
-              activity={request?.chatId === activeChat.id ? activity : null}
-              approval={request?.chatId === activeChat.id ? approval : null}
-              settings={settings}
-              onOpenModels={() => setView("models")}
-              onResolveApproval={resolveApproval}
-              onSuggestion={(text) => void sendMessage(text)}
-            />
-          )}
-          {view === "models" && (
-            <ModelLibrary
-              hardware={hardware}
-              recommendedId={recommended?.id ?? null}
+        <WindowBar
+          sidebarOpen={sidebarOpen}
+          onMenu={() => setSidebarOpen(true)}
+          title={view === "chat" ? activeChat?.title : view === "models" ? "Модели" : "Настройки"}
+          subtitle={view === "chat" ? `Galen · ${activeLabel ?? "локальная модель"}` : undefined}
+        />
+        <div className="workspace-body">
+          <div className="primary-pane">
+            <div className="view-stage">
+              {view === "chat" && activeChat && (
+                <ChatView
+                  messages={activeChat.messages}
+                  busy={request?.chatId === activeChat.id}
+                  hasModel={Boolean(activeModel)}
+                  activity={request?.chatId === activeChat.id ? activity : null}
+                  approval={request?.chatId === activeChat.id ? approval : null}
+                  settings={settings}
+                  onOpenModels={() => setView("models")}
+                  onResolveApproval={resolveApproval}
+                  onSuggestion={(text) => void sendMessage(text)}
+                />
+              )}
+              {view === "models" && (
+                <ModelLibrary
+                  hardware={hardware}
+                  recommendedId={recommended?.id ?? null}
+                  status={status}
+                  comfyStatus={comfyStatus}
+                  installed={installed}
+                  activeModel={activeModel}
+                  activeVisionModel={activeVisionModel}
+                  activeVoiceId={activeVoiceId}
+                  pulls={pulls}
+                  onPull={(model, category) => void pullModel(model, category)}
+                  onDelete={(model) => void deleteModel(model)}
+                  onSelect={selectModel}
+                  onSelectVoice={selectVoice}
+                  onRetryOllama={() => void refreshRuntime()}
+                  onRetryComfy={() => void native.getComfyStatus().then(setComfyStatus)}
+                  onOpenComfy={() => void native.openComfy()}
+                  onOpenSettings={() => setView("settings")}
+                />
+              )}
+              {view === "settings" && (
+                <SettingsPanel
+                  settings={settings}
+                  memories={memories}
+                  hardware={hardware}
+                  status={status}
+                  update={update}
+                  updating={updating}
+                  onSettings={setSettings}
+                  onMemories={setMemories}
+                  onRefresh={() => void refreshAll()}
+                  onInstallUpdate={() => void installUpdate()}
+                />
+              )}
+            </div>
+            {view === "chat" && activeChat && (
+              <Composer
+                disabled={!activeModel || !status?.running}
+                busy={busy}
+                modelLabel={activeLabel}
+                reasoning={activeChat.reasoning}
+                webEnabled={settings.webEnabled}
+                onReasoningChange={changeReasoning}
+                onSend={(message, attachments) => void sendMessage(message, attachments)}
+                onStop={stopAgent}
+                onVoiceMode={() => setVoiceOpen(true)}
+              />
+            )}
+          </div>
+          {view === "chat" && (
+            <ContextPanel
+              model={activeLabel}
+              visionModel={visionLabel}
               status={status}
               comfyStatus={comfyStatus}
-              installed={installed}
-              activeModel={activeModel}
-              activeVoiceId={activeVoiceId}
-              pulls={pulls}
-              onPull={(model) => void pullModel(model)}
-              onDelete={(model) => void deleteModel(model)}
-              onSelect={selectModel}
-              onSelectVoice={selectVoice}
-              onRetryOllama={() => void refreshRuntime()}
-              onRetryComfy={() => void native.getComfyStatus().then(setComfyStatus)}
-              onOpenComfy={() => void native.openComfy()}
-              onOpenSettings={() => setView("settings")}
-            />
-          )}
-          {view === "settings" && (
-            <SettingsPanel
               settings={settings}
-              memories={memories}
-              hardware={hardware}
-              status={status}
-              update={update}
-              updating={updating}
-              onSettings={setSettings}
-              onMemories={setMemories}
-              onRefresh={() => void refreshAll()}
-              onInstallUpdate={() => void installUpdate()}
+              onOpenModels={() => setView("models")}
+              onOpenSettings={() => setView("settings")}
+              onAction={(prompt) => void sendMessage(prompt)}
             />
           )}
         </div>
-        {view === "chat" && activeChat && (
-          <Composer
-            disabled={!activeModel || !status?.running}
-            busy={busy}
-            modelLabel={activeLabel}
-            reasoning={activeChat.reasoning}
-            webEnabled={settings.webEnabled}
-            onReasoningChange={changeReasoning}
-            onSend={(message, attachments) => void sendMessage(message, attachments)}
-            onStop={stopAgent}
-            onVoiceMode={() => setVoiceOpen(true)}
-          />
-        )}
       </div>
       <UpdateToast update={update} progress={updateProgress} updating={updating} onUpdate={() => void installUpdate()} />
       <VoiceMode

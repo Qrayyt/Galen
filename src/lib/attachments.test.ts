@@ -17,5 +17,12 @@ describe("attachment payloads", () => {
     };
     expect(imagePayloads([attachment])).toEqual(["YWJj"]);
   });
-});
 
+  it("does not send malformed image data as an empty Ollama image", () => {
+    const attachment: Attachment = {
+      id: "broken", name: "screen.png", mime: "image/png", size: 42, kind: "image",
+      dataUrl: "data:image/png,not-base64",
+    };
+    expect(imagePayloads([attachment])).toEqual([]);
+  });
+});

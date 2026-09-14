@@ -82,5 +82,6 @@ export function attachmentPrompt(attachments: Attachment[]): string {
 export function imagePayloads(attachments: Attachment[]): string[] {
   return attachments
     .filter((attachment) => attachment.kind === "image" && attachment.dataUrl)
-    .map((attachment) => attachment.dataUrl!.split(",", 2)[1] ?? "");
+    .map((attachment) => attachment.dataUrl!.match(/^data:image\/[a-z0-9.+-]+;base64,(.+)$/i)?.[1] ?? "")
+    .filter(Boolean);
 }

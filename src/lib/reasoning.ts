@@ -8,8 +8,7 @@ const OPEN_REASONING = /<(think|thinking|analysis|reasoning)\b[^>]*>/i;
 const STRAY_REASONING_TAG = /<\/?(?:think|thinking|analysis|reasoning)\b[^>]*>/gi;
 const CHANNEL_REASONING = /<\|channel\|>\s*(?:analysis|reasoning)([\s\S]*?)<\|channel\|>\s*final/gi;
 
-/** Defensive UI-side filter for persisted chats and unusual model templates. */
-export function splitReasoningText(input: string): ReasoningSplit {
+function splitReasoning(input: string, preserveEdgeWhitespace: boolean): ReasoningSplit {
   const reasoning: string[] = [];
   let answer = input.replace(CHANNEL_REASONING, (_match, hidden: string) => {
     const value = hidden.trim();
@@ -30,12 +29,23 @@ export function splitReasoningText(input: string): ReasoningSplit {
     answer = answer.slice(0, unfinished.index);
   }
 
+  const visible = answer.replace(STRAY_REASONING_TAG, "");
   return {
-    answer: answer.replace(STRAY_REASONING_TAG, "").trim(),
+    answer: preserveEdgeWhitespace ? visible : visible.trim(),
     reasoning: reasoning.join("\n\n").trim(),
   };
 }
 
+/** Defensive UI-side filter for persisted chats and unusual model templates. */
+export function splitReasoningText(input: string): ReasoningSplit {
+  return splitReasoning(input, false);
+}
+
 export function visibleAnswer(input: string): string {
   return splitReasoningText(input).answer;
+}
+
+/** Keeps token-boundary whitespace while a response is still arriving. */
+export function streamingVisibleAnswer(input: string): string {
+  return splitReasoning(input, true).answer;
 }
