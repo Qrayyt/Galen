@@ -514,3 +514,86 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .assistant-avatar { width: 30px; height: 30px; flex-basis: 30px; }
   .message--assistant .message-body { width: calc(100% - 40px); }
 }
+
+/* Galen 0.7 — visible readiness and frictionless attachments */
+.composer-dock--drag .composer {
+  border-color: #858d88;
+  box-shadow: 0 0 0 4px rgba(72, 82, 76, .08), 0 19px 50px rgba(20, 28, 24, .11);
+}
+.composer { position: relative; overflow: visible; }
+.composer-drop {
+  position: absolute;
+  inset: 7px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  border: 1px dashed #aeb5b0;
+  border-radius: 17px;
+  color: #444b47;
+  background: rgba(249, 250, 249, .96);
+  font-size: 12px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.attachment-error {
+  width: min(790px, 100%);
+  margin: 0 auto 8px;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #eadad7;
+  border-radius: 10px;
+  color: #87524b;
+  background: #fff8f6;
+  font-size: 10px;
+}
+.attachment-error span { flex: 1; }
+.attachment-error button { color: #87524b; background: transparent; font-size: 9px; font-weight: 650; }
+.tool-indicator--vision { color: #3f6455; border-color: #d7e5de; background: #f5faf7; }
+.tool-indicator--warning { color: #8b6542; border-color: #eadfce; background: #fcf8f2; }
+.message-actions span { display: inline-flex; align-items: center; gap: 4px; }
+.message-actions .message-model {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a0a5a2;
+}
+.context-health-title { margin: -4px 0 11px; }
+.context-health {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #8a908c;
+}
+.context-health i { width: 7px; height: 7px; border-radius: 50%; background: #c5cac7; }
+.context-health.online { color: #4b685c; }
+.context-health.online i { background: var(--success); box-shadow: 0 0 0 3px rgba(14,166,107,.09); }
+.response-metrics {
+  margin-top: 12px;
+  padding-top: 11px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-top: 1px solid #edf0ee;
+}
+.response-metrics span {
+  min-width: 0;
+  padding: 5px 7px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 7px;
+  color: #737a75;
+  background: #f3f5f4;
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .tool-indicator--vision, .tool-indicator--warning { max-width: 125px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .message-actions .message-model { display: none; }
+}

@@ -10,6 +10,7 @@ import { WindowBar } from "../components/WindowBar";
 import { UpdateToast } from "../components/UpdateToast";
 import { MODEL_CATALOG, recommendModel } from "../data/models";
 import { native } from "../lib/native";
+import { resolveVisionModel, sameModel } from "../lib/modelRouting";
 import { useAppUpdater } from "../lib/updater";
 import { splitReasoningText, streamingVisibleAnswer, visibleAnswer } from "../lib/reasoning";
 import { speakText } from "../lib/speech";
@@ -25,13 +26,6 @@ import type {
 } from "../types";
 
 const makeId = () => crypto.randomUUID();
-const normalized = (name: string) => name.replace(":latest", "").toLowerCase();
-const isVisionModel = (model: OllamaModel | string) => {
-  if (typeof model !== "string" && model.capabilities?.some((capability) => capability.toLowerCase() === "vision")) return true;
-  const name = typeof model === "string" ? model : model.name;
-  return /gemma[34]|qwen3\.5|qwen(?:2\.5|3)-?vl|llava|llama3\.2-vision|minicpm-v|moondream|bakllava/i.test(name);
-};
-
 export function App() {
   const initialChats = useMemo(() => loadConversations(), []);
   const [view, setView] = useState<ViewId>("chat");
@@ -83,15 +77,13 @@ export function App() {
       const models = await native.listModels();
       setInstalled(models);
       const saved = loadActiveModel();
-      const selected = saved && models.some((model) => normalized(model.name) === normalized(saved))
+      const selected = saved && models.some((model) => sameModel(model.name, saved))
         ? saved
         : models[0]?.name ?? null;
       setActiveModel(selected);
       if (selected) saveActiveModel(selected);
       const savedVision = loadActiveVisionModel();
-      const selectedVision = savedVision && models.some((model) => normalized(model.name) === normalized(savedVision) && isVisionModel(model))
-        ? savedVision
-        : models.find(isVisionModel)?.name ?? null;
+      const selectedVision = resolveVisionModel(models, savedVision, selected);
       setActiveVisionModel(selectedVision);
       if (selectedVision) saveActiveVisionModel(selectedVision);
       if (!models.length) setView("models");
@@ -174,9 +166,7 @@ export function App() {
   const sendMessage = async (content: string, attachments: Attachment[] = []) => {
     if (!activeModel || request || !activeChat) return;
     const needsVision = attachments.some((attachment) => attachment.kind === "image");
-    const selectedVision = installed.find((model) => normalized(model.name) === normalized(activeVisionModel ?? "") && isVisionModel(model));
-    const activeText = installed.find((model) => normalized(model.name) === normalized(activeModel));
-    const visionModel = selectedVision?.name ?? (activeText && isVisionModel(activeText) ? activeText.name : installed.find(isVisionModel)?.name);
+    const visionModel = resolveVisionModel(installed, activeVisionModel, activeModel);
     if (needsVision && !visionModel) {
       const now = Date.now();
       const userMessage: ChatMessage = { id: makeId(), role: "user", content, attachments, createdAt: now };
@@ -196,7 +186,14 @@ export function App() {
     const chatId = activeChat.id;
     const userMessage: ChatMessage = { id: makeId(), role: "user", content, attachments, createdAt: Date.now() };
     const assistantId = makeId();
-    const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", content: "", createdAt: Date.now(), pending: true };
+    const assistantMessage: ChatMessage = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+      pending: true,
+      usedModel: requestModel,
+    };
     const conversation = [...activeChat.messages, userMessage, assistantMessage];
     updateChat(chatId, (chat) => ({
       ...chat,
@@ -212,6 +209,8 @@ export function App() {
     setApproval(null);
     let answerBuffer = "";
     let completed = false;
+    const requestStartedAt = performance.now();
+    let firstTokenMs: number | undefined;
 
     try {
       await native.agentChat(
@@ -239,13 +238,14 @@ export function App() {
             }));
           }
           if (event.kind === "token" && event.content) {
+            firstTokenMs ??= Math.round(performance.now() - requestStartedAt);
             answerBuffer += event.content;
             const visible = streamingVisibleAnswer(answerBuffer);
             updateChat(chatId, (chat) => ({
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, content: visible }
+                ? { ...message, content: visible, firstTokenMs }
                 : message),
             }));
           }
@@ -270,7 +270,14 @@ export function App() {
               ...chat,
               updatedAt: Date.now(),
               messages: chat.messages.map((message) => message.id === assistantId
-                ? { ...message, content: visibleAnswer(answerBuffer) || message.content, pending: false, tokensPerSecond: event.tokensPerSecond }
+                ? {
+                    ...message,
+                    content: visibleAnswer(answerBuffer) || message.content,
+                    pending: false,
+                    tokensPerSecond: event.tokensPerSecond,
+                    firstTokenMs,
+                    totalDurationMs: Math.round(performance.now() - requestStartedAt),
+                  }
                 : message),
             }));
           }
@@ -349,9 +356,9 @@ export function App() {
     setSettings((current) => ({ ...current, reasoning }));
   };
 
-  const activeLabel = MODEL_CATALOG.find((model) => normalized(model.id) === normalized(activeModel ?? ""))?.name
+  const activeLabel = MODEL_CATALOG.find((model) => sameModel(model.id, activeModel))?.name
     ?? activeModel ?? undefined;
-  const visionLabel = MODEL_CATALOG.find((model) => model.category === "vision" && normalized(model.id) === normalized(activeVisionModel ?? ""))?.name
+  const visionLabel = MODEL_CATALOG.find((model) => model.category === "vision" && sameModel(model.id, activeVisionModel))?.name
     ?? activeVisionModel ?? undefined;
   const activeVoiceId = settings.voiceEngine === "system"
     ? settings.voiceRate <= 0.9 ? "voice:dark-offline" : "voice:system"
@@ -450,6 +457,7 @@ export function App() {
                 modelLabel={activeLabel}
                 reasoning={activeChat.reasoning}
                 webEnabled={settings.webEnabled}
+                visionModelLabel={visionLabel}
                 onReasoningChange={changeReasoning}
                 onSend={(message, attachments) => void sendMessage(message, attachments)}
                 onStop={stopAgent}
@@ -464,8 +472,10 @@ export function App() {
               status={status}
               comfyStatus={comfyStatus}
               settings={settings}
+              lastResponse={lastAssistant}
               onOpenModels={() => setView("models")}
               onOpenSettings={() => setView("settings")}
+              onRefresh={() => void refreshAll()}
               onAction={(prompt) => void sendMessage(prompt)}
             />
           )}

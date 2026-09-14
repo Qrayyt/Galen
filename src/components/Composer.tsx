@@ -3,7 +3,7 @@ import {
   LoaderCircle, Mic, Paperclip, Square, X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import { prepareAttachment } from "../lib/attachments";
 import { isTauri, native } from "../lib/native";
 import type { Attachment, ReasoningLevel } from "../types";
@@ -25,6 +25,7 @@ interface ComposerProps {
   modelLabel?: string;
   reasoning: ReasoningLevel;
   webEnabled: boolean;
+  visionModelLabel?: string;
   onReasoningChange: (level: ReasoningLevel) => void;
   onSend: (message: string, attachments: Attachment[]) => void;
   onStop: () => void;
@@ -38,13 +39,15 @@ const LEVELS: Array<{ id: ReasoningLevel; label: string; detail: string }> = [
 ];
 
 export function Composer({
-  disabled, busy, modelLabel, reasoning, webEnabled, onReasoningChange, onSend, onStop, onVoiceMode,
+  disabled, busy, modelLabel, reasoning, webEnabled, visionModelLabel, onReasoningChange, onSend, onStop, onVoiceMode,
 }: ComposerProps) {
   const [value, setValue] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [processing, setProcessing] = useState(false);
   const [listening, setListening] = useState(false);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const areaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -71,21 +74,41 @@ export function Composer({
     }
   };
 
-  const pickFiles = async (files: FileList | null) => {
-    if (!files?.length) return;
+  const pickFiles = async (files: File[]) => {
+    if (!files.length) return;
+    const slots = Math.max(0, 8 - attachments.length);
+    if (!slots) {
+      setAttachmentError("Можно прикрепить не больше 8 файлов за сообщение.");
+      return;
+    }
     setProcessing(true);
+    setAttachmentError(null);
     try {
       const prepared: Attachment[] = [];
-      for (const file of Array.from(files).slice(0, 8)) {
-        prepared.push(await prepareAttachment(file));
+      const errors: string[] = [];
+      for (const file of files.slice(0, slots)) {
+        try { prepared.push(await prepareAttachment(file)); }
+        catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
       }
       setAttachments((current) => [...current, ...prepared].slice(0, 8));
-    } catch (error) {
-      window.alert(error instanceof Error ? error.message : String(error));
+      if (errors.length) setAttachmentError(errors.join(" "));
     } finally {
       setProcessing(false);
       if (fileRef.current) fileRef.current.value = "";
     }
+  };
+
+  const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData.files);
+    if (!files.length) return;
+    event.preventDefault();
+    void pickFiles(files);
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    if (!disabled && !busy) void pickFiles(Array.from(event.dataTransfer.files));
   };
 
   const toggleListening = async () => {
@@ -134,7 +157,13 @@ export function Composer({
   const selected = LEVELS.find((level) => level.id === reasoning)!;
 
   return (
-    <div className="composer-dock">
+    <div
+      className={`composer-dock ${dragActive ? "composer-dock--drag" : ""}`}
+      onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false); }}
+      onDrop={handleDrop}
+    >
       <AnimatePresence>
         {!!attachments.length && (
           <motion.div className="attachment-strip" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
@@ -151,12 +180,16 @@ export function Composer({
         )}
       </AnimatePresence>
 
+      {attachmentError && <div className="attachment-error"><X size={13} /><span>{attachmentError}</span><button onClick={() => setAttachmentError(null)}>Скрыть</button></div>}
+
       <div className={`composer ${disabled ? "composer--disabled" : ""}`}>
+        {dragActive && <div className="composer-drop"><Paperclip size={19} /><span>Отпусти файлы здесь</span></div>}
         <textarea
           ref={areaRef}
           value={value}
           onChange={(event) => setValue(event.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           rows={1}
           disabled={disabled}
           placeholder={disabled ? "Сначала скачай и подключи модель" : "Спроси что угодно"}
@@ -171,7 +204,7 @@ export function Composer({
               multiple
               hidden
               accept="image/*,.pdf,.docx,.txt,.md,.csv,.json,.js,.ts,.tsx,.py,.rs"
-              onChange={(event) => void pickFiles(event.target.files)}
+              onChange={(event) => void pickFiles(Array.from(event.target.files ?? []))}
             />
             <button onClick={() => fileRef.current?.click()} disabled={processing} title="Прикрепить файл">
               {processing ? <LoaderCircle className="spin" size={18} /> : <Paperclip size={18} />}
@@ -179,6 +212,11 @@ export function Composer({
             <button className={listening ? "active" : ""} onClick={() => void toggleListening()} title="Голосовой ввод"><Mic size={18} /></button>
             <button onClick={onVoiceMode} title="Голосовой чат"><Headphones size={18} /></button>
             {webEnabled && <span className="tool-indicator" title="Интернет включён"><Globe2 size={14} /> Веб</span>}
+            {attachments.some((attachment) => attachment.kind === "image") && (
+              <span className={`tool-indicator ${visionModelLabel ? "tool-indicator--vision" : "tool-indicator--warning"}`}>
+                <ImageIcon size={14} /> {visionModelLabel ? `Vision · ${visionModelLabel}` : "Vision не настроена"}
+              </span>
+            )}
           </div>
 
           <div className="composer-actions">

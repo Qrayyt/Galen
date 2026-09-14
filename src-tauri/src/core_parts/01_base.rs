@@ -2,7 +2,7 @@ mod coding_tools;
 mod generation;
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use kothok_edge_tts::{init_tls, EdgeTts, Engine as TtsEngine, TtsEvent};
 use regex::Regex;
 use semver::Version;

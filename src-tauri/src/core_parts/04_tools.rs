@@ -66,7 +66,7 @@ async fn ollama_stream_answer(
         "stream": true,
         "think": false,
         "keep_alive": "30m",
-        "options": { "temperature": 0.30, "num_ctx": 4096, "num_predict": 768 }
+        "options": { "temperature": 0.28, "num_ctx": 2048, "num_predict": 384 }
     });
     let response = state.client.post(format!("{OLLAMA_API}/chat"))
         .json(&body).send().await

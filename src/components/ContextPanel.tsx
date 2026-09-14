@@ -1,6 +1,6 @@
-import { ChevronRight, Eye, FileSearch, Globe2, MonitorCog, Settings2, Sparkles, TerminalSquare } from "lucide-react";
+import { ChevronRight, Eye, FileSearch, Gauge, Globe2, MonitorCog, RefreshCw, Settings2, Sparkles, TerminalSquare, Timer } from "lucide-react";
 import galenLogo from "../assets/galen.svg";
-import type { AppSettings, ContentEngineStatus, OllamaStatus } from "../types";
+import type { AppSettings, ChatMessage, ContentEngineStatus, OllamaStatus } from "../types";
 
 interface ContextPanelProps {
   model?: string;
@@ -8,17 +8,24 @@ interface ContextPanelProps {
   status: OllamaStatus | null;
   comfyStatus: ContentEngineStatus | null;
   settings: AppSettings;
+  lastResponse?: ChatMessage;
   onOpenModels: () => void;
   onOpenSettings: () => void;
+  onRefresh: () => void;
   onAction: (prompt: string) => void;
 }
 
 export function ContextPanel({
-  model, visionModel, status, comfyStatus, settings, onOpenModels, onOpenSettings, onAction,
+  model, visionModel, status, comfyStatus, settings, lastResponse, onOpenModels, onOpenSettings, onRefresh, onAction,
 }: ContextPanelProps) {
+  const ready = Boolean(status?.running && model);
   return (
     <aside className="context-panel">
       <section className="context-card context-model-card">
+        <div className="context-card-title context-health-title">
+          <span className={`context-health ${ready ? "online" : ""}`}><i />{ready ? "Система готова" : "Нужна настройка"}</span>
+          <button onClick={onRefresh} title="Обновить состояние"><RefreshCw size={14} /></button>
+        </div>
         <div className="context-kicker">Разговорная модель</div>
         <button className="context-model" onClick={onOpenModels}>
           <span className="context-model-logo"><img src={galenLogo} alt="" /></span>
@@ -26,6 +33,12 @@ export function ContextPanel({
           <ChevronRight size={15} />
         </button>
         <div className="vision-route"><Eye size={14} /><span><strong>Vision</strong><small>{visionModel ?? "Не настроена"}</small></span><i className={visionModel ? "online" : ""} /></div>
+        {lastResponse && (lastResponse.firstTokenMs || lastResponse.tokensPerSecond) && (
+          <div className="response-metrics">
+            {lastResponse.firstTokenMs && <span title="Время до первого фрагмента ответа"><Timer size={13} />{formatLatency(lastResponse.firstTokenMs)}</span>}
+            {lastResponse.tokensPerSecond && <span title="Скорость генерации"><Gauge size={13} />{lastResponse.tokensPerSecond.toFixed(1)} ток/с</span>}
+          </div>
+        )}
       </section>
 
       <section className="context-card">
@@ -46,6 +59,11 @@ export function ContextPanel({
       <div className="context-signature"><span>Порядок — форма свободы.</span><strong>Galenite</strong></div>
     </aside>
   );
+}
+
+function formatLatency(milliseconds: number): string {
+  if (milliseconds < 1000) return `${milliseconds} мс`;
+  return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)} с до ответа`;
 }
 
 function StatusRow({ icon: Icon, label, active }: { icon: typeof Globe2; label: string; active: boolean }) {

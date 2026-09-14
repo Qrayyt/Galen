@@ -39,6 +39,9 @@ export interface ChatMessage {
   pending?: boolean;
   error?: boolean;
   tokensPerSecond?: number;
+  firstTokenMs?: number;
+  totalDurationMs?: number;
+  usedModel?: string;
   reasoning?: string;
   reasoningSeconds?: number;
 }
