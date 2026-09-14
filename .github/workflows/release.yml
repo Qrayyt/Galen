@@ -86,16 +86,15 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.6 makes the local assistant visibly faster, reliable with images, and calmer to use.
+            Galen 0.7 makes local image work frictionless and exposes real performance instead of hiding it.
 
-            - rebuilt light three-pane workspace in the Galenite visual system
-            - the supplied Galen mark replaces the generic black orb throughout the product
-            - lossless token assembly fixes joined words and broken Markdown during streaming
-            - dedicated persisted Vision model routing, independent from the chat model
-            - Ollama capability detection verifies Vision support instead of guessing from a model name
-            - real streaming fast path for short prompts in Light mode
-            - smaller Light-mode context and response budgets for lower latency
-            - background model warm-up and a 30-minute keep-alive
+            - paste images from the clipboard or drag files directly into the composer
+            - normalize oversized and uncommon image formats before sending them to Ollama
+            - show time-to-first-token, generation speed, and the model used for every answer
+            - display a clear system-ready state and last-response performance in the context panel
+            - parallel Ollama capability discovery for faster startup with multiple installed models
+            - tested Vision routing that trusts real model capabilities with safe family-name fallback
+            - smaller 2K streaming context for short Light-mode conversations
           releaseDraft: true
           prerelease: false
           args: --bundles nsis
@@ -157,16 +156,15 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "Galen ${{ needs.prepare.outputs.tag }}"
           releaseBody: |
-            Galen 0.6 makes the local assistant visibly faster, reliable with images, and calmer to use.
+            Galen 0.7 makes local image work frictionless and exposes real performance instead of hiding it.
 
-            - rebuilt light three-pane workspace in the Galenite visual system
-            - the supplied Galen mark replaces the generic black orb throughout the product
-            - lossless token assembly fixes joined words and broken Markdown during streaming
-            - dedicated persisted Vision model routing, independent from the chat model
-            - Ollama capability detection verifies Vision support instead of guessing from a model name
-            - real streaming fast path for short prompts in Light mode
-            - smaller Light-mode context and response budgets for lower latency
-            - background model warm-up and a 30-minute keep-alive
+            - paste images from the clipboard or drag files directly into the composer
+            - normalize oversized and uncommon image formats before sending them to Ollama
+            - show time-to-first-token, generation speed, and the model used for every answer
+            - display a clear system-ready state and last-response performance in the context panel
+            - parallel Ollama capability discovery for faster startup with multiple installed models
+            - tested Vision routing that trusts real model capabilities with safe family-name fallback
+            - smaller 2K streaming context for short Light-mode conversations
           releaseDraft: true
           prerelease: false
           args: --bundles appimage

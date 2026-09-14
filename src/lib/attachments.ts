@@ -3,6 +3,8 @@ import type { Attachment, AttachmentKind } from "../types";
 
 const MAX_FILE_BYTES = 24 * 1024 * 1024;
 const MAX_TEXT_LENGTH = 140_000;
+const MAX_IMAGE_EDGE = 2560;
+const MAX_PASSTHROUGH_IMAGE_BYTES = 8 * 1024 * 1024;
 
 const id = () => crypto.randomUUID();
 
@@ -23,6 +25,42 @@ function toDataUrl(file: File): Promise<string> {
     reader.onload = () => resolve(String(reader.result));
     reader.readAsDataURL(file);
   });
+}
+
+async function prepareImage(file: File): Promise<{ dataUrl: string; mime: string; size: number }> {
+  const supported = new Set(["image/jpeg", "image/png", "image/webp"]);
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error(`${file.name}: формат изображения не поддерживается. Используй PNG, JPEG или WebP.`);
+  }
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height));
+  const needsNormalization = !supported.has(file.type) || file.size > MAX_PASSTHROUGH_IMAGE_BYTES || scale < 1;
+  if (!needsNormalization) {
+    bitmap.close();
+    return { dataUrl: await toDataUrl(file), mime: file.type, size: file.size };
+  }
+
+  const width = Math.max(1, Math.round(bitmap.width * scale));
+  const height = Math.max(1, Math.round(bitmap.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    bitmap.close();
+    throw new Error(`${file.name}: не удалось подготовить изображение`);
+  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
+  bitmap.close();
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((value) => value ? resolve(value) : reject(new Error(`${file.name}: не удалось сжать изображение`)), "image/jpeg", 0.9);
+  });
+  return { dataUrl: await toDataUrl(new File([blob], file.name, { type: blob.type })), mime: blob.type, size: blob.size };
 }
 
 async function readPdf(buffer: ArrayBuffer): Promise<string> {
@@ -59,7 +97,7 @@ export async function prepareAttachment(file: File): Promise<Attachment> {
   const base = { id: id(), name: file.name, mime: file.type || "application/octet-stream", size: file.size, kind };
 
   if (kind === "image") {
-    return { ...base, dataUrl: await toDataUrl(file) };
+    return { ...base, ...(await prepareImage(file)) };
   }
 
   const buffer = await file.arrayBuffer();

@@ -1,7 +1,7 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  AlertCircle, Brain, Check, CheckCircle2, ChevronDown, Clipboard, ExternalLink, ShieldCheck,
-  TerminalSquare, Volume2, XCircle,
+  AlertCircle, Brain, Check, CheckCircle2, ChevronDown, Clipboard, ExternalLink, Gauge, ShieldCheck,
+  TerminalSquare, Timer, Volume2, XCircle,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
@@ -161,7 +161,9 @@ export function ChatView({
                     </button>
                     <button onClick={() => speak(message)} title="Озвучить"><Volume2 size={15} /></button>
                     {speechError === message.id && <span>Нейронный голос недоступен</span>}
-                    {message.tokensPerSecond && <span>{message.tokensPerSecond.toFixed(1)} ток/с</span>}
+                    {message.firstTokenMs && <span title="Время до первого фрагмента"><Timer size={12} />{formatLatency(message.firstTokenMs)}</span>}
+                    {message.tokensPerSecond && <span><Gauge size={12} />{message.tokensPerSecond.toFixed(1)} ток/с</span>}
+                    {message.usedModel && <span className="message-model" title={message.usedModel}>{message.usedModel}</span>}
                   </div>
                 )}
               </div>
@@ -206,6 +208,10 @@ function formatReasoningTime(seconds?: number): string {
   if (!seconds) return "несколько секунд";
   const value = Math.max(1, Math.round(seconds));
   return value < 60 ? `${value} сек` : `${Math.floor(value / 60)} мин ${value % 60} сек`;
+}
+
+function formatLatency(milliseconds: number): string {
+  return milliseconds < 1000 ? `${milliseconds} мс` : `${(milliseconds / 1000).toFixed(1)} с`;
 }
 
 function CodeBlock({ children }: { children?: ReactNode }) {

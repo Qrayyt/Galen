@@ -57,30 +57,39 @@ fn open_comfyui() -> Result<(), String> { open::that(COMFYUI_API).map_err(|error
 
 #[tauri::command]
 async fn list_models(state: State<'_, AppState>) -> Result<Vec<InstalledModel>, String> {
-    let tags = state.client.get(format!("{OLLAMA_API}/tags")).send().await.map_err(|error| format!("Ollama недоступна: {error}"))?.error_for_status().map_err(|error| error.to_string())?.json::<TagsResponse>().await.map_err(|error| format!("Не удалось прочитать список моделей: {error}"))?;
-    let mut installed = Vec::with_capacity(tags.models.len());
-    for model in tags.models {
-        let capabilities = state.client
-            .post(format!("{OLLAMA_API}/show"))
-            .json(&json!({ "model": &model.name }))
-            .timeout(Duration::from_secs(3))
-            .send()
-            .await
-            .ok()
-            .and_then(|response| response.error_for_status().ok());
-        let capabilities = match capabilities {
-            Some(response) => response.json::<ShowResponse>().await.map(|value| value.capabilities).unwrap_or_default(),
-            None => Vec::new(),
-        };
-        installed.push(InstalledModel {
-            name: model.name,
-            size: model.size,
-            modified_at: model.modified_at,
-            parameter_size: model.details.as_ref().and_then(|details| details.parameter_size.clone()),
-            quantization: model.details.and_then(|details| details.quantization_level),
-            capabilities,
-        });
-    }
+    let tags = state.client
+        .get(format!("{OLLAMA_API}/tags"))
+        .timeout(Duration::from_secs(5))
+        .send().await
+        .map_err(|error| format!("Ollama недоступна: {error}"))?
+        .error_for_status().map_err(|error| error.to_string())?
+        .json::<TagsResponse>().await
+        .map_err(|error| format!("Не удалось прочитать список моделей: {error}"))?;
+    let installed = join_all(tags.models.into_iter().map(|model| {
+        let client = state.client.clone();
+        async move {
+            let capabilities = client
+                .post(format!("{OLLAMA_API}/show"))
+                .json(&json!({ "model": &model.name }))
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+                .ok()
+                .and_then(|response| response.error_for_status().ok());
+            let capabilities = match capabilities {
+                Some(response) => response.json::<ShowResponse>().await.map(|value| value.capabilities).unwrap_or_default(),
+                None => Vec::new(),
+            };
+            InstalledModel {
+                name: model.name,
+                size: model.size,
+                modified_at: model.modified_at,
+                parameter_size: model.details.as_ref().and_then(|details| details.parameter_size.clone()),
+                quantization: model.details.and_then(|details| details.quantization_level),
+                capabilities,
+            }
+        }
+    })).await;
     Ok(installed)
 }
 
@@ -88,7 +97,7 @@ async fn list_models(state: State<'_, AppState>) -> Result<Vec<InstalledModel>, 
 async fn warm_model(model: String, state: State<'_, AppState>) -> Result<(), String> {
     state.client
         .post(format!("{OLLAMA_API}/generate"))
-        .json(&json!({ "model": model, "keep_alive": "30m" }))
+        .json(&json!({ "model": model, "prompt": "", "stream": false, "keep_alive": "30m" }))
         .timeout(Duration::from_secs(180))
         .send()
         .await
