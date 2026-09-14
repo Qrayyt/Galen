@@ -88,6 +88,7 @@ export const native = {
     } finally { unlisten?.(); }
   },
   listModels: (): Promise<OllamaModel[]> => safeInvoke("list_models"),
+  warmModel: (model: string): Promise<void> => safeInvoke("warm_model", { model }),
   deleteModel: (model: string): Promise<void> => safeInvoke("delete_model", { model }),
 
   pullModel: async (model: string, onProgress: (progress: PullProgress) => void): Promise<void> => {

@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { native } from "../lib/native";
+import galenLogo from "../assets/galen.svg";
 import { visibleAnswer } from "../lib/reasoning";
 import { speakText, stopSpeech } from "../lib/speech";
 import type { AgentPhase, AppSettings, ChatMessage, ToolApproval } from "../types";
@@ -106,7 +107,7 @@ export function ChatView({
               transition={{ duration: 0.34, ease: [0.22, 1, 0.36, 1] }}
             >
               {message.role === "assistant" && (
-                <div className="assistant-avatar"><span /></div>
+                <div className="assistant-avatar"><img src={galenLogo} alt="Galen" /></div>
               )}
               <div className="message-body">
                 {!!message.attachments?.length && (

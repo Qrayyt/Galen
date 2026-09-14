@@ -20,10 +20,126 @@ fn tool_definitions(request: &AgentRequest) -> Vec<Value> {
 }
 
 async fn ollama_step(state: &AppState, request: &AgentRequest, messages: &[Value], tools: &[Value]) -> Result<OllamaResponse, String> {
-    let (num_ctx, temperature, num_predict, think) = match request.reasoning.as_str() { "light" => (12288, 0.35, 3072, false), "heavy" => (32768, 0.50, 8192, true), _ => (24576, 0.42, 6144, true) };
-    let mut body = json!({"model":request.model,"messages":messages,"stream":false,"think":think,"keep_alive":"15m","options":{"temperature":temperature,"num_ctx":num_ctx,"num_predict":num_predict}});
+    let (num_ctx, temperature, num_predict, think) = match request.reasoning.as_str() { "light" => (4096, 0.30, 768, false), "heavy" => (24576, 0.50, 6144, true), _ => (12288, 0.42, 3072, true) };
+    let mut body = json!({"model":request.model,"messages":messages,"stream":false,"think":think,"keep_alive":"30m","options":{"temperature":temperature,"num_ctx":num_ctx,"num_predict":num_predict}});
     if !tools.is_empty() { body["tools"] = Value::Array(tools.to_vec()); }
     state.client.post(format!("{OLLAMA_API}/chat")).json(&body).send().await.map_err(|error| format!("Не удалось обратиться к модели: {error}"))?.error_for_status().map_err(|error| format!("Ollama вернула ошибку: {error}"))?.json::<OllamaResponse>().await.map_err(|error| format!("Не удалось прочитать ответ модели: {error}"))
+}
+
+fn is_fast_conversation(request: &AgentRequest) -> bool {
+    if request.reasoning != "light" || request.messages.iter().any(|message| !message.images.is_empty()) {
+        return false;
+    }
+    let latest = request.messages.iter().rev().find(|message| message.role == "user").map(|message| message.content.trim()).unwrap_or_default();
+    if latest.is_empty() || latest.chars().count() > 280 { return false; }
+    let lower = latest.to_lowercase();
+    let action_words = [
+        "найди", "поищи", "сегодня", "новост", "актуаль", "открой", "файл", "папк", "команд",
+        "терминал", "создай", "запиши", "измени", "удали", "запусти", "проверь", "проанализ",
+        "сгенер", "нарис", "видео", "фото", "изображ", "search", "find", "open", "file", "run ",
+        "create", "write", "edit", "delete", "generate", "latest", "today", "http://", "https://",
+    ];
+    !action_words.iter().any(|word| lower.contains(word))
+}
+
+fn compact_system_prompt(request: &AgentRequest) -> String {
+    let memories = request.memories.iter().take(12)
+        .map(|item| format!("- {}: {}", item.label, item.value))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let custom = request.custom_instructions.as_deref().map(str::trim).filter(|value| !value.is_empty()).unwrap_or("Нет");
+    format!(
+        "Ты Galen — локальный персональный ассистент. Отвечай сразу, естественно и по делу на языке пользователя. Не показывай chain-of-thought и служебные теги. Для приветствия или короткой реплики отвечай кратко.\n\nПостоянные инструкции:\n{custom}\n\nПамять:\n{}",
+        if memories.is_empty() { "Нет" } else { &memories },
+    )
+}
+
+async fn ollama_stream_answer(
+    state: &AppState,
+    request: &AgentRequest,
+    messages: &[Value],
+    app: &AppHandle,
+) -> Result<(), String> {
+    let body = json!({
+        "model": request.model,
+        "messages": messages,
+        "stream": true,
+        "think": false,
+        "keep_alive": "30m",
+        "options": { "temperature": 0.30, "num_ctx": 4096, "num_predict": 768 }
+    });
+    let response = state.client.post(format!("{OLLAMA_API}/chat"))
+        .json(&body).send().await
+        .map_err(|error| format!("Не удалось обратиться к модели: {error}"))?
+        .error_for_status().map_err(|error| format!("Ollama вернула ошибку: {error}"))?;
+    let mut stream = response.bytes_stream();
+    let mut buffer = Vec::<u8>::new();
+    let mut answer = String::new();
+    let mut thinking = String::new();
+    let mut eval_count = None;
+    let mut eval_duration = None;
+    let mut writing = false;
+
+    while let Some(bytes) = stream.next().await {
+        if is_cancelled(state, &request.request_id).await { return Ok(()); }
+        buffer.extend_from_slice(&bytes.map_err(|error| error.to_string())?);
+        while let Some(position) = buffer.iter().position(|byte| *byte == b'\n') {
+            let line = buffer.drain(..=position).collect::<Vec<_>>();
+            let line = String::from_utf8_lossy(&line);
+            if line.trim().is_empty() { continue; }
+            let chunk: OllamaStreamChunk = serde_json::from_str(line.trim()).map_err(|error| format!("Некорректный streaming-ответ Ollama: {error}"))?;
+            thinking.push_str(&chunk.message.thinking);
+            if !chunk.message.content.is_empty() {
+                if !writing { emit_status(app, &request.request_id, "writing", "Отвечаю"); writing = true; }
+                answer.push_str(&chunk.message.content);
+                app.emit("agent-event", AgentEvent {
+                    request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
+                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                }).map_err(|error| error.to_string())?;
+            }
+            if chunk.eval_count.is_some() { eval_count = chunk.eval_count; }
+            if chunk.eval_duration.is_some() { eval_duration = chunk.eval_duration; }
+        }
+    }
+    if !buffer.is_empty() {
+        let line = String::from_utf8_lossy(&buffer);
+        if let Ok(chunk) = serde_json::from_str::<OllamaStreamChunk>(line.trim()) {
+            thinking.push_str(&chunk.message.thinking);
+            if !chunk.message.content.is_empty() {
+                answer.push_str(&chunk.message.content);
+                app.emit("agent-event", AgentEvent {
+                    request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
+                    content: Some(chunk.message.content), sources: None, approval: None, tokens_per_second: None, reasoning_seconds: None, error: None,
+                }).map_err(|error| error.to_string())?;
+            }
+            eval_count = chunk.eval_count.or(eval_count);
+            eval_duration = chunk.eval_duration.or(eval_duration);
+        }
+    }
+    let (_, hidden) = split_reasoning(&answer, &thinking);
+    if !hidden.is_empty() {
+        app.emit("agent-event", AgentEvent {
+            request_id: request.request_id.clone(), kind: "reasoning".to_string(), phase: Some("thinking".to_string()),
+            label: Some("Короткий ответ".to_string()), content: Some(hidden), sources: None, approval: None,
+            tokens_per_second: None, reasoning_seconds: None, error: None,
+        }).map_err(|error| error.to_string())?;
+    }
+    if answer.trim().is_empty() {
+        app.emit("agent-event", AgentEvent {
+            request_id: request.request_id.clone(), kind: "token".to_string(), phase: Some("writing".to_string()), label: None,
+            content: Some("Не получилось сформировать ответ. Попробуй ещё раз.".to_string()), sources: None, approval: None,
+            tokens_per_second: None, reasoning_seconds: None, error: None,
+        }).map_err(|error| error.to_string())?;
+    }
+    let speed = match (eval_count, eval_duration) {
+        (Some(count), Some(duration)) if duration > 0.0 => Some(count / (duration / 1_000_000_000.0)),
+        _ => None,
+    };
+    app.emit("agent-event", AgentEvent {
+        request_id: request.request_id.clone(), kind: "done".to_string(), phase: Some("done".to_string()), label: Some("Готово".to_string()),
+        content: None, sources: None, approval: None, tokens_per_second: speed, reasoning_seconds: None, error: None,
+    }).map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 async fn is_cancelled(state: &AppState, request_id: &str) -> bool { state.cancelled.lock().await.contains(request_id) }

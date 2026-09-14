@@ -1,6 +1,7 @@
 import { motion } from "motion/react";
-import { Bot, Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Trash2, X } from "lucide-react";
+import { Boxes, ChevronLeft, MessageSquarePlus, Search, Settings2, Trash2, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import galenLogo from "../assets/galen.svg";
 import type { Conversation, ViewId } from "../types";
 
 interface NavRailProps {
@@ -27,12 +28,12 @@ export function NavRail({
   return (
     <motion.aside
       className={`sidebar ${open ? "sidebar--open" : "sidebar--closed"}`}
-      animate={{ width: open ? 272 : 72 }}
+      animate={{ width: open ? 292 : 72 }}
       transition={{ type: "spring", stiffness: 330, damping: 34 }}
     >
       <div className="sidebar-brand">
-        <button className="brand-orb" onClick={() => onChange("chat")} aria-label="Galen"><span /></button>
-        {open && <strong>Galen</strong>}
+        <button className="brand-orb" onClick={() => onChange("chat")} aria-label="Galen"><img src={galenLogo} alt="" /></button>
+        {open && <div className="brand-copy"><strong>Galen</strong><span>AI Assistant</span></div>}
         {open && <button className="sidebar-collapse" onClick={onToggle} aria-label="Свернуть"><ChevronLeft size={17} /></button>}
       </div>
 
@@ -49,6 +50,17 @@ export function NavRail({
         </label>
       )}
 
+      <nav className="sidebar-nav sidebar-nav--primary">
+        <button className={view === "models" ? "active" : ""} onClick={() => onChange("models")} title="Модели">
+          <Boxes size={18} /><span>Модели</span>
+        </button>
+        <button className={view === "settings" ? "active" : ""} onClick={() => onChange("settings")} title="Настройки">
+          <Settings2 size={18} /><span>Настройки</span>
+        </button>
+      </nav>
+
+      {open && <div className="sidebar-section-label"><span>Недавние чаты</span></div>}
+
       <div className="chat-history">
         {open && visibleChats.map((chat) => (
           <div className={`chat-row ${view === "chat" && chat.id === activeChatId ? "active" : ""}`} key={chat.id}>
@@ -63,18 +75,6 @@ export function NavRail({
         ))}
         {open && !visibleChats.length && <div className="chat-history-empty">Ничего не найдено</div>}
       </div>
-
-      <nav className="sidebar-nav">
-        <button className={view === "chat" ? "active" : ""} onClick={() => onChange("chat")} title="Чаты">
-          <Bot size={18} /><span>Чаты</span>
-        </button>
-        <button className={view === "models" ? "active" : ""} onClick={() => onChange("models")} title="Модели">
-          <Boxes size={18} /><span>Модели</span>
-        </button>
-        <button className={view === "settings" ? "active" : ""} onClick={() => onChange("settings")} title="Настройки">
-          <Settings2 size={18} /><span>Настройки</span>
-        </button>
-      </nav>
 
       <div className="privacy-mark"><i />{open && <span>Локально и приватно</span>}</div>
     </motion.aside>

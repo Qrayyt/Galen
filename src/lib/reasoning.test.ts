@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitReasoningText, visibleAnswer } from "./reasoning";
+import { splitReasoningText, streamingVisibleAnswer, visibleAnswer } from "./reasoning";
 
 describe("reasoning isolation", () => {
   it("removes complete reasoning tags from visible content", () => {
@@ -16,5 +16,13 @@ describe("reasoning isolation", () => {
     const result = splitReasoningText("<|channel|>analysis Скрыто<|channel|>final Итог");
     expect(result.answer).toBe("Итог");
     expect(result.reasoning).toBe("Скрыто");
+  });
+
+  it("preserves spaces and newlines that arrive as separate stream chunks", () => {
+    const chunks = ["Привет", " ", "Илья", "!\n", "Как", " ", "дела?"];
+    let buffer = "";
+    const snapshots = chunks.map((chunk) => streamingVisibleAnswer(buffer += chunk));
+    expect(snapshots.at(-1)).toBe("Привет Илья!\nКак дела?");
+    expect(visibleAnswer(snapshots.at(-1)!)).toBe("Привет Илья!\nКак дела?");
   });
 });

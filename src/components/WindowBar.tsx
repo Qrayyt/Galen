@@ -5,9 +5,10 @@ interface WindowBarProps {
   sidebarOpen: boolean;
   onMenu: () => void;
   title?: string;
+  subtitle?: string;
 }
 
-export function WindowBar({ sidebarOpen, onMenu, title }: WindowBarProps) {
+export function WindowBar({ sidebarOpen, onMenu, title, subtitle }: WindowBarProps) {
   return (
     <header className="window-bar" data-tauri-drag-region>
       {!sidebarOpen && (
@@ -15,7 +16,7 @@ export function WindowBar({ sidebarOpen, onMenu, title }: WindowBarProps) {
           <Menu size={19} />
         </button>
       )}
-      <span className="window-title">{title}</span>
+      <div className="window-heading"><span className="window-title">{title}</span>{subtitle && <small>{subtitle}</small>}</div>
       <div className="window-drag" data-tauri-drag-region />
       <div className="window-controls">
         <button onClick={() => void native.minimize()} aria-label="Свернуть"><Minus size={15} /></button>
@@ -25,4 +26,3 @@ export function WindowBar({ sidebarOpen, onMenu, title }: WindowBarProps) {
     </header>
   );
 }
-

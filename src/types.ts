@@ -82,6 +82,7 @@ export interface OllamaModel {
   modifiedAt: string;
   parameterSize?: string;
   quantization?: string;
+  capabilities?: string[];
 }
 
 export interface OllamaStatus {

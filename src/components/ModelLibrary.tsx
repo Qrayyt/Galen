@@ -19,11 +19,12 @@ interface ModelLibraryProps {
   comfyStatus: ContentEngineStatus | null;
   installed: OllamaModel[];
   activeModel: string | null;
+  activeVisionModel: string | null;
   activeVoiceId: string;
   pulls: Record<string, PullProgress>;
-  onPull: (model: string) => void;
+  onPull: (model: string, category: "chat" | "vision") => void;
   onDelete: (model: string) => void;
-  onSelect: (model: string) => void;
+  onSelect: (model: string, category: "chat" | "vision") => void;
   onSelectVoice: (model: string) => void;
   onRetryOllama: () => void;
   onRetryComfy: () => void;
@@ -57,7 +58,7 @@ const COMFY_GUIDES: Record<string, string> = {
 
 export function ModelLibrary(props: ModelLibraryProps) {
   const {
-    hardware, status, comfyStatus, installed, activeModel, activeVoiceId, pulls, onPull, onDelete, onSelect, onSelectVoice,
+    hardware, status, comfyStatus, installed, activeModel, activeVisionModel, activeVoiceId, pulls, onPull, onDelete, onSelect, onSelectVoice,
     onRetryOllama, onRetryComfy, onOpenComfy, onOpenSettings,
   } = props;
   const [category, setCategory] = useState<ModelCatalogItem["category"]>("chat");
@@ -145,13 +146,17 @@ export function ModelLibrary(props: ModelLibraryProps) {
       variant={variant}
       fit={hardware ? modelFit(model, hardware) : null}
       installed={installedNames.has(normalized(model.id)) || model.engine === "builtin"}
-      active={model.category === "voice" ? activeVoiceId === model.id : normalized(activeModel ?? "") === normalized(model.id)}
+      active={model.category === "voice"
+        ? activeVoiceId === model.id
+        : model.category === "vision"
+          ? normalized(activeVisionModel ?? "") === normalized(model.id)
+          : normalized(activeModel ?? "") === normalized(model.id)}
       progress={pulls[model.id]}
       disabled={!status?.running}
       comfyRunning={Boolean(comfyStatus?.running)}
-      onPull={() => onPull(model.id)}
+      onPull={() => onPull(model.id, model.category === "vision" ? "vision" : "chat")}
       onDelete={() => onDelete(model.id)}
-      onSelect={() => onSelect(model.id)}
+      onSelect={() => onSelect(model.id, model.category === "vision" ? "vision" : "chat")}
       onSelectVoice={() => onSelectVoice(model.id)}
       onOpenSettings={onOpenSettings}
       onOpenComfy={onOpenComfy}
@@ -249,7 +254,7 @@ export function ModelLibrary(props: ModelLibraryProps) {
       {category === "chat" && (
         <section className="custom-model">
           <div><span className="eyebrow">Ollama registry</span><h2>Любая другая модель</h2><p>Вставь точное имя из каталога Ollama.</p></div>
-          <div className="custom-model-action"><input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="model:tag" /><button className="black-button" disabled={!customModel.trim() || !status?.running} onClick={() => onPull(customModel.trim())}>Скачать</button></div>
+          <div className="custom-model-action"><input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="model:tag" /><button className="black-button" disabled={!customModel.trim() || !status?.running} onClick={() => onPull(customModel.trim(), "chat")}>Скачать</button></div>
         </section>
       )}
     </main>

@@ -6,6 +6,7 @@ const ACTIVE_CHAT_KEY = "galen.active-chat.v2";
 const MEMORY_KEY = "galen.memory.v2";
 const SETTINGS_KEY = "galen.settings.v2";
 const MODEL_KEY = "galen.active-model.v1";
+const VISION_MODEL_KEY = "galen.active-vision-model.v1";
 
 const id = () => crypto.randomUUID();
 
@@ -79,6 +80,14 @@ export function loadActiveModel(): string | null {
 
 export function saveActiveModel(model: string): void {
   localStorage.setItem(MODEL_KEY, model);
+}
+
+export function loadActiveVisionModel(): string | null {
+  return localStorage.getItem(VISION_MODEL_KEY);
+}
+
+export function saveActiveVisionModel(model: string): void {
+  localStorage.setItem(VISION_MODEL_KEY, model);
 }
 
 export function titleFromMessage(content: string): string {
