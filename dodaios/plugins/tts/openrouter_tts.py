@@ -163,7 +163,7 @@ class OpenRouterTTS:
                 "Authorization": f"Bearer {ep.credential}",
                 "Content-Type": "application/json",
                 # OpenRouter attribution headers (same as the brain plugin).
-                "HTTP-Referer": "https://github.com/Dodaios/Dodaios",
+                "HTTP-Referer": "https://github.com/Qrayyt/Galen",
                 "X-Title": "Dodaios",
             },
         )

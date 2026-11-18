@@ -289,7 +289,7 @@ describe("logins from an installed browser", () => {
     expect(within(edge).queryByRole("button")).toBeNull();
     expect(mutations()).toEqual([]);
     fireEvent.click(within(row).getByRole("button", { name: "Import" }));
-    await screen.findByText(/Imported 1,240 logins from 312 sites/);
+    await screen.findByText(/Imported 1[,\s\u00a0]240 logins from 312 sites/);
     expect(mutations()).toEqual([{ path: "/api/society/agents/scout/browser/import-logins", method: "POST",
       body: { browser: "chrome", profile: "Profile 1" } }]);
   });

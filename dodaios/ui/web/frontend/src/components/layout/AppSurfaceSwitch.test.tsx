@@ -41,11 +41,11 @@ describe("AppSurfaceSwitch", () => {
 
   const half = (id: "dodaios" | "ide") => screen.getByTestId(`surface-${id}`);
 
-  test("names both places, Dodaios first", () => {
+  test("names both places, Galen first", () => {
     render(<AppSurfaceSwitch />);
     const radios = screen.getAllByRole("radio");
     expect(radios.map((r) => r.getAttribute("data-testid"))).toEqual(["surface-dodaios", "surface-ide"]);
-    expect(half("dodaios").textContent).toContain("Dodaios");
+    expect(half("dodaios").textContent).toContain("Galen");
     expect(half("ide").textContent).toContain("IDE");
     for (const radio of radios) expect(radio.getAttribute("title")).toBe(radio.getAttribute("aria-label"));
   });

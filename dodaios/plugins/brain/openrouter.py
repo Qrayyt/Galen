@@ -67,7 +67,7 @@ class OpenRouterBrain:
                 base_url=ep.base_url,
                 timeout=CLIENT_TIMEOUT,
                 default_headers={
-                    "HTTP-Referer": "https://github.com/Dodaios/Dodaios",
+                    "HTTP-Referer": "https://github.com/Qrayyt/Galen",
                     "X-Title": "Dodaios",
                 },
             )

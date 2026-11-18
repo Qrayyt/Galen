@@ -69,7 +69,7 @@
 #define CliExeName "galen.exe"
 ; The command's earlier name. The bundle ships it beside CliExeName, in the
 ; same folder the PATH task adds, so both names work in a terminal.
-#define LegacyCliExeName "jarvis.exe"
+#define LegacyCliExeName "dodaios.exe"
 #define UserDataDirDisplay "%LOCALAPPDATA%\Galen"
 
 [Setup]
@@ -127,7 +127,7 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "addtopath"; Description: "Add the ""dodaios"" command to PATH (lets you run ""dodaios serve"" in any terminal)"; GroupDescription: "Command line"
+Name: "addtopath"; Description: "Add the ""galen"" command to PATH (lets you run ""galen serve"" in any terminal)"; GroupDescription: "Command line"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

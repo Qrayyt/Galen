@@ -23,7 +23,7 @@ export function GalenHud() {
     muted: "Пауза", error: "Ошибка", unsupported: "Недоступно",
   };
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-[#090b0d] text-white" data-testid="galen-hud">
+    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-background text-foreground" data-testid="galen-hud">
       <div className="absolute inset-0 opacity-10 pointer-events-none" style={{backgroundImage:"linear-gradient(#ddd 1px, transparent 1px),linear-gradient(90deg,#ddd 1px, transparent 1px)",backgroundSize:"44px 44px"}}/>
       <header className="absolute top-6 left-8 right-8 flex items-center justify-between text-sm tracking-widest">
         <div><span className="font-bold">GALEN</span><span className="ml-3 text-white/40">by GALENITE</span></div>

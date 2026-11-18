@@ -27,7 +27,9 @@ jobs:
         run: python scripts/galen/brand.py
       - name: Validate brand identifiers and source attribution
         run: |
-          python -m py_compile dodaios/core/branding.py dodaios/__init__.py scripts/galen/brand.py
+          python -m py_compile dodaios/core/branding.py dodaios/__init__.py \
+            scripts/galen/brand.py scripts/galen/validate_release.py
+          python scripts/galen/validate_release.py
           python - <<'PY'
           import ast
           from pathlib import Path
@@ -48,7 +50,14 @@ jobs:
             dodaios/ui/web/frontend/src/lib/branding.ts \
             dodaios/ui/web/frontend/src/i18n/locales \
             dodaios/ui/web/frontend/public/dodaios-logo.png \
-            assets/icons/dodaios.ico packaging/windows/build.ps1 packaging/windows/Dodaios.iss
+            dodaios/ui/web/frontend/public/dodaios-mark-256.png \
+            dodaios/ui/web/frontend/public/dodaios-gigi-256.png \
+            dodaios/ui/web/frontend/public/dodaios.ico \
+            dodaios/ui/web/frontend/public/dodaios-gigi.ico \
+            dodaios/assets/icons/dodaios.png dodaios/assets/icons/dodaios.ico \
+            assets/icons/dodaios.ico packaging/pyinstaller_rthook_frozen.py \
+            packaging/windows/build.ps1 packaging/windows/Dodaios.iss \
+            scripts/galen/validate_release.py
           if git diff --cached --quiet; then
             echo 'Brand overlay unchanged'
           else

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Build the Windows installer for Dodaios.
+    Build the Windows installer for Galen.
 
 .DESCRIPTION
     One command from a clean checkout to a shippable installer:
@@ -10,12 +10,7 @@
         2. freeze the app with PyInstaller (dodaios.spec, onedir),
         3. wrap dist/Jarvis in an Inno Setup wizard.
 
-    The result is dist/installers/Dodaios-Setup-x64.exe - the name the
-    SignPath artifact configuration pins (docs/code-signing-policy.md). A
-    release signs it under that name and then publishes it twice with identical
-    bytes: as Dodaios-Setup-x64.exe and as PersonalJarvis-Setup-x64.exe, the
-    name installs from before the rename look for
-    (scripts/ci/installer_aliases.py).
+    The result is dist/installers/Galen-Setup-x64.exe.
 
     Every failure stops the script with a non-zero exit code; nothing is left
     half-built and reported as success.
@@ -96,7 +91,7 @@ $InitText = Get-Content -Raw -Encoding UTF8 $InitFile
 $VersionMatch = [regex]::Match($InitText, '__version__\s*=\s*"([^"]+)"')
 if (-not $VersionMatch.Success) { Stop-WithError "dodaios/__init__.py does not define __version__" }
 $AppVersion = $VersionMatch.Groups[1].Value
-Write-Step "Dodaios $AppVersion"
+Write-Step "Galen $AppVersion"
 
 # --- Python ----------------------------------------------------------------
 if ($Python -eq "") {
@@ -157,8 +152,8 @@ if ($SkipPyInstaller) {
         -WorkingDirectory $RepoRoot -What "pyinstaller"
 }
 
-# The windowed launcher under its current and its earlier name, then the CLI
-# under both of its names (dodaios.spec).
+# Keep this list in lockstep with dodaios.spec. Checking the branded names first
+# catches identity-overlay drift before Inno Setup publishes a broken payload.
 foreach ($required in @("GalenApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")) {
     $candidate = Join-Path $BundleDir $required
     if (-not (Test-Path $candidate)) {

@@ -46,7 +46,7 @@ PRODUCT_SLUG = PERSISTENT_SLUG
 # entry have names of their own (``MACOS_APP_NAME``, ``LINUX_APP_NAME``), each
 # moved with its own migration.
 LAUNCHER_ENTRY_NAME = "Galen"
-LEGACY_LAUNCHER_ENTRY_NAMES = (PERSISTENT_PRODUCT_NAME,)
+LEGACY_LAUNCHER_ENTRY_NAMES = ("Personal Jarvis",)
 
 # The configuration file's name. A file under an earlier name is never
 # renamed: while it exists it stays the configuration, and only an install
@@ -88,18 +88,18 @@ DISTRIBUTION_NAME = "dodaios"
 # Both own the same package files, so an environment should hold only one:
 # the installer removes the earlier one before installing, and the app warns
 # once when it finds both (``dodaios.core.distribution``).
-LEGACY_DISTRIBUTION_NAMES = (PERSISTENT_SLUG,)
+LEGACY_DISTRIBUTION_NAMES = ("personal-jarvis",)
 DISTRIBUTION_NAMES = (DISTRIBUTION_NAME, *LEGACY_DISTRIBUTION_NAMES)
 
 # Terminal commands the install puts on PATH. No command may equal the branded
 # launcher's name ignoring case: on Windows and macOS they would be one file.
 # The first two are the names help text, hints and documentation use.
-CLI_COMMAND_NAME = "dodaios"
-CONTROL_CLI_COMMAND_NAME = "dodaiosctl"
+CLI_COMMAND_NAME = "galen"
+CONTROL_CLI_COMMAND_NAME = "galenctl"
 # Earlier names of the two commands. They stay installed and keep working:
 # scripts, shell history and other tools call them.
-LEGACY_CLI_COMMAND_NAMES = ("jarvis", PERSISTENT_SLUG)
-LEGACY_CONTROL_CLI_COMMAND_NAMES = ("jarvisctl",)
+LEGACY_CLI_COMMAND_NAMES = ("dodaios", "jarvis")
+LEGACY_CONTROL_CLI_COMMAND_NAMES = ("dodaiosctl", "jarvisctl")
 CLI_COMMAND_NAMES = (
     CLI_COMMAND_NAME,
     CONTROL_CLI_COMMAND_NAME,
@@ -178,7 +178,7 @@ LEGACY_WINDOWS_SHORTCUT_FILE_NAMES = ()
 # Earlier names are still found, and the frozen build still ships one, because
 # taskbar pins, scheduled tasks and shortcuts name that file.
 WINDOWS_BRANDED_LAUNCHER_FILE_NAME = "GalenApp.exe"
-LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES = ()
+LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES = ("PersonalJarvis.exe",)
 # ``%LOCALAPPDATA%\<name>\bin``, the per-user home of the branded copy. Not the
 # plain product name: that is the data directory beside it.
 WINDOWS_BRANDED_LAUNCHER_DIR_NAME = "GalenApp"
@@ -204,7 +204,7 @@ MACOS_APP_DIR_NAMES = (MACOS_APP_DIR_NAME, *LEGACY_MACOS_APP_DIR_NAMES)
 # requirement names its bundle id and certificate, not this file, so the
 # rename keeps every privacy grant.
 MACOS_EXECUTABLE_NAME = "GalenApp"
-LEGACY_MACOS_EXECUTABLE_NAMES = ()
+LEGACY_MACOS_EXECUTABLE_NAMES = ("PersonalJarvis",)
 MACOS_BUNDLE_ID = f"com.{PERSISTENT_SLUG}.desktop"
 # The downloadable .dmg (PyInstaller, ``dodaios.spec``) is a second, equally
 # legitimate installed app: its own bundle id and therefore its own macOS

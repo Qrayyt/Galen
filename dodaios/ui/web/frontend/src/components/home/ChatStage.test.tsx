@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatStage } from "@/components/home/ChatStage";
 
@@ -168,6 +168,16 @@ function runningTurn() {
 
 describe("ChatStage (agent chat)", () => {
   let scrollTo: ReturnType<typeof vi.fn>;
+
+  beforeAll(async () => {
+    // ChatStage intentionally lazy-loads the call window. Warm the real module
+    // once so a busy full-suite worker tests the integration instead of timing
+    // out while Vite transforms the chunk under parallel load.
+    await import("@/components/home/CallWindow");
+  });
+  afterAll(() => {
+    vi.useRealTimers();
+  });
 
   beforeEach(() => {
     scrollTo = vi.fn();

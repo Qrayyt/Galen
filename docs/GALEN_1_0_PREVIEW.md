@@ -14,7 +14,8 @@
 - Сборка экспериментальная, установщик может быть неподписан.
 - Сохраняйте резервные копии рабочих файлов, прежде чем давать ИИ возможность изменять их.
 - Вход ChatGPT в официальном Codex CLI и доступ к OpenRouter/API — разные механизмы.
-- Авторизация и реальные операции проверяются на локальной машине пользователя.
+- Windows-установщик собран и проверен автоматизированным GitHub Actions-пайплайном.
+- Ручная проверка Windows UI, авторизации, голоса и реальных Computer Use-операций для этой preview-сборки ещё не завершена; проверяйте их на локальной машине перед рабочим использованием.
 
 ### Благодарности
 Galen развивается Galenite на основе открытого кода [Dodaios](https://github.com/Dodaios/Dodaios) (Apache-2.0), с исходными реализациями и разработками [OpenDex](https://github.com/wassgha/opendex), [Kaizumi](https://github.com/MusayevDoniyor/kaizumi), [Elissa](https://github.com/inginddie/elissa), [OpenRealtime](https://github.com/bojieli/OpenRealtime) (MIT). Подробности лицензий — в репозитории.

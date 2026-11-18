@@ -6,7 +6,7 @@ import { StartedByBadge } from "./StartedByBadge";
 afterEach(cleanup);
 
 describe("the started-by mark on a thread's logo", () => {
-  it("names Dodaios by the assistant's own name", () => {
+  it("names Galen by the assistant's own name", () => {
     useEventStore.setState({ assistantName: "Nova" });
     render(<StartedByBadge startedBy="jarvis" testId="badge" />);
     const badge = screen.getByTestId("badge");
@@ -15,8 +15,8 @@ describe("the started-by mark on a thread's logo", () => {
     expect(badge.querySelector("path")?.getAttribute("d")).toBeTruthy();
   });
 
-  it("says another Dodaios agent opened it when the lead did not", () => {
+  it("says another Galen agent opened it when the lead did not", () => {
     render(<StartedByBadge startedBy="scout" testId="badge" />);
-    expect(screen.getByTestId("badge").getAttribute("aria-label")).toBe("Started by a Dodaios agent");
+    expect(screen.getByTestId("badge").getAttribute("aria-label")).toBe("Started by a Galen agent");
   });
 });

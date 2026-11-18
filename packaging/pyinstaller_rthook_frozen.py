@@ -53,22 +53,20 @@ import sys
 from pathlib import Path
 
 # Mirror dodaios.core.branding (tests/unit/core/test_identity_single_source.py).
-_WINDOWS_USER_DATA_DIR_NAME = "Dodaios"
-_LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ("Jarvis",)
-_FALLBACK_USER_DATA_DIR_NAME = ".dodaios-data"
-_LEGACY_FALLBACK_USER_DATA_DIR_NAMES = (".jarvis",)
-_CONFIG_FILE_NAME = "dodaios.toml"
-_LEGACY_CONFIG_FILE_NAMES = ("jarvis.toml",)
+_WINDOWS_USER_DATA_DIR_NAME = "Galen"
+_LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ()
+_FALLBACK_USER_DATA_DIR_NAME = ".galen-data"
+_LEGACY_FALLBACK_USER_DATA_DIR_NAMES = ()
+_CONFIG_FILE_NAME = "galen.toml"
+_LEGACY_CONFIG_FILE_NAMES = ()
 # The executables that are the desktop app itself (dodaios.spec GUI_EXE_NAME and
 # LEGACY_GUI_EXE_NAMES). Only one of them migrates the data directory.
-_GUI_EXE_NAMES = ("DodaiosApp", "PersonalJarvis")
+_GUI_EXE_NAMES = ("GalenApp", "PersonalJarvis")
 # Single-instance mutexes of a running desktop app, every instance and every
 # name (dodaios.core.identity_boot.primary_mutex_names).
 _MUTEX_NAMES = (
-    "Global\\Dodaios_v1",
-    "Global\\Dodaios_v1_dev",
-    "Global\\PersonalJarvis_v1",
-    "Global\\PersonalJarvis_v1_dev",
+    "Global\\Galen_v1",
+    "Global\\Galen_v1_dev",
 )
 # Lock files a running primary holds in the data directory
 # (dodaios.core.identity_boot.PRIMARY_LOCK_FILES).
@@ -188,7 +186,7 @@ def _resolve_home(engine) -> Path:
 
 
 def _user_data_dir() -> Path:
-    """``%LOCALAPPDATA%\\Dodaios`` on Windows, ``~/.dodaios-data`` everywhere else.
+    """``%LOCALAPPDATA%\\Galen`` on Windows, ``~/.galen-data`` everywhere else.
 
     The directory under its earlier name while that is still a real directory.
     """
@@ -291,7 +289,7 @@ def _warn(message: str) -> None:
     if stream is None:
         return
     try:
-        stream.write(f"[jarvis] {message}\n")
+        stream.write(f"[galen] {message}\n")
     except (OSError, ValueError, AttributeError):
         # A windowed bundle can hand out a closed or null stream. There is no
         # log file yet at hook time, so an unreportable warning is dropped on

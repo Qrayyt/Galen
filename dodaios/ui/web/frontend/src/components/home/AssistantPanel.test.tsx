@@ -149,7 +149,7 @@ describe("AssistantPanel", () => {
     const onConversation = mount([]);
     const face = screen.getByTestId("assistant-panel-conversation");
     expect(face.textContent).toContain("Nova");
-    expect(face.textContent).not.toContain("Dodaios");
+    expect(face.textContent).not.toContain("Galen");
     expect(face.querySelector('[data-testid="pet"]')).toBeTruthy();
     fireEvent.click(face);
     expect(onConversation).toHaveBeenCalledTimes(1);
@@ -158,7 +158,7 @@ describe("AssistantPanel", () => {
   it("falls back to the product's name while the assistant has none of its own", () => {
     useEventStore.setState({ assistantName: "Assistant" });
     mount([]);
-    expect(screen.getByTestId("assistant-panel-conversation").textContent).toContain("Dodaios");
+    expect(screen.getByTestId("assistant-panel-conversation").textContent).toContain("Galen");
   });
 
   it("lists the routines with a switch each, without the scheduler's name tag, and none in the library", async () => {

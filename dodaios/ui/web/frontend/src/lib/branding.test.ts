@@ -12,13 +12,13 @@ import {
 
 describe("branding", () => {
   it("shows the product display name", () => {
-    expect(PRODUCT_NAME).toBe("Dodaios");
+    expect(PRODUCT_NAME).toBe("Galen");
   });
 
   it("links to the official repository", () => {
-    expect(OFFICIAL_REPO_SLUG).toBe("Dodaios/Dodaios");
-    expect(OFFICIAL_REPO_URL).toBe("https://github.com/Dodaios/Dodaios");
-    expect(OFFICIAL_REPO_LABEL).toBe("github.com/Dodaios/Dodaios");
+    expect(OFFICIAL_REPO_SLUG).toBe("Qrayyt/Galen");
+    expect(OFFICIAL_REPO_URL).toBe("https://github.com/Qrayyt/Galen");
+    expect(OFFICIAL_REPO_LABEL).toBe("github.com/Qrayyt/Galen");
   });
 
   it("links to the community registry", () => {
@@ -27,6 +27,6 @@ describe("branding", () => {
   });
 
   it("names the MCP tools server, the current name first and the earlier one kept", () => {
-    expect(MCP_TOOLS_SERVER_NAMES).toEqual(["dodaios", "jarvis"]);
+    expect(MCP_TOOLS_SERVER_NAMES).toEqual(["galen", "dodaios", "jarvis"]);
   });
 });

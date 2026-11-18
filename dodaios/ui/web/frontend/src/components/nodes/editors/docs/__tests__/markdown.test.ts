@@ -16,9 +16,10 @@ import { markdownToDoc, parseMarkdown } from "../markdown/parse";
 import { docToMarkdown, escapeText, serializeInline } from "../markdown/serialize";
 
 const FIXTURES = join(__dirname, "..", "__fixtures__");
+const normalizedText = (text: string) => text.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
 const fixtures = readdirSync(FIXTURES)
   .filter((name) => name.endsWith(".md") && !name.endsWith(".out.md"))
-  .map((name) => ({ name, text: readFileSync(join(FIXTURES, name), "utf8").replace(/\s+$/, "") }));
+  .map((name) => ({ name, text: normalizedText(readFileSync(join(FIXTURES, name), "utf8")) }));
 
 const editors: Editor[] = [];
 afterEach(() => {
@@ -63,7 +64,7 @@ describe("round trip", () => {
   it.each(fixtures.filter(({ name }) => readdirSync(FIXTURES).includes(name.replace(/\.md$/, ".out.md"))))(
     "$name is written as its expected page Markdown",
     ({ name, text }) => {
-      const expected = readFileSync(join(FIXTURES, name.replace(/\.md$/, ".out.md")), "utf8").replace(/\s+$/, "");
+      const expected = normalizedText(readFileSync(join(FIXTURES, name.replace(/\.md$/, ".out.md")), "utf8"));
       expect(rewrite(text)).toBe(expected);
     },
   );

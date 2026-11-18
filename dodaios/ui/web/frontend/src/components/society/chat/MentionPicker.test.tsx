@@ -80,7 +80,7 @@ describe("MentionPicker", () => {
     expect(screen.getByTestId("mention-picker")).toBeTruthy();
     expect(screen.getByText("Plugins")).toBeTruthy();
     expect(screen.getByText("MCP servers")).toBeTruthy();
-    expect(screen.getByText("Dodaios tools")).toBeTruthy();
+    expect(screen.getByText("Galen tools")).toBeTruthy();
     const gmail = screen.getAllByTestId("mention-picker-item").find((el) =>
       (el.textContent ?? "").includes("@gmail"),
     );

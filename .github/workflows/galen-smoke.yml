@@ -19,7 +19,10 @@ jobs:
           python-version: '3.12'
       - name: Compile changed Python modules
         run: |
-          python -m py_compile dodaios/core/config.py dodaios/ui/web/settings_routes.py
+          python -m py_compile dodaios/core/config.py dodaios/ui/web/settings_routes.py \
+            packaging/pyinstaller_rthook_frozen.py scripts/galen/brand.py \
+            scripts/galen/validate_release.py
+          python scripts/galen/validate_release.py
       - name: Validate Russian locale data
         run: |
           python - <<'PY'
@@ -55,6 +58,7 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci
+      - run: npm test
       - run: npm run build
         env:
           NODE_OPTIONS: --max-old-space-size=6144

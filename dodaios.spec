@@ -69,7 +69,7 @@ DISTRIBUTION_NAMES = ('dodaios', 'personal-jarvis')
 # below did not move with it: the privacy grants of every installed copy name
 # that id, and the in-app updater installs a renamed bundle beside the old one.
 MACOS_APP_NAME = "Galen.app"
-MACOS_BUNDLE_IDENTIFIER = "org.galenite.galen.desktop"
+MACOS_BUNDLE_IDENTIFIER = "ai.galen.desktop"
 MACOS_MIN_SYSTEM_VERSION = "12.0"
 
 
@@ -453,19 +453,19 @@ if sys.platform == "win32":
                     StringTable(
                         "040904B0",
                         [
-                            StringStruct("CompanyName", "Dodaios"),
+                            StringStruct("CompanyName", "Galenite"),
                             # SignPath pins only the setup's product name
                             # (docs/code-signing-policy.md), so the app's own
                             # version info carries the current name.
-                            StringStruct("FileDescription", "Dodaios"),
+                            StringStruct("FileDescription", "Galen"),
                             StringStruct("FileVersion", VERSION),
                             StringStruct("InternalName", GUI_EXE_NAME),
                             StringStruct(
                                 "LegalCopyright",
-                                "Dodaios contributors. Apache 2.0 licensed.",
+                                "Galen contributors; based on Dodaios. Apache 2.0 licensed.",
                             ),
                             StringStruct("OriginalFilename", f"{GUI_EXE_NAME}.exe"),
-                            StringStruct("ProductName", "Dodaios"),
+                            StringStruct("ProductName", "Galen"),
                             StringStruct("ProductVersion", VERSION),
                         ],
                     )
@@ -573,8 +573,8 @@ if sys.platform == "darwin":
         bundle_identifier=MACOS_BUNDLE_IDENTIFIER,
         version=VERSION,
         info_plist={
-            "CFBundleName": "Dodaios",
-            "CFBundleDisplayName": "Dodaios",
+            "CFBundleName": "Galen",
+            "CFBundleDisplayName": "Galen",
             "CFBundleExecutable": GUI_EXE_NAME,
             "CFBundleIdentifier": MACOS_BUNDLE_IDENTIFIER,
             "CFBundleShortVersionString": VERSION,
