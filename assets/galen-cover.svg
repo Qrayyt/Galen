@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="540" viewBox="0 0 1400 540" role="img" aria-label="Galen — личный голосовой AI-агент от Galenite">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101214"/><stop offset=".55" stop-color="#070809"/><stop offset="1" stop-color="#16191e"/></linearGradient>
+  <radialGradient id="halo"><stop stop-color="#d9e1e9" stop-opacity=".16"/><stop offset=".48" stop-color="#a3b4c8" stop-opacity=".05"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></radialGradient>
+  <linearGradient id="trace" x1="0" y1="0" x2="1" y2="0"><stop stop-color="#798797" stop-opacity=".15"/><stop offset=".5" stop-color="#e3eaf1"/><stop offset="1" stop-color="#8795a5" stop-opacity=".15"/></linearGradient>
+  <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><path d="M34 0H0V34" fill="none" stroke="#b7c2ce" stroke-opacity=".055" stroke-width="1"/></pattern>
+  <filter id="glow"><feGaussianBlur stdDeviation="6"/></filter>
+</defs>
+<rect width="1400" height="540" rx="26" fill="url(#bg)"/>
+<rect width="1400" height="540" rx="26" fill="url(#grid)"/>
+<circle cx="1027" cy="263" r="320" fill="url(#halo)"/>
+<path d="M76 48h1248M76 490h1248" stroke="#f4f6fa" stroke-opacity=".12"/>
+<g fill="none" stroke="#d5e0ec" stroke-opacity=".18"><circle cx="1040" cy="266" r="204"/><circle cx="1040" cy="266" r="154"/><circle cx="1040" cy="266" r="113"/><circle cx="1040" cy="266" r="63"/></g>
+<g fill="none" stroke="url(#trace)" stroke-width="2"><path d="M1040 62a204 204 0 0 1 204 204"/><path d="M886 266a154 154 0 0 1 154-154"/><path d="M1153 266a113 113 0 0 1-113 113"/></g>
+<path d="M800 266H933M1147 266h160M1040 41v116M1040 377v113" stroke="#e8f0f7" stroke-opacity=".15" stroke-dasharray="6 9"/>
+<circle cx="1040" cy="266" r="39" fill="#edf3f9" fill-opacity=".08" stroke="#f1f5f8" stroke-opacity=".55" stroke-width="2"/>
+<circle cx="1040" cy="266" r="16" fill="#f2f6fa"/>
+<circle cx="1040" cy="266" r="29" fill="#edf3f9" fill-opacity=".25" filter="url(#glow)"/>
+<g stroke="#e7f0f7" fill="#0b0c0f" stroke-width="1.5"><circle cx="927" cy="267" r="6"/><circle cx="1178" cy="165" r="6"/><circle cx="1116" cy="396" r="6"/></g>
+<g stroke="#a8b5c2" stroke-opacity=".36" fill="none"><path d="M927 267l-68-36h-58"/><path d="M1178 165l45-35h64"/><path d="M1116 396l37 38h139"/></g>
+<g font-family="Arial, Helvetica, sans-serif" fill="#a8b2bd" font-size="14" letter-spacing="1.7"><text x="794" y="217">VOICE</text><text x="1230" y="119">TOOLS</text><text x="1180" y="453">AGENTS</text></g>
+<g font-family="Arial, Helvetica, sans-serif">
+  <text x="78" y="110" fill="#abb4bd" font-size="17" font-weight="700" letter-spacing="7">GALENITE / INTELLIGENCE</text>
+  <text x="70" y="303" fill="#f6f7f8" font-size="157" font-weight="800" letter-spacing="-9">GALEN</text>
+  <rect x="78" y="329" width="52" height="4" rx="2" fill="#f7f8f9"/>
+  <text x="78" y="384" fill="#c4ccd5" font-size="27" letter-spacing=".7">Голос. Действия. Агенты.</text>
+  <text x="78" y="424" fill="#85919e" font-size="18">Личный AI-ассистент для реальной работы на компьютере.</text>
+  <text x="78" y="518" fill="#7e8994" font-size="12" letter-spacing="3">DESKTOP AGENT  /  OPEN SOURCE FOUNDATIONS  /  GALENITE</text>
+  <text x="1324" y="518" fill="#7e8994" font-size="12" letter-spacing="2" text-anchor="end">2026</text>
+</g></svg>
