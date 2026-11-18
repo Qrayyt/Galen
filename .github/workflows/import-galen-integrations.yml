@@ -70,6 +70,12 @@ jobs:
              dodaios/plugins/tool/galen_audio_focus.py \
              integrations/openrealtime \
              packaging/windows/build.ps1 pyproject.toml
+          # The Dodaios root .gitignore ignores .wav files globally, but
+          # OpenRealtime uses real audio fixtures with //go:embed.
+          # Force-track only upstream, pinned test fixtures, not user recordings.
+          git add -f integrations/openrealtime/source/bench/meeting/testdata/audio/*.wav
+          git add -f integrations/openrealtime/source/bench/realtimecu/testdata/audio/*.wav
+          git add -f integrations/openrealtime/source/bench/toolcall/testdata/audio/*.wav
           if ! git diff --cached --quiet; then
             git commit -m "feat(integrations): ship OpenDex HUD, Kaizumi actions, Elissa mixer and OpenRealtime companion"
             git push origin HEAD:feat/galen-1.0-dodaios
