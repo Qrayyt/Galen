@@ -147,9 +147,7 @@ const AppshotEditorWindow = React.lazy(() =>
 installSelectAllScope();
 
 const GalenHudWindow = React.lazy(() => import("./components/galen/hud/GalenHud").then((m)=>({default:m.GalenHud})));
-const GalenHudWindow = React.lazy(() => import("./components/galen/hud/GalenHud").then((m)=>({default:m.GalenHud})));
 const isEditorWindow = new URLSearchParams(window.location.search).get("view") === "appshot-editor";
-const isGalenHudWindow = new URLSearchParams(window.location.search).get("view") === "galen-hud";
 const isGalenHudWindow = new URLSearchParams(window.location.search).get("view") === "galen-hud";
 
 function renderApp(): void {
