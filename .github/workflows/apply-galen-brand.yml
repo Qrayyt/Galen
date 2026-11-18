@@ -32,7 +32,7 @@ jobs:
           import ast
           from pathlib import Path
           p = ast.parse(Path("dodaios/core/branding.py").read_text(encoding="utf-8"))
-          names = {n.targets[0].id:ast.literal_eval(n.value) for n in p.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and isinstance(n.value,(ast.Constant,ast.Tuple))}
+          names = {n.targets[0].id:ast.literal_eval(n.value) for n in p.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id in {'PRODUCT_NAME','WINDOWS_USER_DATA_DIR_NAME','DEFAULT_OFFICIAL_REPO_SLUG','WINDOWS_MUTEX_NAME'}}
           assert names["PRODUCT_NAME"] == "Galen"
           assert names["WINDOWS_USER_DATA_DIR_NAME"] == "Galen"
           assert names["DEFAULT_OFFICIAL_REPO_SLUG"] == "Qrayyt/Galen"
