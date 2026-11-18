@@ -200,6 +200,13 @@ if (Test-Path $RealtimeBin) {
     Write-Step "OpenRealtime companion included"
 }
 
+# Optional full-duplex voice companion, compiled from pinned OpenRealtime.
+$RealtimeBin = Join-Path $RepoRoot "integrations\openrealtime\bin\openrealtime.exe"
+if (Test-Path $RealtimeBin) {
+    Copy-Item $RealtimeBin (Join-Path $BundleDir "GalenRealtime.exe") -Force
+    Write-Step "OpenRealtime companion included"
+}
+
 # --- 3. Inno Setup ---------------------------------------------------------
 function Find-Iscc {
     $command = Get-Command "ISCC.exe" -ErrorAction SilentlyContinue
