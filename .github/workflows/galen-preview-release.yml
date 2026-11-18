@@ -1,0 +1,159 @@
+name: Galen 1.0 Windows preview
+
+on:
+  push:
+    branches:
+      - feat/galen-1.0-dodaios
+    paths:
+      - .galen-release-candidate
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: galen-windows-preview
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate sources and frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate Python and source provenance
+        run: |
+          python -m py_compile dodaios/__init__.py dodaios/core/branding.py \
+            dodaios/plugins/tool/galen_kaizumi.py \
+            dodaios/plugins/tool/galen_audio_focus.py \
+            dodaios/galen_sources/kaizumi/computer_control.py \
+            dodaios/galen_sources/elissa/audio_mixer.py
+          python - <<'PY'
+          import ast, pathlib, tomllib
+          tree=ast.parse(pathlib.Path('dodaios/core/branding.py').read_text())
+          constants={n.targets[0].id:n.value.value for n in tree.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and isinstance(n.value,ast.Constant)}
+          assert constants['PRODUCT_NAME']=='Galen'
+          assert constants['WINDOWS_USER_DATA_DIR_NAME']=='Galen'
+          assert constants['DEFAULT_OFFICIAL_REPO_SLUG']=='Qrayyt/Galen'
+          assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0'
+          assert pathlib.Path('integrations/openrealtime/source/go.mod').is_file()
+          assert pathlib.Path('third_party/galen-opendex/LICENSE').is_file()
+          assert pathlib.Path('third_party/galen-kaizumi/LICENSE').is_file()
+          assert pathlib.Path('third_party/galen-elissa/LICENSE').is_file()
+          assert pathlib.Path('third_party/galen-openrealtime/LICENSE').is_file()
+          PY
+      - name: Build original Dodaios React workspace with Galen integrations
+        working-directory: dodaios/ui/web/frontend
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          npm ci
+          npm run build
+  windows:
+    name: Build Windows desktop installer
+    needs: preflight
+    runs-on: windows-latest
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: Install Python desktop dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python scripts/pip_install.py -e ".[desktop,dev]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build React frontend
+        shell: pwsh
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          Push-Location dodaios/ui/web/frontend
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+      - name: Compile the optional OpenRealtime runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force integrations/openrealtime/bin | Out-Null
+          Push-Location integrations/openrealtime/source
+          go build -o ../bin/openrealtime.exe ./cmd/openrealtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+      - name: Ensure Inno Setup 6 is available
+        shell: pwsh
+        run: |
+          $candidate = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $candidate)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build Galen desktop application
+        shell: pwsh
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          pwsh packaging/windows/build.ps1 -SkipFrontend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "dist/installers/Galen-Setup-x64.exe")) { throw "Missing installer" }
+          if (-not (Test-Path "dist/Jarvis/GalenApp.exe")) { throw "Missing Galen desktop executable" }
+          if (-not (Test-Path "dist/Jarvis/GalenRealtime.exe")) { throw "Missing realtime companion" }
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/installers/Galen-Setup-x64.exe").Hash.ToLowerInvariant()
+          "$hash  Galen-Setup-x64.exe" | Set-Content -Encoding ascii "dist/installers/Galen-Setup-x64.exe.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: galen-windows-x64
+          path: |
+            dist/installers/Galen-Setup-x64.exe
+            dist/installers/Galen-Setup-x64.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish downloadable preview
+    needs: [preflight, windows]
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: galen-windows-x64
+          path: release-assets
+      - name: Publish release only after successful build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag='v1.0.0-preview.1'
+          test -s release-assets/Galen-Setup-x64.exe
+          test -s release-assets/Galen-Setup-x64.exe.sha256
+          if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 --clobber --repo "$REPO"
+          else
+            gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 \
+              --repo "$REPO" --target "$TARGET_SHA" --prerelease \
+              --title "Galen 1.0 Preview 1 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW.md
+          fi
+          gh release view "$tag" --repo "$REPO" --json url,assets | tee release-result.json
