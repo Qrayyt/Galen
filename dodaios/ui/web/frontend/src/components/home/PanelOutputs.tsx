@@ -1,0 +1,205 @@
+import { useMemo, useState } from "react";
+import { useQueries, useQuery } from "@tanstack/react-query";
+import { File, FileCode, Music, type LucideIcon } from "lucide-react";
+
+import { PANEL_ICON, PANEL_ROW_BUTTON, PanelEmpty, PanelSection, ShowMore } from "@/components/home/panelParts";
+import { isNodeType, type NodeType } from "@/components/nodes/nodeModel";
+import { NODE_INK_CLASS, nodeHueStyle } from "@/components/nodes/nodeTheme";
+import { NodeTypeIcon } from "@/components/nodes/NodeTypeIcon";
+import { fetchNodes, NODES_QUERY_KEY } from "@/components/nodes/useNodes";
+import { fetchOutputsList, type ArtifactSummary, type ArtifactsResponse, type OutputSummary } from "@/hooks/useOutputs";
+import { classifyVisual, toVisuals } from "@/hooks/useVisualArtifacts";
+import { fill, useT } from "@/i18n";
+import { fetchLeadFiles, type LeadFile } from "@/lib/agentChatApi";
+import { openLocalPath } from "@/lib/openLocalPath";
+import { openNodePeek } from "@/store/nodePeek";
+import { preloadNodePeek } from "@/components/nodes/peek/peekFrame";
+
+/** How many files show before the rest folds away, and how many unfold. */
+export const OUTPUTS_SHOWN = 6;
+const OUTPUTS_UNFOLDED = 20;
+/** The newest finished runs whose files are read; one listing per run. */
+const RUNS_READ = 6;
+const RUNS_STALE_MS = 2 * 60_000;
+const LISTING_STALE_MS = 5 * 60_000;
+
+/**
+ * What a file is, for its icon: one of the library's own types (Docs, Slides,
+ * Sheets, Analytics, Whiteboard, Clips), or audio, code or a plain
+ * file for what none of them is.
+ */
+export type OutputKind = NodeType | "audio" | "code" | "file";
+
+const VIDEO = /\.(mp4|mov|webm|mkv|m4v)$/i;
+const AUDIO = /\.(mp3|wav|m4a|ogg|flac)$/i;
+const CODE = /\.(m?js|cjs|jsx?|tsx?|py|json|css|sh|rs|go|ya?ml|toml|sql)$/i;
+const SHEET = /\.(xlsx?|xlsm|csv|tsv|numbers|ods)$/i;
+const DECK = /\.(pptx?|key|odp)$/i;
+const TEXT = /\.(md|txt|rtf|docx?|pages|odt)$/i;
+
+/**
+ * The type a file has by its name alone, sorted the way the library adopts a
+ * file it did not build from a spec: a page, a picture and a PDF are docs. A spreadsheet, a deck and a video get their own type.
+ */
+export function outputKind(path: string): OutputKind {
+  if (SHEET.test(path)) return "sheets";
+  if (DECK.test(path)) return "slides";
+  const visual = classifyVisual(path);
+  if (visual !== null || TEXT.test(path)) return "docs";
+  if (VIDEO.test(path)) return "motion";
+  if (AUDIO.test(path)) return "audio";
+  return CODE.test(path) ? "code" : "file";
+}
+
+const OTHER_ICONS: Record<Exclude<OutputKind, NodeType>, LucideIcon> = {
+  audio: Music,
+  code: FileCode,
+  file: File,
+};
+
+/** A row's icon: the library's mark and hue for a type, a quiet glyph otherwise. */
+function OutputIcon({ kind }: { kind: OutputKind }) {
+  if (isNodeType(kind)) {
+    return (
+      <span aria-hidden className={`flex shrink-0 ${NODE_INK_CLASS}`} style={nodeHueStyle(kind)}>
+        <NodeTypeIcon type={kind} className="h-4 w-4" />
+      </span>
+    );
+  }
+  const Icon = OTHER_ICONS[kind];
+  return <Icon aria-hidden strokeWidth={1.75} className={PANEL_ICON} />;
+}
+
+export interface OutputRow {
+  /** The run a file came out of; "" for a file handed over in the conversation. */
+  slug: string;
+  /** Inside its run for a run's file, the full path on this computer otherwise. */
+  path: string;
+  /** A page's own title, else the file's name. */
+  label: string;
+  kind: OutputKind;
+  mtime: number;
+}
+
+/** The files the assistant linked in its conversation, as rows. */
+export function chatFileRows(files: LeadFile[]): OutputRow[] {
+  return files.map((file) => ({ slug: "", path: file.path, label: file.name, kind: outputKind(file.name), mtime: file.mtime }));
+}
+
+/** A run's files as rows; a page is called by its title, like in the library. */
+export function outputRows(run: OutputSummary, files: ArtifactSummary[]): OutputRow[] {
+  const titles = new Map(toVisuals(run, files).map((visual) => [visual.path, visual.title]));
+  return files.map((file) => ({
+    slug: run.slug,
+    path: file.path,
+    label: titles.get(file.path) ?? file.path.split("/").pop() ?? file.path,
+    kind: outputKind(file.path),
+    mtime: file.mtime,
+  }));
+}
+
+/** Rows with the type the library gives the same file, where it lists it. */
+export function withLibraryTypes(rows: OutputRow[], cards: { key: string; type: string }[]): OutputRow[] {
+  const types = new Map<string, NodeType>();
+  for (const card of cards) if (isNodeType(card.type)) types.set(card.key, card.type);
+  return rows.map((row) => {
+    const type = row.slug ? types.get(`${row.slug}::${row.path}`) : undefined;
+    return type && type !== row.kind ? { ...row, kind: type } : row;
+  });
+}
+
+/**
+ * What the assistant made, the newest file first — pages, pictures, videos,
+ * documents, spreadsheets, code. Two sources feed it:
+ *
+ * - the files of its newest finished runs. A row opens the file in the node
+ *   window, beside the conversation (a file the stage cannot draw opens its
+ *   run there). Read
+ *   under the keys the navigation rail and the Artifacts page read under, so
+ *   the three share one answer.
+ * - the files it handed over in the conversation itself ("The file is ready:
+ *   …"), which belong to no run. A row opens the file with the system's own
+ *   program, the way its link in the chat does.
+ */
+export function PanelOutputs({ name }: { name: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const runs = useQuery<OutputSummary[]>({
+    queryKey: ["outputs"],
+    queryFn: fetchOutputsList,
+    staleTime: RUNS_STALE_MS,
+    refetchInterval: import.meta.env.MODE === "test" ? false : RUNS_STALE_MS,
+    retry: false,
+  });
+  const recent = useMemo(
+    () => (runs.data ?? []).filter((run) => run.status !== "running").slice(0, RUNS_READ),
+    [runs.data],
+  );
+  const rows = useQueries({
+    queries: recent.map((run) => ({
+      queryKey: ["output-artifacts", run.slug],
+      queryFn: async (): Promise<ArtifactsResponse> => {
+        const response = await fetch(`/api/outputs/${encodeURIComponent(run.slug)}/artifacts`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      },
+      staleTime: LISTING_STALE_MS,
+      retry: false,
+    })),
+    combine: (results) => ({
+      loading: results.some((result) => result.isLoading),
+      files: results
+        .flatMap((result, index) => (result.data ? outputRows(recent[index], result.data.files ?? []) : []))
+        .sort((a, b) => b.mtime - a.mtime),
+    }),
+  });
+  const handed = useQuery({
+    queryKey: ["sidebar", "lead-files"],
+    queryFn: () => fetchLeadFiles(OUTPUTS_UNFOLDED),
+    staleTime: 10_000,
+    refetchInterval: import.meta.env.MODE === "test" ? false : 30_000,
+    retry: false,
+  });
+  // The library's own answer names each run file's type (a typed node is a
+  // deck or a sheet even though its file is a page); read under its key, so
+  // the library and this list share one answer.
+  const nodes = useQuery({
+    queryKey: NODES_QUERY_KEY,
+    queryFn: fetchNodes,
+    staleTime: RUNS_STALE_MS,
+    retry: false,
+  });
+  const files = useMemo(
+    () => withLibraryTypes([...rows.files, ...chatFileRows(handed.data ?? [])], nodes.data?.nodes ?? [])
+      .sort((a, b) => b.mtime - a.mtime),
+    [rows.files, handed.data, nodes.data],
+  );
+  const shown = files.slice(0, open ? OUTPUTS_UNFOLDED : OUTPUTS_SHOWN);
+  const openRow = (row: OutputRow) => {
+    // In the node window, beside the conversation the panel stands next to.
+    if (row.slug) openNodePeek(`${row.slug}::${row.path}`, { chat: null, title: row.label });
+    else void openLocalPath(row.path);
+  };
+
+  return (
+    <PanelSection id="outputs" title={t("sidebar.outputs")}>
+      {shown.map((row) => (
+        <button key={`${row.slug}::${row.path}`} type="button" data-testid="assistant-output" data-kind={row.kind}
+          data-source={row.slug ? "run" : "chat"} onClick={() => openRow(row)}
+          onPointerEnter={row.slug ? preloadNodePeek : undefined} title={row.slug ? row.path.split("/").pop() : row.path}
+          className={PANEL_ROW_BUTTON}>
+          <OutputIcon kind={row.kind} />
+          <span className="min-w-0 flex-1 truncate text-sm text-foreground">{row.label}</span>
+        </button>
+      ))}
+      {files.length === 0 && (
+        <PanelEmpty testId="assistant-outputs-empty">
+          {runs.isLoading || rows.loading || handed.isLoading ? t("common.loading") : fill(t("sidebar.outputs_empty"), { assistant: name })}
+        </PanelEmpty>
+      )}
+      {files.length > OUTPUTS_SHOWN && (
+        <ShowMore testId="assistant-outputs-more" open={open} onToggle={() => setOpen((value) => !value)} />
+      )}
+    </PanelSection>
+  );
+}

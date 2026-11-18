@@ -1,0 +1,463 @@
+"""Jarvis' own tools, offered outwards as an MCP server.
+
+Every other MCP module in this package points INWARDS: Jarvis is the client
+that mounts somebody else's server (``client.py``, ``loader.py``,
+``registry.py``), or projects a connected plugin into a worker's config
+(``claude_export.py``, ``marketplace/mcp_bridge.py``). This module is the one
+that points OUT — it lets an agent session that Jarvis spawned reach back in
+and drive Jarvis itself.
+
+That is what turns the typed chat from "a coding CLI that happens to run in
+Jarvis' window" into Jarvis with a keyboard instead of a microphone: the model
+paying with the person's subscription runs its own agent loop, but its hands
+are the hands the voice has — ``open-app``, ``google-calendar``,
+``wiki-recall``, ``switch-provider``, every registered tool plugin.
+
+**The safety seam is structural, not polite.** Tools are listed from
+:class:`~dodaios.core.protocols.SupervisorToolGateway` and executed through it,
+which is the only authorized execution path in the codebase (AP-3). A caller
+here cannot reach a tool's ``execute`` directly, so risk tiers, the approval
+workflow and the audit log apply exactly as they do on the voice path — there
+is no second door to keep in sync.
+
+Transport is Streamable HTTP, mounted on the app's own web server
+(``dodaios.ui.web.mcp_server_routes``) rather than a stdio child process. The
+gateway lives in the running app's memory; a child process would only be able
+to talk back over the same HTTP anyway, one hop later.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from contextvars import ContextVar
+from typing import Any, Final
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+
+from dodaios.trust.expectations import inject_expect
+
+log = logging.getLogger(__name__)
+
+#: What ``SupervisorToolRequest.origin`` is stamped with. The risk evaluator and
+#: the audit log use it to tell a chat-driven action from a spoken one.
+CHAT_ORIGIN: Final[str] = "agent-chat"
+
+#: The agent-chat session a request belongs to, set per HTTP request by
+#: ``dodaios.ui.web.mcp_server_routes`` from the ``X-Jarvis-Chat-Session``
+#: header the chat put into the CLI's MCP config. Read when a tool is
+#: executed: with a session the executor is told the approval surface is the
+#: chat's card (``approval_surface: interactive`` + the session's
+#: ``approval_ref``), so an ask-tier tool the CLI reaches through here asks
+#: the person in the chat instead of failing fast as unattended. Without one
+#: the request runs exactly as before.
+CHAT_SESSION_REF: ContextVar[str | None] = ContextVar("dodaios.mcp.chat_session_ref", default=None)
+
+#: How long the chat's card may stay open for a gate reached over MCP.
+CHAT_APPROVAL_TIMEOUT_S: Final[float] = 600.0
+
+
+def approval_snapshot() -> dict[str, Any]:
+    """The executor's ``config_snapshot`` for the current request's session."""
+    session_id = CHAT_SESSION_REF.get()
+    if not session_id:
+        return {}
+    from dodaios.core.task_agent import scope_for
+
+    if scope_for(session_id) is not None:
+        return {"approval_surface": "unattended", "approval_ref": f"agent-chat:{session_id}"}
+    return {
+        "approval_surface": "interactive",
+        "approval_ref": f"agent-chat:{session_id}",
+        "approval_timeout_s": CHAT_APPROVAL_TIMEOUT_S,
+        "tool_origin": CHAT_ORIGIN,
+    }
+
+
+#: Tools never offered to a chat session, by name. A spawn vehicle would let the
+#: session start a background worker that starts another one — the recursion the
+#: router tiers exist to prevent (AP-5/AP-14). A coding thread or a society seat
+#: IS the heavy worker here; it has no reason to hire one. The one exception is
+#: the lead's own chat (``_withheld_for``): the lead delegates, on every seat.
+_WITHHELD: Final[frozenset[str]] = frozenset(
+    {
+        "spawn-worker",
+        "spawn_worker",
+        "multi-spawn",
+        "multi_spawn",
+        "spawn-subagents",
+        "spawn_subagents",
+        "dispatch-to-harness",
+        "dispatch_to_harness",
+        "dispatch-with-review",
+        "dispatch_with_review",
+        "dispatch-to-admin",
+        "dispatch_to_admin",
+    }
+)
+
+#: Tools a Claude Code seat keeps in its prompt instead of behind its tool search.
+#: The CLI defers the tools of a large server: the model then sees only their
+#: names and has to search before it can call one. The ask tool is the one hand
+#: the model reaches for instead of writing: with only its name in sight the
+#: lead wrote its questions into the reply (live 2026-11-13) and no question
+#: card came up. The CLI reads the mark from the tool's ``_meta``; other seats
+#: ignore it.
+_ALWAYS_LOADED: Final[frozenset[str]] = frozenset({"society_ask_user"})
+_ALWAYS_LOAD_META: Final[dict[str, Any]] = {"anthropic/alwaysLoad": True}
+
+#: Native names stay unchanged. Imported MCP names use server/tool internally;
+#: only this outgoing transport projects them to a portable wire name.
+_NAME_OK = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def _usable_name(name: str) -> bool:
+    return bool(name) and len(name) <= 128 and set(name) <= _NAME_OK
+
+
+def _wire_name(name: str) -> str | None:
+    if _usable_name(name):
+        return name
+    parts = name.split("/")
+    if len(parts) != 2 or not all(_usable_name(part) for part in parts):
+        return None
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return f"{name.replace('/', '_')[:47]}_{digest}"
+
+
+def _withheld_for(session_id: str | None) -> frozenset[str]:
+    """The tools ``session_id`` is not offered: the lead's chat keeps its delegation tools.
+
+    The lead is the person's one assistant and delegates work through the
+    Dodaios tools on every seat; the recursion guard is for workers and society
+    seats, which stay on the full list.
+    """
+    if not session_id:
+        return _WITHHELD
+    is_lead = getattr(_gateway(), "is_lead_session", None)
+    try:
+        lead = bool(is_lead(session_id)) if callable(is_lead) else False
+    except Exception:  # noqa: BLE001 - an unknown session is not the lead
+        lead = False
+    if not lead:
+        return _WITHHELD
+    from dodaios.brain.lead_manifest import LEAD_SPAWN_TOOLS
+
+    return _WITHHELD - LEAD_SPAWN_TOOLS
+
+
+def _wire_catalog(entries: list[Any], withheld: frozenset[str] = _WITHHELD) -> dict[str, Any]:
+    """Reject ambiguous aliases instead of routing a call to the wrong tool."""
+    result: dict[str, Any] = {}
+    collisions: set[str] = set()
+    for entry in entries:
+        canonical = str(entry.name)
+        wire = _wire_name(canonical)
+        if wire is None or canonical in withheld or wire in collisions:
+            continue
+        if wire in result:
+            del result[wire]
+            collisions.add(wire)
+            continue
+        result[wire] = entry
+    return result
+
+
+async def _session_wire_catalog() -> dict[str, Any]:
+    from dodaios.core.task_agent import scope_for
+
+    session_id = CHAT_SESSION_REF.get()
+    scoped = getattr(_gateway(), "session_catalog", None)
+    entries = list(await scoped(session_id)) if session_id and callable(scoped) else offered_tools()
+    task_scope = scope_for(session_id)
+    if session_id and session_id.startswith("task-") and task_scope is None:
+        return {}
+    if task_scope is not None:
+        entries = [entry for entry in entries if entry.name in task_scope.names]
+    return _wire_catalog(entries, _withheld_for(session_id))
+
+
+def _read_only(entry: Any, args: dict[str, Any] | None = None) -> bool:
+    """Whether a catalog entry only reads: the ``readOnlyHint`` it is listed with.
+
+    With ``args`` a tool whose tier depends on its arguments is judged for
+    those arguments: the tier of this call decides, as it does when the call
+    runs. A tool with several actions is listed by its strictest one, so its
+    harmless actions (a status read, a run's own report) would otherwise put
+    a card in front of the person on a CLI seat and none on a brain seat.
+    """
+    if getattr(entry, "is_action_tool", True):
+        return False
+    hook = getattr(entry, "risk_tier_for_args", None)
+    if args is not None and callable(hook):
+        try:
+            tier = hook(dict(args))
+        except Exception:  # noqa: BLE001 - unsure means not read-only
+            return False
+        if tier is not None:
+            return str(tier) == "safe"
+    return str(getattr(entry, "risk_tier", "")) == "safe"
+
+
+async def wire_read_only(session_id: str, wire: str, args: dict[str, Any] | None = None) -> bool:
+    """Whether ``wire`` (a tool as this server lists it to ``session_id``) only reads.
+
+    A vendor CLI asks the chat before an MCP call; a read of Dodaios' own tools
+    needs no card in Ask (``runner_cli.dodaios_read_free``). An unknown tool is
+    not read-only.
+    """
+    token = CHAT_SESSION_REF.set(session_id or None)
+    try:
+        entry = (await _session_wire_catalog()).get(wire)
+    finally:
+        CHAT_SESSION_REF.reset(token)
+    return entry is not None and _read_only(entry, args)
+
+
+def _gateway() -> Any | None:
+    from dodaios.core import runtime_refs
+
+    return runtime_refs.get_supervisor_tool_gateway()
+
+
+def offered_tools() -> list[Any]:
+    """The catalog entries a chat session may call, gateway order preserved."""
+    gateway = _gateway()
+    if gateway is None:
+        return []
+    try:
+        catalog = gateway.catalog()
+    except Exception:  # noqa: BLE001 — a broken catalog offers nothing, it never crashes the server
+        log.warning("jarvis MCP: tool catalog unavailable", exc_info=True)
+        return []
+    return [
+        entry
+        for entry in catalog
+        if _wire_name(str(entry.name)) is not None and str(entry.name) not in _WITHHELD
+    ]
+
+
+#: What a vendor CLI accepts from one MCP tool call: Claude Code rejects a
+#: result over ``MAX_MCP_OUTPUT_TOKENS`` (25 000 tokens by default). A bigger
+#: result used to reach it unbounded and cost the whole call. The limit is a
+#: receiver maximum, not a cost cap: set ``DODAIOS_MCP_MAX_OUTPUT_TOKENS`` (or
+#: the CLI's own ``MAX_MCP_OUTPUT_TOKENS``, which is honoured too) to raise it.
+_MCP_DEFAULT_MAX_OUTPUT_TOKENS: Final[int] = 25_000
+#: JSON tokenizes at about three characters per token; stay under the limit.
+_MCP_CHARS_PER_TOKEN: Final[int] = 3
+
+
+def mcp_max_output_chars() -> int:
+    """The character budget of one MCP tool result, from the receiver's token limit."""
+    import os
+
+    for key in ("DODAIOS_MCP_MAX_OUTPUT_TOKENS", "MAX_MCP_OUTPUT_TOKENS"):
+        raw = os.environ.get(key, "").strip()
+        if raw.isdigit() and int(raw) > 0:
+            return int(raw) * _MCP_CHARS_PER_TOKEN
+    return _MCP_DEFAULT_MAX_OUTPUT_TOKENS * _MCP_CHARS_PER_TOKEN
+
+
+def _render(result: Any) -> str:
+    """A ToolResult as the text the model reads back, within the receiver's limit."""
+    from dodaios.core.bounded_json import bound_json, bound_text
+
+    limit = mcp_max_output_chars()
+    if result is None:
+        return "The tool returned nothing."
+    output = getattr(result, "output", None)
+    error = getattr(result, "error", None)
+    if not getattr(result, "success", False):
+        return bound_text(f"Tool failed: {error or 'no reason given'}", limit)
+    if output is None:
+        return "Done."
+    if isinstance(output, str):
+        return bound_text(output, limit)
+    try:
+        return bound_json(output, limit)
+    except (TypeError, ValueError):
+        return bound_text(str(output), limit)
+
+
+# Per-image byte budget for images handed back over MCP. Matches the
+# screenshot tool's own cap, so a normal capture passes through untouched.
+_MCP_IMAGE_MAX_BYTES: Final[int] = 500_000
+# A runaway tool must not flood the model's context with pictures.
+_MCP_MAX_IMAGES: Final[int] = 4
+
+
+def _image_contents(result: Any) -> list[tuple[str, str]]:
+    """The image artifacts of a ToolResult as ``(mime, base64)`` pairs.
+
+    Tools such as the screenshot tool return the picture as an artifact
+    (``{"type": "image", "mime": ..., "data": <base64>}``) next to a short
+    text output. Without this the MCP client only saw "Screenshot captured"
+    and never the image (#1072). Anything that is not a well-formed image
+    artifact is ignored, and every image is capped to a vision budget.
+    """
+    if result is None or not getattr(result, "success", False):
+        return []
+    artifacts = getattr(result, "artifacts", None)
+    if not isinstance(artifacts, (list, tuple)):
+        return []
+    from dodaios.vision.image_budget import cap_image_b64
+
+    images: list[tuple[str, str]] = []
+    for artifact in artifacts:
+        if len(images) >= _MCP_MAX_IMAGES:
+            break
+        if not isinstance(artifact, dict) or artifact.get("type") != "image":
+            continue
+        data = artifact.get("data")
+        mime = artifact.get("mime") or artifact.get("mimeType") or "image/png"
+        if not isinstance(data, str) or not data or not isinstance(mime, str):
+            continue
+        if not mime.startswith("image/"):
+            continue
+        images.append(cap_image_b64(mime, data, _MCP_IMAGE_MAX_BYTES))
+    return images
+
+
+def build_server() -> Any:
+    """A low-level MCP server bound to the live tool gateway.
+
+    Built per process, not per session: the handlers read the gateway on every
+    call, so a tool that connects later (an MCP source, a marketplace plugin, a
+    CLI that finished bootstrapping) shows up without a rebuild.
+    """
+    import mcp.types as types
+    from mcp.server.lowlevel import Server
+
+    server: Any = Server("jarvis")
+
+    @server.list_tools()  # type: ignore[misc, no-untyped-call]
+    async def _list_tools() -> list[Any]:
+        tools: list[Any] = []
+        for wire, entry in (await _session_wire_catalog()).items():
+            schema = entry.input_schema
+            if not isinstance(schema, dict) or not schema:
+                schema = {"type": "object", "properties": {}}
+            if not _read_only(entry):
+                schema = inject_expect(schema)
+            tools.append(
+                types.Tool(
+                    name=wire,
+                    description=(
+                        f"[{entry.name}] {entry.description or entry.name}"
+                        if wire != entry.name
+                        else str(entry.description or entry.name)
+                    ),
+                    inputSchema=schema,
+                    annotations=types.ToolAnnotations(readOnlyHint=_read_only(entry)),
+                    _meta=dict(_ALWAYS_LOAD_META) if str(entry.name) in _ALWAYS_LOADED else None,
+                )
+            )
+        return tools
+
+    @server.call_tool()  # type: ignore[misc, no-untyped-call]
+    async def _call_tool(name: str, arguments: dict[str, Any] | None) -> Any:
+        from dodaios.core.protocols import SupervisorToolRequest, current_chat_turn
+
+        def failed(message: str) -> Any:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=message)], isError=True
+            )
+
+        gateway = _gateway()
+        if gateway is None:
+            return failed("Dodaios is still starting up.")
+        if name in _withheld_for(CHAT_SESSION_REF.get()):
+            return failed(
+                f"{name} is not available from the chat — you ARE the worker. Do the work yourself."
+            )
+        try:
+            from dodaios.agent_chat.tool_context import required_turn_id, restore_turn
+
+            entry = (await _session_wire_catalog()).get(name)
+            if entry is None:
+                return failed("Tool is no longer available in this chat.")
+            name = str(entry.name)
+            with restore_turn(CHAT_SESSION_REF.get()):
+                turn = current_chat_turn.get()
+                if required_turn_id.get() is not None and turn is None:
+                    return types.CallToolResult(
+                        content=[types.TextContent(
+                            type="text", text="The requesting chat turn has ended."
+                        )],
+                        isError=True,
+                    )
+                from dodaios.core.task_agent import scope_for
+
+                task_scope = scope_for(CHAT_SESSION_REF.get())
+                if (CHAT_SESSION_REF.get() or "").startswith("task-") and task_scope is None:
+                    return failed("The task grant has expired.")
+                if task_scope is not None and name not in task_scope.names:
+                    return failed("Tool outside the task grant.")
+                trace_id = task_scope.trace_id if task_scope else uuid4()
+                if name == "society_browser" and turn is not None and task_scope is None:
+                    try:
+                        trace_id = UUID(str(turn.trace_id))
+                    except ValueError:
+                        # Older callers can omit the UUID, but the session/turn
+                        # identity still keeps denial effective across retries.
+                        trace_id = uuid5(NAMESPACE_URL, f"jarvis:{turn.session_id}:{turn.turn_id}")
+                request = SupervisorToolRequest(
+                    trace_id=trace_id,
+                    origin=CHAT_ORIGIN,
+                    user_utterance=turn.user_text if turn else "",
+                    config_snapshot=approval_snapshot(),
+                )
+                result = await gateway.execute(name, dict(arguments or {}), request)
+        except Exception as exc:  # noqa: BLE001 — a tool failure is data for the model, not a crash
+            log.warning("jarvis MCP: %s raised", name, exc_info=True)
+            return failed(f"Tool failed: {type(exc).__name__}: {exc}")
+        if name == "society_browser":
+            success = bool(getattr(result, "success", False))
+            text = _render(result)
+            if not success:
+                # A partial browser run may already have submitted a form.
+                # Preserve its observed outcome so a planner can inspect the
+                # current page instead of blindly repeating a side effect.
+                # A run that needs the person (an approval nobody answered, a
+                # sign-in, a human check) says what to do next; the planner
+                # gets that instead of a bare "retry".
+                output = getattr(result, "output", None)
+                next_action = output.get("next_action") if isinstance(output, dict) else None
+                text = json.dumps(
+                    {
+                        "ok": False,
+                        "error": getattr(result, "error", None),
+                        "result": output,
+                        "retry": str(
+                            next_action or "Inspect current state before repeating any action."
+                        ),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=text)], isError=not success
+            )
+        content: list[Any] = [types.TextContent(type="text", text=_render(result))]
+        content.extend(
+            types.ImageContent(type="image", data=data, mimeType=mime)
+            for mime, data in _image_contents(result)
+        )
+        return types.CallToolResult(
+            content=content,
+            isError=not bool(getattr(result, "success", False)),
+        )
+
+    return server
+
+
+__all__ = [
+    "CHAT_APPROVAL_TIMEOUT_S",
+    "CHAT_ORIGIN",
+    "CHAT_SESSION_REF",
+    "approval_snapshot",
+    "build_server",
+    "mcp_max_output_chars",
+    "offered_tools",
+    "wire_read_only",
+]

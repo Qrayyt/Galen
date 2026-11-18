@@ -1,0 +1,724 @@
+"""Shared pytest fixtures for all test suites."""
+from __future__ import annotations
+
+import atexit
+import os
+import shlex
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlsplit
+
+# Add the repo root to sys.path so tests can import top-level modules like
+# `ui.orb` (pytest doesn't add the repo root to sys.path by default).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Taken before the first dodaios import, which could already write there.
+_REPO_DATA_DIR = _REPO_ROOT / "data"
+_REPO_DATA_DIR_EXISTED = _REPO_DATA_DIR.exists()
+
+# The tracked files a session must leave alone, recorded before any test runs
+# (see pytest_sessionfinish). None outside a git checkout: nothing to judge.
+from scripts.ci import checkout_guard  # noqa: E402
+
+_TRACKED_BEFORE = checkout_guard.snapshot(_REPO_ROOT, untracked=False)
+
+# Hermetic data dir (#458). ``dodaios.core.config.DATA_DIR`` is resolved once,
+# at import, from ``JARVIS_DATA_DIR`` or ``<repo>/data``. In an installer-managed
+# checkout ``<repo>/data`` is the user's live data, so any store without its own
+# test redirect (the cost ledger, the society databases, ...) would write there.
+# Point the whole session at a fresh temp dir before the first dodaios import.
+# A value inherited from the caller is overridden on purpose: a shell or an app
+# pane may carry the user's real data dir. Tests that need a specific value
+# still monkeypatch it themselves; subprocesses inherit the temp dir.
+_TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="dodaios-test-data-"))
+os.environ["JARVIS_DATA_DIR"] = str(_TEST_DATA_DIR)
+atexit.register(shutil.rmtree, _TEST_DATA_DIR, ignore_errors=True)
+
+# Hermetic credential store. The ``keyring`` library otherwise hands every
+# test the OS store of whoever runs the suite (macOS Keychain, Windows
+# Credential Manager): a read returned the developer's real API keys, a save
+# or delete changed them. With no OS store the app keeps keys in its 0600 file
+# under the data dir, which is the temp dir above. CI's Linux runners are in
+# that state anyway. Set before the first dodaios import; subprocesses inherit
+# it. A test of a platform store installs its own fake (``keyring.set_keyring``).
+# The macOS ``security`` tool is a second way in: see
+# ``_real_keychain_out_of_reach`` below.
+os.environ["PYTHON_KEYRING_BACKEND"] = "keyring.backends.fail.Keyring"
+
+# ``memory.data_dir`` (the anchor for the session, chat, society and
+# self-build stores) defaults to the cwd-relative "./data", which is the
+# checkout's data dir when pytest runs from the repo root. Default it to the
+# same temp dir; a test or TOML that sets the field explicitly still wins.
+from dodaios.core.config import MemoryConfig  # noqa: E402
+
+MemoryConfig.model_fields["data_dir"].default = str(_TEST_DATA_DIR)
+MemoryConfig.model_rebuild(force=True)
+
+# The provider switches persist into the drift baseline under scripts/, a
+# tracked file; a test that switched the brain without its own redirect
+# rewrote it (brain.primary -> "openrouter"). Every session writes to a temp
+# copy instead, so readers still see real content.
+_TEST_DRIFT_BASELINE = _TEST_DATA_DIR / "config-soll.json"  # i18n-allow: filename
+_REPO_DRIFT_BASELINE = _REPO_ROOT / "scripts" / "config-soll.json"  # i18n-allow: filename
+if _REPO_DRIFT_BASELINE.is_file():
+    shutil.copyfile(_REPO_DRIFT_BASELINE, _TEST_DRIFT_BASELINE)
+os.environ["JARVIS_DRIFT_BASELINE_FILE"] = str(_TEST_DRIFT_BASELINE)
+
+import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
+
+from dodaios.core.bus import EventBus, reset_default_bus  # noqa: E402
+
+
+def pytest_configure(config) -> None:  # noqa: ANN001
+    config.addinivalue_line(
+        "markers",
+        "no_auto_web_auth: use explicit credentials against the production web boundary",
+    )
+
+
+def _repo_data_dir_leftovers() -> list[str]:
+    """What a session left in ``<repo>/data`` when it started without one.
+
+    Only a checkout that had no ``data/`` at session start is judged: there any
+    entry is the suite's own. A checkout that runs the app owns a live
+    ``data/`` that the app writes to while the tests run, so it is skipped.
+    """
+    if _REPO_DATA_DIR_EXISTED or not _REPO_DATA_DIR.exists():
+        return []
+    entries = sorted(
+        p.relative_to(_REPO_ROOT).as_posix() for p in _REPO_DATA_DIR.rglob("*")
+    )
+    return entries or [_REPO_DATA_DIR.relative_to(_REPO_ROOT).as_posix() + "/"]
+
+
+def _changed_tracked_files() -> list[str]:
+    """Tracked files whose state changed since the session started."""
+    if _TRACKED_BEFORE is None:
+        return []
+    after = checkout_guard.snapshot(_REPO_ROOT, untracked=False)
+    if after is None:
+        return []
+    return checkout_guard.changes(_TRACKED_BEFORE, after)
+
+
+def _fail_session(session, title: str, message: str) -> None:  # noqa: ANN001
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None:
+        reporter.ensure_newline()
+        reporter.write_sep("=", title, red=True)
+        reporter.write_line(message)
+    else:
+        sys.stderr.write(message + "\n")
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ANN001, ARG001
+    """Fail the session when the suite wrote into the checkout.
+
+    Two leaks are judged: entries under ``<repo>/data`` (#458; every store must
+    follow the session temp dir above) and tracked files the session rewrote
+    (the drift baseline and friends; write to a temp path instead).
+    Checked once, by the controlling process (an xdist worker would see its
+    siblings' writes).
+    """
+    if hasattr(session.config, "workerinput"):
+        return
+    leftovers = _repo_data_dir_leftovers()
+    if leftovers:
+        _fail_session(
+            session,
+            "stray writes into <repo>/data",
+            "The test session wrote into the checkout's data dir, which every store "
+            "must leave alone (#458). Derive the path from the configured data dir:\n"
+            + checkout_guard.describe(leftovers),
+        )
+    changed = _changed_tracked_files()
+    if changed:
+        _fail_session(
+            session,
+            "tracked files changed by the tests",
+            "The test session modified tracked files in the checkout. Point the "
+            "writer at a temp path (tmp_path, a monkeypatched path, or the "
+            "session's JARVIS_DATA_DIR):\n" + checkout_guard.describe(changed),
+        )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_user_environment_writes():
+    """No test persists a ``JARVIS__*`` variable into the real user environment.
+
+    The provider switches mirror their choice into the Windows User-scope
+    environment (``HKCU\\Environment``), which outlives the test run: a brain
+    switch under test left ``JARVIS__BRAIN__PRIMARY=openrouter`` behind, and
+    the next app start booted that provider. ``os.environ`` is still updated;
+    a test that checks the registry layer patches the writer itself.
+    """
+    from dodaios.core import config_writer
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(config_writer, "_set_user_env_var_winreg", lambda name, value: None)
+        yield
+
+
+_KEYCHAIN_TOOL = "security"
+# What ``security find-generic-password`` answers when the item does not exist.
+_KEYCHAIN_NOT_FOUND_EXIT = 44
+# Sub-commands that only look. Everything else can change the Keychain.
+_KEYCHAIN_LOOKUP_PREFIXES = ("find-", "show-", "dump-")
+# Not empty while a test holds the ``real_keychain_tool`` fixture.
+_REAL_KEYCHAIN_TOOL_ASKED_FOR: list[bool] = []
+
+
+def _keychain_tool_verb(args) -> str | None:  # noqa: ANN001
+    """The sub-command of a macOS ``security`` call; ``None`` for any other command.
+
+    ``""`` when the call names none (``security -i`` reads its commands from
+    stdin, so it can do anything).
+    """
+    try:
+        if isinstance(args, (str, bytes, os.PathLike)):
+            argv = shlex.split(os.fsdecode(args))
+        else:
+            argv = [os.fsdecode(part) for part in args]
+    except (TypeError, ValueError):
+        return None
+    if not argv or Path(argv[0]).name != _KEYCHAIN_TOOL:
+        return None
+    return next((part for part in argv[1:] if not part.startswith("-")), "")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _real_keychain_out_of_reach():
+    """No test reads or changes the real macOS Keychain of whoever runs the suite.
+
+    The app keeps every saved API key in ONE Keychain item and reaches it with
+    the ``security`` tool, which deletes without a prompt. An uninstaller test
+    that patched the keyring but not that tool ran
+    ``security delete-generic-password`` for real: each run of the suite on a
+    Mac removed the developer's item, and with it every key the app had. The
+    app then found no key at its next start and fell back to slower local
+    engines without a word.
+
+    So the tool is out of reach for the whole session, whichever module calls
+    it and by whichever path. A lookup is answered "no such item" without
+    running, which is what a machine that never saved a key answers. Any other
+    sub-command fails the test: its caller needs a fake. A test that patches
+    ``subprocess.run`` or ``subprocess.Popen`` itself never gets here, and a
+    test of the tool's own behaviour asks for ``real_keychain_tool``.
+    """
+    import subprocess
+
+    real_popen = subprocess.Popen
+
+    class _KeychainGuardedPopen(real_popen):
+        def __init__(self, args, *rest, **kwargs):  # noqa: ANN001, ANN002, ANN003
+            verb = None if _REAL_KEYCHAIN_TOOL_ASKED_FOR else _keychain_tool_verb(args)
+            if verb is not None:
+                if not verb.startswith(_KEYCHAIN_LOOKUP_PREFIXES):
+                    pytest.fail(
+                        f"This test ran the macOS Keychain tool for real (`security {verb}`). "
+                        "On a Mac that changes the Keychain of whoever runs the suite, where "
+                        "the app keeps every saved API key in one item. Give the caller a "
+                        "fake: patch the function that shells out, or `subprocess.run`. "
+                        "Only a test of the tool itself uses the `real_keychain_tool` fixture."
+                    )
+                args = [sys.executable, "-c", f"raise SystemExit({_KEYCHAIN_NOT_FOUND_EXIT})"]
+                kwargs.pop("shell", None)
+                kwargs.pop("executable", None)
+            super().__init__(args, *rest, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(subprocess, "Popen", _KeychainGuardedPopen)
+        yield
+
+
+@pytest.fixture
+def real_keychain_tool():
+    """Let this one test run the real ``security`` tool.
+
+    For a test of the tool's own behaviour (an argument length limit, an exit
+    code), which no fake can stand in for. Such a test works on a throwaway
+    item under a service name of its own, never ``dodaios`` or a legacy name,
+    and removes the item again.
+    """
+    _REAL_KEYCHAIN_TOOL_ASKED_FOR.append(True)
+    try:
+        yield
+    finally:
+        _REAL_KEYCHAIN_TOOL_ASKED_FOR.pop()
+
+
+@pytest.fixture(autouse=True)
+def _not_the_main_instance(monkeypatch):  # noqa: ANN001
+    """No test inherits the desktop app's main-instance flag.
+
+    A test run launched from a pane inside the running app inherits
+    ``JARVIS_PRIMARY_INSTANCE=1``. A server started under it would schedule
+    main-instance-only background work, such as the credential copy against
+    the developer's real OS keyring. A test that needs the flag sets it itself.
+    """
+    monkeypatch.delenv("JARVIS_PRIMARY_INSTANCE", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _society_runtime_isolated():
+    """Put the process-wide society runtime back after every test.
+
+    ``SocietyRuntime.ensure_started`` registers itself as the current runtime and
+    only ``close`` unregisters it, so a test that never closes one leaks it into
+    later suites: the Jarvis chat kit then offers ``society_browser`` and
+    tool-set assertions fail depending on test order. The brain's registered
+    society factory is restored for the same reason.
+    """
+    runtime_module = sys.modules.get("dodaios.society.runtime")
+    runtime_before = runtime_module.current_runtime() if runtime_module is not None else None
+    # Some suites stub these modules in sys.modules; only a real list is tracked.
+    ref = getattr(sys.modules.get("dodaios.brain.factory"), "_SOCIETY_FACTORY_REF", None)
+    # Not imported yet means the import-time state: no factory registered.
+    factory_before = list(ref) if isinstance(ref, list) else []
+    yield
+    runtime_module = sys.modules.get("dodaios.society.runtime")
+    restore = getattr(runtime_module, "set_current_runtime", None)
+    if callable(restore) and runtime_module.current_runtime() is not runtime_before:
+        restore(runtime_before)
+    ref = getattr(sys.modules.get("dodaios.brain.factory"), "_SOCIETY_FACTORY_REF", None)
+    if isinstance(ref, list) and ref != factory_before:
+        ref[:] = factory_before
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_test_clients(request, monkeypatch):  # noqa: ANN001
+    """Give legacy TestClient suites a real authenticated browser session.
+
+    Security-boundary tests opt out with ``no_auto_web_auth`` and present their
+    own credentials. This fixture changes only test clients: production still
+    has no loopback, dev-mode, or pytest bypass.
+    """
+    if request.node.get_closest_marker("no_auto_web_auth") is not None:
+        yield
+        return
+
+    from fastapi.testclient import TestClient
+
+    from dodaios.ui.web.missions_auth import register_token, revoke_token
+    from dodaios.ui.web.surface_security import COOKIE_NAME
+
+    token = "jarvis-pytest-browser-session"  # noqa: S105
+    monkeypatch.setenv("JARVIS_TRUSTED_HOSTS", "testserver,test")
+    original_init = TestClient.__init__
+
+    def authenticated_init(client, *args, **kwargs):  # noqa: ANN001
+        base_url = str(kwargs.get("base_url", "http://testserver"))
+        parsed = urlsplit(base_url)
+        origin = f"{parsed.scheme or 'http'}://{parsed.netloc or 'testserver'}"
+        headers = dict(kwargs.get("headers") or {})
+        headers.setdefault("origin", origin)
+        kwargs["headers"] = headers
+        register_token(token)
+        original_init(client, *args, **kwargs)
+        client.cookies.set(COOKIE_NAME, token)
+
+    monkeypatch.setattr(TestClient, "__init__", authenticated_init)
+    try:
+        yield
+    finally:
+        revoke_token(token)
+
+
+@pytest.fixture(autouse=True)
+def _browser_lock_pinned_on():
+    """Pin the optional browser lock ON for every test, deterministic.
+
+    The production default is OFF (loopback walks in without a credential),
+    which would silently pass requests in any suite that uses a loopback
+    client peer — and the lazy raw-TOML seed would otherwise read the host
+    machine's real ``jarvis.toml``. Tests that exercise the open-access mode
+    flip the flag explicitly and rely on this fixture's teardown reset.
+    """
+    from dodaios.ui.web.surface_security import (
+        reset_browser_login_required,
+        set_browser_login_required,
+    )
+
+    set_browser_login_required(True)
+    yield
+    reset_browser_login_required()
+
+
+@pytest.fixture(autouse=True)
+def _agentic_ide_history_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep every suite away from the developer's real Agentic-IDE history.
+
+    Two small JSON files decide what the workspace picker shows on its front
+    page: the recent-folder list and the resume snapshot. Any test that opens a
+    workspace writes both, and it happened for real — a run left seven pytest
+    temp folders in the recents list, crowding out the one folder the developer
+    had actually opened.
+
+    This lives in the ROOT conftest on purpose. The same redirect existed one
+    directory down, covering the suite that was known to open workspaces, and
+    the leak came in through a different suite that also does. A guarantee that
+    only holds for the tests somebody remembered is not a guarantee.
+
+    The scratch-folder rule is stood down for the same reason it exists.
+    ``recents`` refuses to remember anything under the system temp directory —
+    and pytest hands out ``tmp_path`` from exactly there, so with the rule live
+    every test that opens a workspace in a temporary folder would be recording
+    nothing and asserting against an empty list. Redirecting the STORE is what
+    protects the developer's data; the rule itself is verified against the real
+    temp directory in ``test_recents_scratch_folders.py``.
+    """
+    from dodaios.agentic_ide import pane_sessions, prompt_history, recents, resume_store
+
+    root = tmp_path_factory.mktemp("agentic-ide-history")
+    monkeypatch.setattr(recents, "_store_path", lambda: root / "recents.json")
+    monkeypatch.setattr(resume_store, "_store_path", lambda: root / "last_session.json")
+    # The per-pane prompt histories and the panes' hook records: the running
+    # app's self-building loop reads both as the person's own prompts. A run
+    # of the IDE suites once left 20,000 history files there, six of them
+    # marked as typed by the person, and the live app filed them as turns.
+    monkeypatch.setattr(prompt_history, "_store_dir", lambda: root / "prompt_history")
+    monkeypatch.setattr(pane_sessions, "_state_dir", lambda: root / "pane_sessions")
+    monkeypatch.setattr(recents, "_temp_roots", list)
+    yield root
+
+
+@pytest.fixture(autouse=True)
+def _agent_trust_configs_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep the folder-trust pre-seed out of the developer's real CLI configs.
+
+    Opening a workspace marks its folder as trusted in each coding CLI's own
+    config (``~/.claude.json``, ``$CODEX_HOME/config.toml``, ...). The
+    Agentic-IDE suite already stubbed that out, but the brain and web suites
+    open workspaces too, and every run added its throwaway ``tmp_path`` folders
+    to the real files: one Codex config grew to 1,300+ dead project tables
+    (220 KB). The trust write re-parses that file with a formatting-preserving
+    parser before every open, so each test that opened a workspace then spent
+    seconds in it and a whole test file ran into the timeout.
+
+    Root conftest for the same reason as the history redirect above: the
+    guarantee must not depend on which suite remembered it. The redirect sits
+    on the path resolver, not on ``ensure_trusted`` itself, so modules that
+    imported the function by name are covered and ``test_trust.py`` still
+    exercises the real writer against its own temporary home.
+    """
+    from dodaios.workspace import trust
+
+    fake_home = tmp_path_factory.mktemp("agent-trust-home")
+    base = tmp_path_factory.getbasetemp().resolve()
+    real_config_path = trust._config_path  # noqa: SLF001
+    real_extra_configs = trust._extra_configs  # noqa: SLF001
+
+    def _config_path(spec, home, *, test_mode):  # noqa: ANN001, ANN202
+        if test_mode:
+            return real_config_path(spec, home, test_mode=True)
+        return real_config_path(spec, fake_home, test_mode=True)
+
+    def _extra_configs(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        # An added account's directory is only seeded when a test created it.
+        return [
+            path
+            for path in real_extra_configs(*args, **kwargs)
+            if Path(path).resolve().is_relative_to(base)
+        ]
+
+    monkeypatch.setattr(trust, "_config_path", _config_path)
+    monkeypatch.setattr(trust, "_extra_configs", _extra_configs)
+    yield fake_home
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cli_command_probe(monkeypatch):  # noqa: ANN001
+    """Keep a "/" list from starting the developer's real Claude Code.
+
+    A Claude Code seat's slash list is the one the CLI reports, and a thread
+    that has not run a turn asks the installed CLI for it
+    (``dodaios.agent_chat.typeahead._ask_cli``). On a developer machine that
+    would start the real binary, on the real account, from any test that opens
+    a "/" list, and the rows would be that person's skills. Here the CLI never
+    answers, so a list is what the test put on disk or reported itself; the
+    probe has its own tests against a stand-in process
+    (``test_cli_reported_commands.py``). Root conftest because the web and
+    Agentic-IDE suites open the list through the route too.
+    """
+    from dodaios.agent_chat import typeahead
+
+    typeahead.forget_cli_commands()
+    monkeypatch.setattr(typeahead, "_ask_cli", lambda runner, folder: None)
+    yield
+    typeahead.forget_cli_commands()
+
+
+@pytest.fixture(autouse=True)
+def _macos_shell_registration_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep every suite away from the developer's real macOS shell databases.
+
+    On a Mac the bundle suites build real ``Personal Jarvis.app`` bundles under
+    pytest's temp directory, and ``ensure_macos_app_bundle`` then registered
+    each one with the REAL LaunchServices database: one developer machine had
+    collected some eighty temp bundles under the product's bundle id, every one
+    a candidate for "Open With" and ``open -b``. The same call now also keeps
+    the login item aimed at the bundle, which would point the developer's real
+    LaunchAgent at a temp directory. Root conftest for the same reason as the
+    history redirect above: the leak comes in through whichever suite nobody
+    thought of. Suites that test these calls themselves patch on top of this.
+    """
+    import dodaios.autostart.macos as autostart_macos
+    import dodaios.setup.macos_app_bundle as mab
+    import dodaios.setup.macos_search_index as search_index
+
+    agents = tmp_path_factory.mktemp("launch-agents")
+    monkeypatch.setattr(autostart_macos, "_agents_dir", lambda: agents)
+    # The label is the product's own, so a real ``launchctl load`` of a test
+    # plist collides with — or, through RunAtLoad, starts — the installed app.
+    monkeypatch.setattr(autostart_macos, "_launchctl", lambda *_argv: True)
+    monkeypatch.setattr(mab, "_LSREGISTER", str(agents / "no-lsregister"))
+    monkeypatch.setattr(search_index, "_MDIMPORT", str(agents / "no-mdimport"))
+    # ``defaults write com.apple.dock`` + ``killall Dock`` on a developer's Mac.
+    import dodaios.setup.macos_dock as macos_dock
+
+    monkeypatch.setattr(macos_dock, "_DEFAULTS", str(agents / "no-defaults"))
+    monkeypatch.setattr(macos_dock, "_KILLALL", str(agents / "no-killall"))
+    monkeypatch.setattr(macos_dock, "_marker_path", lambda: agents / "macos-dock-pinned")
+    # The permission port keeps no state file any more; the one place that still
+    # names the two files an earlier build left behind is the one-time cleanup on
+    # the darwin install path, and a suite that reaches it must not delete the
+    # developer's real copies.
+    import dodaios.platform.permissions as permissions
+
+    monkeypatch.setattr(permissions, "_leftover_state_dir", lambda: agents)
+    # The rebuild fingerprint is written into the data directory whenever a darwin
+    # bundle is (re)built; a suite that does so must not skew a real launch's decision.
+    monkeypatch.setattr(mab, "_rebuild_marker_path", lambda: agents / "macos-bundle-rebuild.json")
+    yield agents
+
+
+@pytest.fixture(autouse=True)
+def _pricing_feed_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep cost tracking's provider-feed refresh off the network and off the
+    developer's real ``data/model_catalog_cache.json``.
+
+    ``dodaios.brain.cost.ensure_pricing_for`` prices a model the static table
+    does not know by refreshing the OpenRouter feed ONCE per process — a real
+    HTTP round-trip that would also rewrite the real cache file. Every suite
+    that runs a brain turn with a made-up model id ("fake-model") would trigger
+    it. So each test gets its own feed file, stamped as fetched just now: the
+    refresh sees a fresh feed that simply does not list the model and stays
+    home. Suites that exercise the refresh itself (test_cost_feed_pricing)
+    override the path and the catalog again on top of this.
+    """
+    import json
+    import time
+
+    from dodaios.brain import cost
+
+    root = tmp_path_factory.mktemp("pricing-feed")
+    path = root / "model_catalog_cache.json"
+    path.write_text(
+        json.dumps({"openrouter": {"fetched_at": time.time(), "models": []}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cost, "_feed_path_override", path)
+    monkeypatch.setattr(cost, "_feed_loaded", None)
+    monkeypatch.setattr(cost, "_feed_fetched_at", 0.0)
+    monkeypatch.setattr(cost, "_feed_rates", {})
+    monkeypatch.setattr(cost, "_feed_by_name", {})
+    monkeypatch.setattr(cost, "_refresh_attempted", set())
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _background_policy_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep the background billing policy off the developer's real login state.
+
+    The policy remembers a connected subscription in the user-data directory
+    and probes vendor CLIs for their login. Unpinned, a suite run on a machine
+    with a signed-in CLI would flip tests into subscription mode, and a logout
+    route test would erase the developer's real marker. Tests that need a
+    login script it through ``_probe_override``.
+    """
+    from dodaios.brain import background_policy
+
+    root = tmp_path_factory.mktemp("background-policy")
+    monkeypatch.setattr(background_policy, "_marker_path", lambda: root / "subscription_seen.json")
+    monkeypatch.setattr(background_policy, "_registry_probe", lambda _provider: None)
+    background_policy.reset_for_tests()
+    yield
+    background_policy.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _mission_paid_ledger_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Keep the missions' rolling paid-use ledger off the developer's real data
+    directory: it records real spend and gates automatic paid API use."""
+    from dodaios.missions import capacity
+
+    root = tmp_path_factory.mktemp("mission-paid-ledger")
+    monkeypatch.setattr(
+        capacity, "_default_daily_ledger_path", lambda: root / "mission_paid_ledger.json"
+    )
+    monkeypatch.setattr(capacity, "_DEFAULT_DAILY", None)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _app_action_state_in_tmp(tmp_path_factory, monkeypatch):  # noqa: ANN001
+    """Every registry-command or app-action call records its outcome for the
+    Jarvis-actions page; keep that, and the per-action policy, off the
+    developer's real ``data/state``."""
+    from dodaios.app_actions import history, policy
+
+    root = tmp_path_factory.mktemp("app-actions")
+    monkeypatch.setattr(policy, "policy_path", lambda: root / "policy.json")
+    monkeypatch.setattr(history, "history_path", lambda: root / "history.json")
+    history.reset_for_tests()
+    yield
+    history.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _provider_health_ledger_in_tmp(tmp_path_factory):  # noqa: ANN001
+    """Every real brain/speech/realtime call records its outcome for the
+    status dots; keep that record off the developer's real ``data/state`` and
+    start every test with an empty one."""
+    from dodaios.brain import provider_health_ledger as ledger
+
+    root = tmp_path_factory.mktemp("provider-health")
+    ledger.set_ledger(ledger.ProviderHealthLedger(root / ledger.LEDGER_FILE_NAME))
+    yield root
+    # In-memory, not None: a late background call must not create the real file.
+    ledger.set_ledger(ledger.ProviderHealthLedger(None))
+
+
+@pytest.fixture(autouse=True)
+def _seat_health_in_memory():
+    """Seat verdicts learned from real calls never leak between tests or into
+    the developer's ``data/state``: every test starts with an empty, file-less record."""
+    from dodaios.brain import seat_health
+
+    seat_health.set_seat_health(seat_health.SeatHealth(None))
+    yield
+    seat_health.set_seat_health(seat_health.SeatHealth(None))
+
+
+@pytest.fixture(autouse=True)
+def _short_pane_delivery_waits(monkeypatch):  # noqa: ANN001
+    """Fake panes never paint a composer, so the real first-prompt and
+    late-arrival windows (tens of seconds) would only slow every send test.
+    Tests that exercise those windows set their own values."""
+    import sys
+
+    session = sys.modules.get("dodaios.agentic_ide.session")
+    if session is not None:
+        monkeypatch.setattr(session, "_FIRST_PROMPT_COMPOSER_WAIT_S", 0.05, raising=False)
+        monkeypatch.setattr(session, "_LATE_ARRIVAL_WINDOW_S", 0.05, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_bus():
+    """Reset the global default bus before and after each test."""
+    reset_default_bus()
+    yield
+    reset_default_bus()
+
+
+@pytest.fixture(autouse=True)
+def _reset_config_caches():
+    """Start every test with a cold config cache.
+
+    ``dodaios.core.config`` remembers the parsed TOML and the routing decision
+    derived from it, both keyed on the config FILE's identity — which is what
+    makes them safe in production and unsafe across tests: a suite that swaps
+    the config by monkeypatching ``load_config`` changes nothing about any file,
+    so without this the second test is answered with the first one's config.
+
+    Cheap (two dict clears) and applied to every test rather than the ones that
+    happen to need it today, because the failure mode is a test passing on the
+    previous test's data — which is silent, order-dependent, and exactly what
+    caught three model-catalog tests when the routing cache was introduced.
+    """
+    from dodaios.core.config import clear_config_cache
+
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
+
+@pytest.fixture(autouse=True)
+def _reset_entry_point_cache():
+    """Start every test with a cold entry-point catalogue.
+
+    Same reasoning as the config caches above: ``dodaios.core.entry_points``
+    remembers the installed plugin catalogue for the life of the process, which
+    is safe in production (a new entry-point needs a restart anyway) and unsafe
+    across tests — a suite that monkeypatches ``importlib.metadata.entry_points``
+    to fake a plugin set would otherwise be answered from whatever an earlier
+    test happened to read from the real installation.
+    """
+    from dodaios.core.entry_points import invalidate
+
+    invalidate()
+    yield
+    invalidate()
+
+
+@pytest.fixture(autouse=True)
+def _reset_permission_service():
+    """Start and end every test with a cold permission service.
+
+    ``dodaios.platform.permission_service`` keeps open episodes, listeners and a
+    bus handle for the life of the process. That is right in production and wrong
+    across tests: an episode one test opened would answer the next test's
+    ``ensure()`` with ``asked=False``, and a listener would outlive the loop it
+    was registered on.
+
+    The module is looked up in ``sys.modules`` and never imported here: a test
+    that never touched the service must not pay for it (or load it on a base
+    install), and a module that is not loaded has nothing to reset.
+    """
+    module = sys.modules.get("dodaios.platform.permission_service")
+    if module is not None:
+        module._reset_for_tests()
+    yield
+    # Re-read: the test itself may have been the first to import the module.
+    module = sys.modules.get("dodaios.platform.permission_service")
+    if module is not None:
+        module._reset_for_tests()
+
+
+@pytest_asyncio.fixture
+async def fresh_bus():
+    """Fresh EventBus for each test."""
+    bus = EventBus()
+    yield bus
+
+
+@pytest.fixture
+def prefixed_environment_restored():
+    """Put every ``JARVIS_*`` / ``DODAIOS_*`` variable back after the test.
+
+    For a test that runs the new-prefix adoption on the real process
+    environment (``dodaios.core.env_prefix``, or the frozen runtime hook that
+    carries a copy of it): the adoption writes the ``JARVIS_`` name of every
+    ``DODAIOS_`` variable, and ``monkeypatch`` only takes back the names the
+    test itself set.
+    """
+    import os
+
+    prefixes = ("JARVIS_", "DODAIOS_")
+    before = {name: value for name, value in os.environ.items() if name.startswith(prefixes)}
+    yield
+    for name in [name for name in os.environ if name.startswith(prefixes)]:
+        if name not in before:
+            del os.environ[name]
+    os.environ.update(before)
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"

@@ -1,0 +1,1156 @@
+"""ToolExecutor: orchestrates risk-eval → plausibility → approval → execute → event log.
+
+The only authorized entry point for tool calls. Calling `Tool.execute()`
+directly bypasses safety — that is a bug.
+
+Phase 4 (persona mandate): a plausibility check runs before every approval
+decision. If the voice pipeline has registered a ``plausibility_context_fn``,
+the executor fetches transcript confidence + wake age and decides whether
+``ask``/``monitor`` tools need an extra confirmation (see
+``dodaios.brain.plausibility``).
+"""
+from __future__ import annotations
+
+import dataclasses
+import logging
+import time
+from collections.abc import Callable
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
+from uuid import UUID, uuid4
+
+from dodaios.core.bus import EventBus
+from dodaios.core.events import (
+    ActionApprovalRequired,
+    ActionApproved,
+    ActionDenied,
+    ActionExecuted,
+    ActionProposed,
+)
+from dodaios.core.protocols import (
+    CancelToken,
+    ExecutionContext,
+    Tool,
+    ToolResult,
+    Transcript,
+)
+from dodaios.core.redact import safe_preview
+from dodaios.trust.expectations import compare as compare_expectation
+from dodaios.trust.expectations import (
+    dry_run_args,
+    is_irreversible,
+    is_low_confidence,
+    prediction_record,
+    split_expect,
+)
+from dodaios.trust.hooks import after_execute, before_execute
+
+from . import approval_amendments
+from .approval import TIMEOUT_REASON, ApprovalWorkflow
+from .approval_surface import (
+    CONVERSATIONAL,
+    UNATTENDED,
+    resolve_approval_surface,
+)
+from .origin import OriginLedger, TargetOrigin, classify_targets
+from .reversibility import origin_refs, reversibility_of, unattended_origin
+from .risk_tier import ActionBlocked, RiskTierEvaluator, requires_human_approval
+from .stop_hold import StopHold, refs_from_context, stop_holds
+
+if TYPE_CHECKING:
+    from dodaios.brain.plausibility import PlausibilityDecision
+    from dodaios.core.config import BrainPlausibilityConfig
+
+
+log = logging.getLogger(__name__)
+
+
+async def _offer_connect(
+    tool: Tool, result: ToolResult, config_snapshot: dict[str, Any] | None
+) -> ToolResult:
+    """A plugin tool that failed for want of a connection shows its Connect card
+    in the chat that called it (``dodaios/society/connect_offer.py``). Every
+    other failure, and every caller that is not a chat, keeps ``result``."""
+    try:
+        from dodaios.society.connect_offer import offer_connect
+
+        return await offer_connect(str(tool.name), result, config_snapshot)
+    except Exception:  # noqa: BLE001 — the card is an offer; the tool's own error stands
+        log.warning("tool executor: connect card for %s not offered", tool.name, exc_info=True)
+        return result
+
+
+# Sentinel returned (as ``ToolResult.error``) when a confirmation-requiring tool
+# is invoked on a CONVERSATIONAL turn (``config_snapshot["voice_confirm"]``).
+# Instead of blocking in ``ApprovalWorkflow.wait()`` for a UI approval no voice/
+# chat user can give (which is then beheaded by the 20 s no-first-frame ceiling →
+# the misleading "took too long" phrase, forensic 2026-06-18), the executor stashes
+# the action and returns this sentinel so the brain SPEAKS a confirmation question
+# and ends the turn. The next "ja" re-runs the action via ``execute_confirmed``.
+VOICE_CONFIRM_SENTINEL = "__voice_confirm_required__"
+
+
+# The three ways an approval-gated call can end WITHOUT running. They carry
+# distinct ``ToolResult.error`` prefixes on purpose: until the GT-12 fix a
+# 60-second timeout came back as ``approval-denied (timeout)``, so every
+# consumer that classifies on ``startswith("approval-denied")`` — the mission
+# ``WorkerToolBroker`` does exactly that — recorded "the user refused" for a
+# decision nobody was ever asked to make. A refusal, a silence, and an absent
+# human are three different facts and must read as three different facts.
+APPROVAL_DENIED_PREFIX = "approval-denied"
+APPROVAL_TIMEOUT_PREFIX = "approval-timeout"
+APPROVAL_UNAVAILABLE_PREFIX = "approval-unavailable"
+
+#: ``ToolResult.output["outcome"]`` for the unattended dead end, and the
+#: ``ActionDenied.reason`` published alongside it. The word says what happened:
+#: approval was impossible, not withheld.
+APPROVAL_UNAVAILABLE_OUTCOME = "approval_unavailable"
+
+#: ``ToolResult.error`` prefix and ``output["outcome"]`` for a call that runs
+#: without the owner and was refused because the owner stopped that work. It
+#: is neither a refusal nor a silence: the owner's stop is still in force and
+#: only the owner lifts it (``dodaios.safety.stop_hold``).
+STOPPED_BY_OWNER_PREFIX = "stopped-by-owner"
+STOPPED_BY_OWNER_OUTCOME = "stopped_by_owner"
+
+
+# ``plausibility_context_fn`` returns (Transcript | None, wake_age_s | None).
+# The voice pipeline registers a provider that supplies the last user-turn
+# transcript and the seconds since the last wake trigger. On
+# ``None`` returns the executor behaves as before (no plausibility check).
+PlausibilityContextFn = Callable[[], "tuple[Transcript | None, float | None]"]
+
+
+def _with_edit_note(result: ToolResult, changes: dict[str, dict[str, str]]) -> ToolResult:
+    """``result`` with a note that the person edited the call before approving it."""
+    from dodaios.agent_chat.approval_preview import edits_note
+
+    note = edits_note(changes)
+    if not note:
+        return result
+    output = result.output
+    if isinstance(output, dict):
+        output = {**output, "approval_edits": note}
+    elif isinstance(output, str):
+        output = f"{output}\n\n{note}"
+    else:
+        output = {"result": output, "approval_edits": note}
+    return replace(result, output=output)
+
+
+def _optional_string(value: Any) -> str | None:
+    """Normalize optional correlation metadata without inventing identifiers."""
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+class ToolExecutor:
+    """Pipeline: evaluate → (plausibility) → (approve) → execute → log."""
+
+    def __init__(
+        self,
+        bus: EventBus,
+        evaluator: RiskTierEvaluator,
+        approval: ApprovalWorkflow,
+        *,
+        default_timeout_s: float = 60.0,
+        plausibility_config: BrainPlausibilityConfig | None = None,
+        plausibility_context_fn: PlausibilityContextFn | None = None,
+    ) -> None:
+        self._bus = bus
+        self._evaluator = evaluator
+        self._approval = approval
+        self._default_timeout_s = default_timeout_s
+        self._plausibility_config = plausibility_config
+        self._plausibility_context_fn = plausibility_context_fn
+        # Two-turn voice/chat confirmation: actions deferred by ``execute`` on a
+        # conversational turn, keyed by trace_id, awaiting an ``execute_confirmed``
+        # (user said "ja") or ``cancel_pending`` (user said "nein"). The tool +
+        # args live here OUT-OF-BAND — never in the serialized ToolResult.output.
+        self._pending_voice: dict[UUID, tuple[Tool, dict[str, Any]]] = {}
+        # ADR-0040, record only: the addressable values tool results held, per
+        # trace, so a call's target can be told apart by where it came from.
+        # Kept here because this is the one entry point every tool call takes.
+        self._origins = OriginLedger()
+
+    #: The longest a surface may keep an approval open, whatever it asks for.
+    MAX_APPROVAL_TIMEOUT_S = 900.0
+
+    def _approval_timeout(self, config_snapshot: dict[str, Any] | None) -> float:
+        """The wait for this call: the surface's ``approval_timeout_s`` when it
+        declares one (never below the default, never above the cap), else the
+        default the executor was built with."""
+        raw = (config_snapshot or {}).get("approval_timeout_s")
+        if raw is None:
+            return self._default_timeout_s
+        try:
+            asked = float(raw)
+        except (TypeError, ValueError):
+            return self._default_timeout_s
+        return max(self._default_timeout_s, min(asked, self.MAX_APPROVAL_TIMEOUT_S))
+
+    def set_plausibility_context_fn(
+        self, fn: PlausibilityContextFn | None,
+    ) -> None:
+        """Late registration of the plausibility-context provider.
+
+        The voice pipeline calls this after its own ``run()`` setup, because
+        the ToolExecutor is built earlier in the bootstrap order than
+        the pipeline. Idempotent — ``None`` resets the hook.
+        """
+        self._plausibility_context_fn = fn
+
+    def _evaluate_plausibility(
+        self,
+        tool: Tool,
+        decision: Any,
+    ) -> PlausibilityDecision | None:
+        """Fetches the current plausibility context and checks it.
+
+        Returns ``None`` if no context provider is registered, or the
+        tool was downgraded to ``safe`` via whitelist — whitelist logic
+        is sacred (mandate: "whitelist-downgraded tools keep running
+        without a plausibility check").
+        """
+        if self._plausibility_context_fn is None:
+            return None
+        # Whitelist downgrade: skip plausibility.
+        if decision.approved_by == "whitelist":
+            return None
+        try:
+            transcript, wake_age = self._plausibility_context_fn()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("plausibility_context_fn failed: %s", exc)
+            return None
+        from dodaios.brain.plausibility import check_plausibility
+
+        return check_plausibility(
+            tool_name=tool.name,
+            risk_tier=decision.tier,
+            transcript=transcript,
+            wake_age_s=wake_age,
+            config=self._plausibility_config,
+        )
+
+    def _target_origin(
+        self, tool: Tool, args: dict[str, Any], tid: UUID, user_utterance: str
+    ) -> TargetOrigin:
+        """Where this call's target came from. Never decides anything and never
+        raises: a classification that fails is an empty record, not a failed
+        call."""
+        try:
+            return classify_targets(
+                tool, args, ledger=self._origins, trace=str(tid), user_text=user_utterance
+            )
+        except Exception as exc:  # noqa: BLE001 — a record must never cost the call
+            log.debug("target-origin classification failed for %s: %s", tool.name, exc)
+            return TargetOrigin()
+
+    def _record_result_origin(
+        self, tool: Tool, tid: UUID, result: ToolResult, args: dict[str, Any]
+    ) -> None:
+        """Remember the addressable values a tool result held (best effort)."""
+        try:
+            self._origins.record(str(tid), tool, result.output, args)
+        except Exception as exc:  # noqa: BLE001 — a record must never cost the call
+            log.debug("origin ledger could not read the result of %s: %s", tool.name, exc)
+
+    @staticmethod
+    def _owner_rule_covers(tool: Tool, args: dict[str, Any]) -> bool:
+        """A standing rule the owner saved covers this call (never a hard limit)."""
+        try:
+            from dodaios.trust.rules import trust_rules
+
+            return trust_rules().allows(tool.name, args) is not None
+        except Exception as exc:  # noqa: BLE001 — no rule readable means no rule
+            log.debug("standing-rule lookup failed for %s: %s", tool.name, exc)
+            return False
+
+    async def publish_guard_denied(
+        self,
+        tool_name: str,
+        reason: str,
+        *,
+        trace_id: UUID | None = None,
+    ) -> None:
+        """Surface a tool call refused BEFORE reaching :meth:`execute`.
+
+        The tool-use loop's deterministic guards (how-to question, research
+        intent, STT hallucination, unknown tool name, …) block a call without
+        ever entering the executor — so no ActionProposed/ActionExecuted event
+        fires and the session timeline shows NO trace of why a turn refused
+        (2026-07-06 audit: the unknown-tool 'run-shell' incident left zero
+        events). Publishing the same ``ActionDenied`` the blacklist path uses
+        makes the refusal visible; the recorder already subscribes to it.
+        Best-effort: observability must never break tool execution.
+        """
+        try:
+            await self._bus.publish(ActionDenied(
+                trace_id=trace_id or uuid4(),
+                tool_name=tool_name,
+                reason=reason,
+            ))
+        except Exception:  # noqa: BLE001
+            log.debug("publish_guard_denied failed", exc_info=True)
+
+    def _owner_stop(
+        self, origin_kind: str, config_snapshot: dict[str, Any] | None
+    ) -> StopHold | None:
+        """The owner's stop that covers this call, for a call that runs without
+        the owner. A call the owner started directly is never held."""
+        if not origin_kind:
+            return None
+        try:
+            return stop_holds().blocking(
+                **{**refs_from_context(origin_refs()), **refs_from_context(config_snapshot)}
+            )
+        except Exception as exc:  # noqa: BLE001 — an unreadable record must not hide a stop below
+            log.warning("stop-hold check failed for an unattended call: %s", exc)
+            return None
+
+    async def _refuse_stopped(
+        self, tool: Tool, tid: UUID, hold: StopHold, call_id: str = ""
+    ) -> ToolResult:
+        reason = f"stop-hold: {hold.kind} ({hold.reason or 'stopped by the owner'})"
+        await self._bus.publish(
+            ActionDenied(trace_id=tid, tool_name=tool.name, reason=reason, call_id=call_id)
+        )
+        log.info("stop-hold: %s refused, %s", tool.name, reason)
+        return ToolResult(
+            success=False,
+            output={
+                "outcome": STOPPED_BY_OWNER_OUTCOME,
+                "tool_name": tool.name,
+                "scope": hold.kind,
+                "reason": hold.reason,
+                "message": (
+                    "The owner stopped this work and it stays stopped until the owner "
+                    "resumes it. Do not retry or look for another way."
+                ),
+            },
+            error=f"{STOPPED_BY_OWNER_PREFIX} ({reason})",
+        )
+
+    async def _approval_unavailable(
+        self,
+        tool: Tool,
+        tid: UUID,
+        risk_tier: str,
+        config_snapshot: dict[str, Any] | None,
+        call_id: str = "",
+    ) -> ToolResult:
+        """The honest dead end: this action needed a human and had none.
+
+        Publishes ``ActionDenied`` so the refusal is visible in the timeline
+        (same reasoning as :meth:`publish_guard_denied` — a call that silently
+        vanishes is worse than one that failed), but says in the reason WHY it
+        did not run. The returned error carries its own prefix so no consumer
+        can mistake it for a user's "no", and the output carries a
+        plain-language sentence a person can actually read in a run log.
+        """
+        reason = f"{APPROVAL_UNAVAILABLE_OUTCOME}: no approval channel on this surface"
+        await self._bus.publish(ActionDenied(
+            trace_id=tid,
+            tool_name=tool.name,
+            reason=reason,
+            call_id=call_id,
+        ))
+        log.info(
+            "approval-unavailable: %s (tier=%s) needed a confirmation and this "
+            "surface has nobody to give it — failing fast",
+            tool.name, risk_tier,
+        )
+        output: dict[str, Any] = {
+            "outcome": APPROVAL_UNAVAILABLE_OUTCOME,
+            "tool_name": tool.name,
+            "trace_id": str(tid),
+            "risk_tier": risk_tier,
+        }
+        # Plain-language sentence in the turn's ALREADY-RESOLVED output
+        # language (Runtime Output Language doctrine: this layer reads the
+        # resolved value, it never re-derives one). Phrasing lives in the one
+        # channel-agnostic table, next to the confirmation question it belongs
+        # to. Lazy import — ``dodaios.voice`` couples to ``dodaios.core.self_mod``
+        # via its package __init__, so importing at module load would create an
+        # order-dependent cycle (same pattern as the tool-use loop).
+        try:
+            from dodaios.voice.tool_confirmation import format_approval_unavailable
+
+            output["message"] = format_approval_unavailable(
+                tool.name,
+                language=str((config_snapshot or {}).get("output_language") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 — phrasing must not decide safety
+            log.debug("approval-unavailable phrasing failed: %s", exc)
+        return ToolResult(
+            success=False,
+            output=output,
+            error=f"{APPROVAL_UNAVAILABLE_PREFIX} ({reason})",
+        )
+
+    # ------------------------------------------------------------------
+    # Audit + receipts (dodaios/trust): written here because this is the one
+    # entry point every tool call takes, and by code, never by a tool.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _outcome(result: ToolResult, trail: dict[str, Any]) -> str:
+        error = str(result.error or "")
+        if result.success:
+            return "executed"
+        if error == VOICE_CONFIRM_SENTINEL:
+            return "awaiting_confirmation"
+        if trail.get("blocked"):
+            return "blocked"
+        if error.startswith(APPROVAL_TIMEOUT_PREFIX):
+            return "timeout"
+        if error.startswith(APPROVAL_UNAVAILABLE_PREFIX):
+            return "unavailable"
+        if error.startswith((APPROVAL_DENIED_PREFIX, "Plan mode")):
+            return "denied"
+        if error.startswith("cancelled"):
+            return "cancelled"
+        return "failed"
+
+    def _attach_receipt(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        result: ToolResult,
+        config_snapshot: dict[str, Any] | None,
+        trail: dict[str, Any],
+    ) -> ToolResult:
+        """Prove a successful call with a receipt (never raises, never fails the call)."""
+        if not result.success:
+            return result
+        try:
+            from dodaios.trust.receipts import build_receipt, is_side_effect
+
+            from .origin import tool_effect
+
+            effect = str(trail.get("effect") or "") or tool_effect(tool, args)
+            tier = str(trail.get("tier") or getattr(tool, "risk_tier", "") or "")
+            receipt = build_receipt(
+                str(trail["id"]),
+                tool,
+                args,
+                result,
+                config_snapshot,
+                side_effect=is_side_effect(tool, args, effect=effect, tier=tier),
+            )
+        except Exception as exc:  # noqa: BLE001 — a receipt must never cost the call
+            log.debug("receipt for %s failed: %s", tool.name, exc)
+            return result
+        trail["receipt"] = receipt
+        try:
+            return dataclasses.replace(result, receipt=receipt)
+        except Exception:  # noqa: BLE001 — a result type that cannot carry one still ran
+            return result
+
+    @staticmethod
+    def _receipt_fields(result: ToolResult) -> dict[str, str]:
+        receipt = getattr(result, "receipt", None)
+        if not receipt or receipt.get("state") == "read":
+            return {}
+        links = receipt.get("links") or []
+        return {
+            "receipt_id": str(receipt.get("id") or ""),
+            "receipt_state": str(receipt.get("state") or ""),
+            "receipt_summary": str(receipt.get("summary") or ""),
+            "receipt_link": str(links[0]) if links else "",
+        }
+
+    @staticmethod
+    def _prediction(
+        tool: Tool,
+        args: dict[str, Any],
+        result: ToolResult,
+        trail: dict[str, Any],
+        config_snapshot: dict[str, Any] | None,
+        outcome: str,
+    ) -> dict[str, Any] | None:
+        """The stated expectation compared with what happened (never raises).
+
+        Only a call that ran says something about the prediction: a refusal, a
+        timeout or a dry run is not its outcome.
+        """
+        expectation = trail.get("expectation")
+        if expectation is None or outcome not in ("executed", "failed"):
+            return None
+        if trail.get("verify_first") == "dry_run":
+            return None
+        try:
+            verdict = compare_expectation(
+                expectation,
+                tool_name=tool.name,
+                args=args,
+                succeeded=bool(result.success),
+                output=result.output,
+                receipt=trail.get("receipt"),
+            )
+            return prediction_record(
+                expectation,
+                verdict,
+                tool_name=tool.name,
+                seat=str((config_snapshot or {}).get("brain_seat") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 — a prediction must never cost the call
+            log.debug("prediction for %s skipped: %s", tool.name, exc)
+            return None
+
+    def _audit(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        tid: UUID,
+        config_snapshot: dict[str, Any] | None,
+        result: ToolResult,
+        trail: dict[str, Any],
+        t_start: float,
+    ) -> None:
+        """Append this call to the owner's audit log. Never raises."""
+        try:
+            from dodaios.trust.audit import approval_of, audit_log, origin_of
+            from dodaios.trust.undo import session_of
+
+            origin, detail = origin_of(config_snapshot)
+            outcome = self._outcome(result, trail)
+            mode, by = approval_of(
+                needs_confirm=bool(trail.get("needs_confirm")),
+                approved_by=trail.get("approved_by"),
+                decision_by=trail.get("decision_by"),
+                tier=str(trail.get("tier") or ""),
+            )
+            receipt = trail.get("receipt")
+            prediction = self._prediction(tool, args, result, trail, config_snapshot, outcome)
+            audit_log().record(
+                {
+                    "id": trail["id"],
+                    "trace_id": str(tid),
+                    "tool": tool.name,
+                    "action": str((args or {}).get("action") or ""),
+                    "origin": origin,
+                    "origin_detail": detail,
+                    "session_id": session_of(config_snapshot),
+                    "approval": mode,
+                    "approval_by": by,
+                    "tier": trail.get("tier") or "",
+                    "effect": trail.get("effect") or "",
+                    "outcome": outcome,
+                    "error": "" if result.success else str(result.error or ""),
+                    "duration_ms": int((time.perf_counter() - t_start) * 1000),
+                    "args_preview": safe_preview(args),
+                    "receipt": receipt if receipt and receipt.get("state") != "read" else None,
+                    "prediction": prediction,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 — the audit never costs the call
+            log.debug("audit row for %s skipped: %s", tool.name, exc)
+
+    async def execute(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        user_utterance: str = "",
+        config_snapshot: dict[str, Any] | None = None,
+        memory_read: Any | None = None,
+        trace_id: UUID | None = None,
+        rationale: str = "",
+        cancel_token: CancelToken | None = None,
+    ) -> ToolResult:
+        tid = trace_id or uuid4()
+        t_start = time.perf_counter()
+        trail: dict[str, Any] = {"id": uuid4().hex[:16]}
+        # The model's optional prediction (``expect``) is read here and never
+        # reaches the tool: every caller of the gateway gets the same treatment.
+        args, expectation = split_expect(tool, args)
+        trail["expectation"] = expectation
+        result = await self._execute_gated(
+            tool,
+            args,
+            user_utterance=user_utterance,
+            config_snapshot=config_snapshot,
+            memory_read=memory_read,
+            tid=tid,
+            rationale=rationale,
+            cancel_token=cancel_token,
+            trail=trail,
+        )
+        self._audit(tool, args, tid, config_snapshot, result, trail, t_start)
+        return result
+
+    async def _dry_run(
+        self,
+        tool: Tool,
+        preview_args: dict[str, Any],
+        tid: UUID,
+        config_snapshot: dict[str, Any] | None,
+        memory_read: Any | None,
+    ) -> ToolResult:
+        """Run the tool's own side-effect-free preview instead of the action."""
+        ctx = ExecutionContext(
+            trace_id=tid,
+            user_utterance="",
+            config=config_snapshot or {},
+            memory_read=memory_read,
+            approved_by="auto",
+        )
+        try:
+            preview = await tool.execute(preview_args, ctx)
+        except Exception as exc:  # noqa: BLE001 — a failed preview is a failed call, not a crash
+            return ToolResult(success=False, output=None, error=str(exc))
+        if not preview.success:
+            return preview
+        return ToolResult(
+            success=True,
+            output={
+                "dry_run": True,
+                "executed": False,
+                "preview": preview.output,
+                "note": (
+                    "You stated low confidence for an action that cannot be undone, so only "
+                    "a preview ran. Check it, then repeat the call to act."
+                ),
+            },
+        )
+
+    async def _execute_gated(
+        self,
+        tool: Tool,
+        args: dict[str, Any],
+        *,
+        user_utterance: str,
+        config_snapshot: dict[str, Any] | None,
+        memory_read: Any | None,
+        tid: UUID,
+        rationale: str,
+        cancel_token: CancelToken | None,
+        trail: dict[str, Any],
+    ) -> ToolResult:
+        t_start = time.perf_counter()
+
+        if (config_snapshot or {}).get("chat_read_only"):
+            from dodaios.core.tool_read_only import allows_read
+
+            if not allows_read(tool, args):
+                await self._bus.publish(ActionDenied(
+                    trace_id=tid,
+                    call_id=trail["id"],
+                    tool_name=tool.name,
+                    reason="Plan mode permits reads only",
+                ))
+                return ToolResult(False, None, "Plan mode permits reads only")
+
+        if cancel_token is not None and cancel_token.is_cancelled():
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"cancelled ({cancel_token.reason or 'requested'})",
+            )
+
+        # 0.5 The owner's stop holds for everything that runs without the
+        # owner (a routine, a trigger, a repair, an agent's own initiative).
+        origin_kind = unattended_origin(config_snapshot)
+        stop = self._owner_stop(origin_kind, config_snapshot)
+        if stop is not None:
+            return await self._refuse_stopped(tool, tid, stop, trail["id"])
+
+        # 1. Evaluate
+        try:
+            decision = self._evaluator.evaluate(tool, args)
+        except ActionBlocked as exc:
+            trail["blocked"] = True
+            await self._bus.publish(ActionDenied(
+                trace_id=tid, call_id=trail["id"],
+                tool_name=tool.name,
+                reason=f"blacklist: {exc.pattern}",
+            ))
+            return ToolResult(success=False, output=None, error=str(exc))
+        trail["tier"] = decision.tier
+        trail["decision_by"] = decision.approved_by
+
+        # Where the call's target came from (ADR-0040, record only). Settled
+        # here, before an approval ticket exists, so nothing but the publish
+        # sits between arming it and ``ActionProposed``.
+        origin = self._target_origin(tool, args, tid, user_utterance)
+        trail["effect"] = origin.effect
+
+        # 2. Plausibility check (Phase 4): the result can force confirmation
+        # even when the tier workflow does not (for example, ``monitor``).
+        plaus = self._evaluate_plausibility(tool, decision)
+        if plaus is not None and plaus.reason != "ok":
+            log.info(
+                "Plausibility[%s]: tier=%s reason=%s require_confirm=%s",
+                tool.name, decision.tier, plaus.reason, plaus.require_confirmation,
+            )
+
+        # 2.5 The trust layer's second look (dodaios/trust): a send that carries
+        # a secret never runs; a hard limit or a doubtful send needs a PERSON,
+        # not a rule, a whitelist, a stance or an unattended bridge.
+        trust = before_execute(tool.name, args)
+        if trust.blocked:
+            trail["blocked"] = True
+            reason = trust.block_reason()
+            await self._bus.publish(ActionDenied(
+                trace_id=tid, call_id=trail["id"], tool_name=tool.name, reason=reason,
+            ))
+            return ToolResult(
+                success=False,
+                output={"outcome": "outbound_blocked", "checks": trust.to_dict()["checks"]},
+                error=f"{APPROVAL_DENIED_PREFIX} ({reason})",
+            )
+
+        # 2.7 Predict-before-act: a stated low confidence on an action that
+        # cannot be taken back means "check first": a preview where the tool
+        # has one, otherwise one ask through the usual approval card. Reversible
+        # work and unattended runs are never interrupted by it.
+        if (
+            is_low_confidence(trail.get("expectation"))
+            and is_irreversible(origin.effect)
+            and resolve_approval_surface(config_snapshot) != UNATTENDED
+        ):
+            preview_args = dry_run_args(tool, args)
+            if preview_args is not None:
+                trail["verify_first"] = "dry_run"
+                return await self._dry_run(tool, preview_args, tid, config_snapshot, memory_read)
+            trail["verify_first"] = "ask"
+
+        # 3. Arm approval BEFORE publishing ActionProposed. Subscribers such as
+        # TaskAutoApprover may answer synchronously from that event; registering
+        # afterward loses the answer and turns a valid grant into a timeout.
+        approved_by = decision.approved_by or "auto"
+        # Some actions need a person every time (see ``requires_human_approval``):
+        # they always arm a confirmation, and neither the explicit-intent waiver
+        # nor the global bypass below may answer it.
+        # The fixed set needs a click every time; a trust hard limit or a
+        # doubtful send needs a person too, but the person asking for exactly
+        # that action by name (below) counts as that person deciding.
+        fixed_human = requires_human_approval(tool, args, include_hard_limits=False)
+        human_required = fixed_human or requires_human_approval(tool, args) or trust.needs_person
+        tier_confirm = (
+            human_required
+            or self._evaluator.needs_user_confirmation(decision)
+            or trail.get("verify_first") == "ask"
+        )
+        plaus_confirm = plaus is not None and plaus.require_confirmation
+        # Explicit intent (Claude-Code permission model, mandate 2026-08-08):
+        # a consequential action the user's own utterance already asked for by
+        # name ("delete the folder X") skips the redundant confirmation. Only
+        # the TIER requirement may be waived — a plausibility-forced
+        # confirmation (low STT confidence, stale wake) stays binding, because
+        # the whole doubt there is whether the utterance was heard right.
+        if tier_confirm and not plaus_confirm and not fixed_human and user_utterance:
+            confirms = getattr(tool, "intent_confirms_args", None)
+            if callable(confirms):
+                try:
+                    if confirms(args, user_utterance):
+                        tier_confirm = False
+                        human_required = False
+                        approved_by = "explicit-intent"
+                        log.info(
+                            "explicit-intent: %s authorized by the utterance, "
+                            "skipping confirmation", tool.name,
+                        )
+                except Exception as exc:  # noqa: BLE001 — keep the confirmation on a broken hook
+                    log.warning(
+                        "intent_confirms_args on %r raised %r — keeping confirmation",
+                        tool.name, exc,
+                    )
+        # Reversibility (criterion: autonomy chosen per action by how far it
+        # can be taken back). A call that runs without the owner may do what
+        # is reversible per its tier; a recoverable or irreversible one needs
+        # an approval unless the owner's whitelist or a standing rule covers
+        # it. An owner-direct call never reaches this: no new asking there.
+        reversibility_confirm = False
+        if origin_kind and decision.approved_by != "whitelist":
+            rev = reversibility_of(
+                tool, args, tier=decision.tier, hard_limit=trust.hard_limit
+            )
+            reversibility_confirm = rev != "reversible" and not self._owner_rule_covers(
+                tool, args
+            )
+            if reversibility_confirm:
+                log.info(
+                    "reversibility: %s is %s and ran without the owner (%s): approval needed",
+                    tool.name, rev, origin_kind,
+                )
+        needs_confirm = tier_confirm or plaus_confirm or reversibility_confirm
+        trail["needs_confirm"] = needs_confirm
+        trail["approved_by"] = approved_by
+        # A bound chat owns its approval stance through ChatApprovalBridge.
+        # Calls from voice, tasks, missions and other app surfaces use the
+        # global default. This never overrides the block/read-only/cancel
+        # checks, and model-controlled tool arguments cannot set the policy.
+        # Bypass never answers a plausibility-forced confirmation (the doubt is
+        # whether the person was heard right at all) nor an action that needs a
+        # person by definition (security audit 2026-11-09).
+        bypass_default = (
+            self._evaluator.bypass_permissions
+            and not (config_snapshot or {}).get("approval_ref")
+            and not plaus_confirm
+            and not human_required
+            and not reversibility_confirm
+        )
+        # WHO can answer this gate — declared by the calling layer, never by
+        # the model (see ``approval_surface``). It changes only how the
+        # approval is obtained, never whether one is needed: ``needs_confirm``
+        # above is the untouched tier decision.
+        surface = resolve_approval_surface(config_snapshot)
+        voice_confirm = surface == CONVERSATIONAL and not bypass_default
+        # How long a card may stay open — declared by the calling layer like
+        # the surface itself (a person reading a chat card must not lose the
+        # tool to a clock built for a spoken "ja"), clamped so no surface can
+        # park the executor forever.
+        approval_timeout_s = self._approval_timeout(config_snapshot)
+        approval_ticket = None
+        if needs_confirm and not voice_confirm:
+            # An unattended call arms too: the pre-authorization bridges answer
+            # synchronously on the ActionApprovalRequired publish below, and
+            # ADR-0031 relies on the ticket existing before that publish.
+            approval_ticket = self._approval.arm(tid)
+
+        # 3.5 Proposed event (the UI can use this as a live indicator). The
+        # rationale is redacted and capped so no raw secret reaches the bus.
+        try:
+            await self._bus.publish(ActionProposed(
+                trace_id=tid, call_id=trail["id"],
+                tool_name=tool.name,
+                args=args,
+                risk_tier=decision.tier,
+                rationale=safe_preview(rationale),
+                effect=origin.effect,
+                target_origin=origin.origin,
+                origin_source=origin.source,
+            ))
+        except BaseException:
+            if approval_ticket is not None:
+                approval_ticket.close()
+            raise
+
+        if approval_ticket is not None:
+            if plaus is not None and plaus.require_confirmation:
+                reason = "plausibility"
+            elif trust.needs_person and not self._evaluator.needs_user_confirmation(decision):
+                reason = "trust"
+            elif reversibility_confirm and not tier_confirm:
+                reason = "reversibility"
+            else:
+                reason = "risk_tier"
+            # An unattended call expires immediately: it will not be waited on,
+            # so advertising a 60-second window would invite a UI to offer a
+            # decision that can no longer reach anybody.
+            window_ns = (
+                0
+                if surface == UNATTENDED
+                else int(approval_timeout_s * 1_000_000_000)
+            )
+            await self._bus.publish(
+                ActionApprovalRequired(
+                    trace_id=tid,
+                    tool_name=tool.name,
+                    risk_tier=decision.tier,
+                    reason=reason,
+                    args_preview=safe_preview(args),
+                    expires_at_ns=time.time_ns() + window_ns,
+                    mission_id=_optional_string(
+                        (config_snapshot or {}).get("mission_id")
+                    ),
+                    worker_id=_optional_string(
+                        (config_snapshot or {}).get("worker_id")
+                    ),
+                    approval_ref=_optional_string(
+                        (config_snapshot or {}).get("approval_ref")
+                    ),
+                    effect=origin.effect,
+                    target_origin=origin.origin,
+                    origin_source=origin.source,
+                )
+            )
+            # Scoped authorizers have the first decision, including explicit
+            # denials. Bypass supplies an immediate standing approval only
+            # when none has answered; it never overwrites their decision.
+            if bypass_default and approval_ticket.peek() is None:
+                await self._bus.publish(
+                    ActionApproved(
+                        trace_id=tid,
+                        tool_name=tool.name,
+                        approved_by="bypass",
+                    )
+                )
+
+        if needs_confirm:
+            # Two-turn confirmation on a conversational turn: do NOT block on the
+            # UI-approval future (no voice/chat user can resolve it within the
+            # turn's latency window). Stash the action and return the sentinel so
+            # the brain speaks a confirmation question; the user's next "ja" calls
+            # ``execute_confirmed`` (AD-OE: the talker never awaits heavy/blocking
+            # work on the turn). ``needs_confirm`` already excludes whitelist
+            # downgrades, so this fires only for genuinely consequential tools.
+            if voice_confirm:
+                self._pending_voice[tid] = (tool, dict(args))
+                log.info(
+                    "voice-confirm: deferring %s (tier=%s) for two-turn confirmation",
+                    tool.name, decision.tier,
+                )
+                sentinel_output: dict[str, Any] = {
+                    "tool_name": tool.name,
+                    "trace_id": str(tid),
+                    "risk_tier": decision.tier,
+                }
+                # Optional hook (like ``risk_tier_for_args``): a tool may
+                # summarize what the deferred action would DO so the spoken
+                # confirmation question can say it in plain language.
+                # Best-effort — phrasing must never block the confirm flow.
+                describe = getattr(tool, "describe_args", None)
+                if callable(describe):
+                    try:
+                        summary = describe(args)
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("describe_args on %r failed: %s", tool.name, exc)
+                        summary = None
+                    if isinstance(summary, dict) and summary:
+                        sentinel_output["impact"] = {
+                            str(k): str(v) for k, v in summary.items()
+                        }
+                return ToolResult(
+                    success=False,
+                    output=sentinel_output,
+                    error=VOICE_CONFIRM_SENTINEL,
+                )
+            if surface == UNATTENDED:
+                # Nobody is there to ask. The pre-authorization bridges have
+                # already had their say — they answer inline while the
+                # ActionApprovalRequired publish above is awaited — so a ticket
+                # that is still undecided will stay undecided forever. Waiting
+                # the full timeout would buy a minute of silence and then
+                # report a refusal nobody made (audit GT-12).
+                decided = (
+                    approval_ticket.peek() if approval_ticket is not None else None
+                )
+                if trust.needs_person:
+                    # A hard limit needs a person; a standing grant is not one.
+                    decided = None
+                if decided is None:
+                    if approval_ticket is not None:
+                        approval_ticket.close()
+                    return await self._approval_unavailable(
+                        tool, tid, decision.tier, config_snapshot, trail["id"],
+                    )
+                approved, who_or_reason = decided
+                if approval_ticket is not None:
+                    approval_ticket.close()
+            else:
+                try:
+                    approved, who_or_reason = await self._approval.wait(
+                        tid, approval_timeout_s
+                    )
+                finally:
+                    if approval_ticket is not None:
+                        approval_ticket.close()
+            if not approved:
+                await self._bus.publish(ActionDenied(
+                    trace_id=tid, call_id=trail["id"],
+                    tool_name=tool.name,
+                    reason=who_or_reason,
+                ))
+                # A silence is not a "no". Keep the two apart so the caller,
+                # the mission broker, and the run log can each say which
+                # actually happened.
+                if who_or_reason == TIMEOUT_REASON:
+                    error = (
+                        f"{APPROVAL_TIMEOUT_PREFIX} (nobody decided within "
+                        f"{approval_timeout_s:.0f}s)"
+                    )
+                else:
+                    error = f"{APPROVAL_DENIED_PREFIX} ({who_or_reason})"
+                return ToolResult(success=False, output=None, error=error)
+            approved_by = who_or_reason  # "user" or "auto"
+            trail["approved_by"] = approved_by
+
+        # 3.9 The person's inline edit of the approved call (card text fields).
+        # What runs is their version, but only after it passes the very gate the
+        # original call passed: the blacklist and the outbound checks.
+        amendment = approval_amendments.take(tid)
+        edit_changes: dict[str, dict[str, str]] = {}
+        if amendment is not None and needs_confirm:
+            new_args, edit_changes = amendment
+            try:
+                self._evaluator.evaluate(tool, new_args)
+            except ActionBlocked as exc:
+                await self._bus.publish(ActionDenied(
+                    trace_id=tid,
+                    call_id=trail["id"],
+                    tool_name=tool.name,
+                    reason=f"blacklist: {exc.pattern}",
+                ))
+                return ToolResult(success=False, output=None, error=str(exc))
+            edited_trust = before_execute(tool.name, new_args)
+            if edited_trust.blocked:
+                reason = edited_trust.block_reason()
+                await self._bus.publish(
+                    ActionDenied(
+                        trace_id=tid, call_id=trail["id"], tool_name=tool.name, reason=reason
+                    )
+                )
+                return ToolResult(
+                    success=False,
+                    output={
+                        "outcome": "outbound_blocked",
+                        "checks": edited_trust.to_dict()["checks"],
+                    },
+                    error=f"{APPROVAL_DENIED_PREFIX} (the edited version: {reason})",
+                )
+            args = new_args
+
+        if cancel_token is not None and cancel_token.is_cancelled():
+            await self._bus.publish(ActionDenied(
+                trace_id=tid, call_id=trail["id"],
+                tool_name=tool.name,
+                reason=f"cancelled: {cancel_token.reason or 'requested'}",
+            ))
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"cancelled ({cancel_token.reason or 'requested'})",
+            )
+
+        # A stop that arrived while the call waited for its approval wins.
+        stop = self._owner_stop(origin_kind, config_snapshot)
+        if stop is not None:
+            return await self._refuse_stopped(tool, tid, stop, trail["id"])
+
+        # 4. Execute
+        ctx = ExecutionContext(
+            trace_id=tid,
+            user_utterance=user_utterance,
+            config=config_snapshot or {},
+            memory_read=memory_read,
+            approved_by=approved_by,
+        )
+        try:
+            # A slow tool of a chat turn may return "started" and finish as a job.
+            from dodaios.orchestrator.async_tools import run_tool
+
+            result = await run_tool(tool, args, ctx)
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = int((time.perf_counter() - t_start) * 1000)
+            await self._bus.publish(ActionExecuted(
+                trace_id=tid, call_id=trail["id"],
+                tool_name=tool.name,
+                success=False,
+                duration_ms=duration_ms,
+                error=str(exc),
+            ))
+            return ToolResult(success=False, output=None, error=str(exc))
+
+        if not result.success:
+            result = await _offer_connect(tool, result, config_snapshot)
+        self._record_result_origin(tool, tid, result, args)
+        after_execute(tool.name, args, result, config_snapshot)
+        if edit_changes:
+            result = _with_edit_note(result, edit_changes)
+        result = self._attach_receipt(tool, args, result, config_snapshot, trail)
+        duration_ms = int((time.perf_counter() - t_start) * 1000)
+        await self._bus.publish(ActionExecuted(
+            trace_id=tid, call_id=trail["id"],
+            tool_name=tool.name,
+            success=result.success,
+            duration_ms=duration_ms,
+            error=result.error,
+            output_preview=safe_preview(result.output),
+            **self._receipt_fields(result),
+        ))
+        return result
+
+    # ------------------------------------------------------------------
+    # Two-turn voice/chat confirmation resume (turn N+1)
+    # ------------------------------------------------------------------
+
+    def has_pending_voice_confirm(self, trace_id: UUID) -> bool:
+        """True while an action deferred for ``trace_id`` still awaits a yes/no."""
+        return trace_id in self._pending_voice
+
+    async def execute_confirmed(
+        self,
+        trace_id: UUID,
+        *,
+        user_utterance: str = "",
+        config_snapshot: dict[str, Any] | None = None,
+        memory_read: Any | None = None,
+    ) -> ToolResult:
+        """Run the action stashed by a prior voice-confirm deferral ("ja").
+
+        Single-use: the pending entry is popped first, so a repeated "ja" cannot
+        double-fire the side effect. ``approved_by="user"`` records that the human
+        authorized it. Publishes ``ActionExecuted`` for the audit trail, mirroring
+        the normal execute path.
+        """
+        pending = self._pending_voice.pop(trace_id, None)
+        if pending is None:
+            return ToolResult(
+                success=False,
+                output=None,
+                error="voice-confirm expired (no pending action for this turn)",
+            )
+        tool, args = pending
+        trail: dict[str, Any] = {
+            "id": uuid4().hex[:16],
+            "needs_confirm": True,
+            "approved_by": "user",
+            "tier": str(getattr(tool, "risk_tier", "") or ""),
+        }
+        ctx = ExecutionContext(
+            trace_id=trace_id,
+            user_utterance=user_utterance,
+            config=config_snapshot or {},
+            memory_read=memory_read,
+            approved_by="user",
+        )
+        t_start = time.perf_counter()
+        try:
+            result = await tool.execute(args, ctx)
+        except Exception as exc:  # noqa: BLE001
+            duration_ms = int((time.perf_counter() - t_start) * 1000)
+            await self._bus.publish(ActionExecuted(
+                trace_id=trace_id,
+                tool_name=tool.name,
+                success=False,
+                duration_ms=duration_ms,
+                error=str(exc),
+            ))
+            failed = ToolResult(success=False, output=None, error=str(exc))
+            self._audit(tool, args, trace_id, config_snapshot, failed, trail, t_start)
+            return failed
+        self._record_result_origin(tool, trace_id, result, args)
+        after_execute(tool.name, args, result, config_snapshot)
+        result = self._attach_receipt(tool, args, result, config_snapshot, trail)
+        duration_ms = int((time.perf_counter() - t_start) * 1000)
+        await self._bus.publish(ActionExecuted(
+            trace_id=trace_id,
+            tool_name=tool.name,
+            success=result.success,
+            duration_ms=duration_ms,
+            error=result.error,
+            output_preview=safe_preview(result.output),
+            **self._receipt_fields(result),
+        ))
+        self._audit(tool, args, trace_id, config_snapshot, result, trail, t_start)
+        return result
+
+    async def cancel_pending(self, trace_id: UUID, *, reason: str = "voice_vetoed") -> bool:
+        """Drop the action stashed for ``trace_id`` ("nein"). Returns whether one
+        existed. Publishes ``ActionDenied`` for the audit trail; ``reason`` says
+        why, so a call that merely ended is not recorded as the user's veto."""
+        pending = self._pending_voice.pop(trace_id, None)
+        if pending is None:
+            return False
+        tool, _args = pending
+        await self._bus.publish(ActionDenied(
+            trace_id=trace_id,
+            tool_name=tool.name,
+            reason=reason,
+        ))
+        return True

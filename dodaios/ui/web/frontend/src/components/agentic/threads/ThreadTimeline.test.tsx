@@ -1,0 +1,413 @@
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { NoticeItem, ToolBlock, TurnBlock, TurnItem, TurnStatus } from "@/components/agentchat/reduce";
+import { useIdeSidePanelStore } from "@/store/ideSidePanel";
+import { useSideFileStore } from "@/store/sideFile";
+import { pictureUrls, projectPath, ThreadTimeline } from "./ThreadTimeline";
+
+const tool = (id: string, command: string, over: Partial<ToolBlock> = {}): ToolBlock => ({
+  kind: "tool", callId: id, name: "Bash", input: { command }, output: "ok", isError: false,
+  durationMs: 300, approval: null, startedMs: 1, ...over,
+});
+const thought = (id: string, text: string, live = false): TurnBlock => ({ kind: "reasoning", id, text, durationMs: live ? null : 4200, live, startedMs: 1 });
+
+function turn(blocks: TurnBlock[], status: TurnStatus = "done"): TurnItem {
+  return {
+    type: "turn", id: "t1", provider: "claude-api", model: "", effort: "", runner: "", status, blocks,
+    startedMs: Date.now(), durationMs: status === "running" ? null : 5000, usage: null, liveUsage: null, costUsd: null, error: null,
+  };
+}
+
+const show = (item: TurnItem) => render(<ThreadTimeline items={[item]} sessionId="s1" bottomInset={0} />);
+
+afterEach(cleanup);
+
+describe("thread work log", () => {
+  it("folds a finished turn's work behind one line and opens it to one counted line per stretch", () => {
+    show(turn([thought("r1", "**Checking the build**"), tool("c1", "npm run build"), tool("c2", "npm test"), { kind: "text", id: "n1", text: "All green." }]));
+    // A finished turn folds its work behind one "Worked for" line; the answer stays.
+    expect(screen.getByText("All green.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /^Ran 2 commands/ })).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    // The thought reads as one sentence; its calls are ONE closed line that counts what ran.
+    expect(screen.getByTestId("thread-thought-sentence").textContent).toBe("Checking the build");
+    const header = screen.getByRole("button", { name: /^Ran 2 commands/ });
+    expect(screen.queryByText("npm test")).toBeNull();
+    fireEvent.click(header);
+    expect(screen.getByText("npm run build")).toBeTruthy();
+    expect(screen.getByText("npm test")).toBeTruthy();
+    expect(screen.getByText("All green.")).toBeTruthy();
+  });
+
+  it("keeps the running stretch closed and opens it to a list of every step", () => {
+    show(turn([tool("c1", "npm run build"), tool("c2", "npm test", { output: null, durationMs: null })], "running"));
+    // Never open by itself.
+    const line = screen.getByRole("button", { name: /steps so far/ });
+    expect(line.getAttribute("aria-expanded")).toBe("false");
+    expect(line.textContent).toContain("Ran 2 commands");
+    expect(screen.queryByTestId("thread-steps")).toBeNull();
+    expect(screen.queryByText("npm run build")).toBeNull();
+    fireEvent.click(line);
+    // One row per step, no box: its mark, "Ran", then the line itself.
+    const list = screen.getByTestId("thread-steps");
+    expect(list.children).toHaveLength(2);
+    expect(list.className).not.toContain("border");
+    expect(list.querySelectorAll("svg").length).toBeGreaterThanOrEqual(2);
+    expect(list.textContent).toContain("Ran npm run build");
+    expect(screen.getByText("npm run build")).toBeTruthy();
+    expect(screen.getByText("npm test")).toBeTruthy();
+    expect(screen.getByTestId("thread-working").textContent).toMatch(/^Working for /);
+  });
+
+  it("reads every thought as one short sentence between the lines, a repeat once", () => {
+    show(turn([
+      thought("r1", "Checking the workflow."),
+      tool("c1", "gh run list"),
+      thought("r2", "The gate never ran."),
+      thought("r2b", "The gate never ran."),
+      { kind: "text", id: "n1", text: "The failure hits several pull requests." },
+      tool("c2", "gh pr list"),
+      thought("r3", "Nobody is on it.\n\nI will look at main.", true),
+    ], "running"));
+    // Each thought is one white sentence, a repeated one told once.
+    const sentences = screen.getAllByTestId("thread-thought-sentence").map((row) => row.textContent);
+    expect(sentences).toEqual(["Checking the workflow.", "The gate never ran.", "Nobody is on it."]);
+    // The work between them stays closed lines.
+    expect(screen.getAllByRole("button", { name: /^Ran a command/ })[0].getAttribute("aria-expanded")).toBe("false");
+    // A longer thought opens to its whole text.
+    expect(screen.queryByText("I will look at main.")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Nobody is on it." }));
+    expect(screen.getByText("I will look at main.")).toBeTruthy();
+  });
+
+  it("opens a thought of its own to its whole text with one click", () => {
+    show(turn([
+      { kind: "text", id: "pre", text: "Looking into it." },
+      thought("r1", "Reading the config. It has three sections.\n\nNow the router."),
+      { kind: "text", id: "a", text: "Done." },
+      tool("c9", "ls"),
+    ], "running"));
+    const line = screen.getByRole("button", { name: "Reading the config." });
+    expect(screen.queryByText("Now the router.")).toBeNull();
+    fireEvent.click(line);
+    expect(screen.getByText("Now the router.")).toBeTruthy();
+  });
+
+  it("names a command by the agent's own words for it", () => {
+    const said = (id: string, command: string, description: string) => tool(id, command, { input: { command, description } });
+    show(turn([
+      said("c1", "grep -n ']\(\./' README.md", "Show the lines with relative links"),
+      { kind: "text", id: "n1", text: "Seven links are relative." },
+      said("c2", "sed -i 's/a/b/' README.md", "Make links absolute"),
+      tool("c3", "git push"),
+    ], "running"));
+    // A lone command's line is its purpose; the command is behind its row.
+    const lone = screen.getByRole("button", { name: /^Show the lines with relative links/ });
+    expect(screen.queryByText(/grep -n/)).toBeNull();
+    fireEvent.click(lone);
+    expect(screen.getByTestId("thread-steps").textContent).toContain("grep -n");
+    // Opened, every step reads as what it ran; the agent's words for it are its hover title.
+    fireEvent.click(screen.getByRole("button", { name: /steps so far/ }));
+    const list = screen.getAllByTestId("thread-steps")[1];
+    expect(list.textContent).toContain("Ran sed -i");
+    expect(list.querySelector("[title='Make links absolute']")).toBeTruthy();
+    expect(list.textContent).toContain("git push");
+  });
+
+  it("keeps the answer in view when a thought lands after it", () => {
+    show(turn([
+      tool("c1", "gh pr view 1191"),
+      { kind: "text", id: "pre", text: "Fetching the description." },
+      { kind: "text", id: "a", text: "The pull request adds two pets." },
+      thought("r1", "Summarizing the pull request.\n\nIt adds two pets."),
+    ]));
+    expect(screen.getByText("Fetching the description.")).toBeTruthy();
+    expect(screen.getByText("The pull request adds two pets.")).toBeTruthy();
+    expect(screen.queryByTestId("thread-thought-sentence")).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    expect(screen.getByTestId("thread-thought-sentence").textContent).toBe("Summarizing the pull request.");
+  });
+
+  it("folds a preamble that an earlier step separates from the answer", () => {
+    show(turn([
+      { kind: "text", id: "pre", text: "Fetching the description." },
+      tool("c1", "gh pr view 1191"),
+      { kind: "text", id: "a", text: "The pull request adds two pets." },
+      thought("r1", "Done thinking."),
+    ]));
+    expect(screen.getByText("The pull request adds two pets.")).toBeTruthy();
+    expect(screen.queryByText("Fetching the description.")).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    expect(screen.getByText("Fetching the description.")).toBeTruthy();
+  });
+
+  it("keeps the answer in view when the agent, woken again, only adds a line", () => {
+    // A background task it waited on finished after the answer: the agent
+    // thought briefly and wrote one sentence. That sentence is no answer of its own.
+    show(turn([
+      { kind: "text", id: "pre", text: "Waiting for the merge." },
+      tool("c1", "python scripts/agent_done_gate.py --wait"),
+      { kind: "text", id: "a", text: "PR #1652 is merged and live in your app." },
+      thought("r1", "Nothing needs doing here."),
+      { kind: "text", id: "b", text: "That message was only my old watch. Nothing changed." },
+      thought("r2", "Still nothing."),
+      { kind: "text", id: "c", text: "The last watch ended too." },
+    ]));
+    expect(screen.getByText("PR #1652 is merged and live in your app.")).toBeTruthy();
+    expect(screen.getByText("That message was only my old watch. Nothing changed.")).toBeTruthy();
+    expect(screen.getByText("The last watch ended too.")).toBeTruthy();
+    // Words before a step stay with the work, and so do the thoughts in between.
+    expect(screen.queryByText("Waiting for the merge.")).toBeNull();
+    expect(screen.queryByTestId("thread-thought-sentence")).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    expect(screen.getByText("Waiting for the merge.")).toBeTruthy();
+    expect(screen.getAllByTestId("thread-thought-sentence").map((node) => node.textContent)).toEqual(["Nothing needs doing here.", "Still nothing."]);
+  });
+
+  it("folds earlier words when the woken agent worked before its last answer", () => {
+    show(turn([
+      { kind: "text", id: "a", text: "The PR waits in the merge queue." },
+      thought("r1", "The queue moved."),
+      tool("c1", "gh pr view 1652"),
+      { kind: "text", id: "b", text: "PR #1652 is merged." },
+    ]));
+    expect(screen.getByText("PR #1652 is merged.")).toBeTruthy();
+    expect(screen.queryByText("The PR waits in the merge queue.")).toBeNull();
+  });
+
+  it("shows wordless live thinking as one Thinking step", () => {
+    show(turn([thought("r1", "", true)], "running"));
+    expect(screen.getByText("Thinking")).toBeTruthy();
+  });
+});
+
+describe("changed files card", () => {
+  const edit = (id: string, path: string): ToolBlock =>
+    tool(id, "", { name: "Edit", input: { file_path: path, old_string: "a", new_string: "b\nc" } });
+
+  it("lists three files with the explorer's icons and folds the rest behind Show all", () => {
+    const paths = ["src/a.ts", "src/b.ts", "docs/c.md", "lib/d.py", "e.json"];
+    show(turn(paths.map((path, i) => edit(`e${i}`, path))));
+    const card = screen.getByTestId("thread-changed-files");
+    expect(card.textContent).toContain("5 files edited");
+    expect(screen.getByText("a.ts")).toBeTruthy();
+    // Names stand alone: no folder for a name no other changed file shares.
+    expect(screen.queryByText("src")).toBeNull();
+    expect([...card.querySelectorAll("[data-file-icon]")].map((icon) => icon.getAttribute("data-file-icon")).length).toBe(3);
+    expect(screen.queryByText("d.py")).toBeNull();
+    const all = screen.getByTestId("thread-changed-files-all");
+    expect(all.textContent).toBe("Show all+10 -5");
+    fireEvent.click(all);
+    expect(screen.getByText("d.py")).toBeTruthy();
+    expect(all.textContent).toContain("Show less");
+    fireEvent.click(all);
+    expect(screen.queryByText("e.json")).toBeNull();
+  });
+
+  it("names the folder only when two changed files share a name", () => {
+    show(turn([edit("e1", "src/index.ts"), edit("e2", "lib/index.ts"), edit("e3", "README.md")]));
+    expect(screen.getByText("src")).toBeTruthy();
+    expect(screen.getByText("lib")).toBeTruthy();
+    expect(screen.getByText("README.md")).toBeTruthy();
+  });
+
+  it("opens every diff at once from Show all", () => {
+    show(turn(["a.ts", "b.ts", "c.ts", "d.ts"].map((path, i) => edit(`e${i}`, path))));
+    fireEvent.click(screen.getByRole("button", { name: /Show all/ }));
+    expect(screen.getByText("d.ts")).toBeTruthy();
+    expect(screen.getAllByRole("button", { expanded: true }).length).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("a file beside the thread", () => {
+  const write = (id: string, path: string): ToolBlock =>
+    tool(id, "", { name: "Write", input: { file_path: path, content: "print(1)\nprint(2)" } });
+
+  beforeEach(() => {
+    useSideFileStore.setState({ file: null, nonce: 0 });
+    useIdeSidePanelStore.setState({ open: false, tabs: [], layout: null, focusedPane: null });
+  });
+
+  it("opens a changed file in the side panel's File tab", () => {
+    render(<ThreadTimeline items={[turn([write("w1", "src/app.py")])]} sessionId="s1" bottomInset={0} folder="C:/Repo" />);
+    fireEvent.click(screen.getByTestId("thread-changed-file-open"));
+    const file = useSideFileStore.getState().file;
+    expect(file?.path).toBe("src/app.py");
+    expect(file?.folder).toBe("C:/Repo");
+    expect(file?.diff?.[0].added).toBe(2);
+    expect(useIdeSidePanelStore.getState().open).toBe(true);
+    expect(useIdeSidePanelStore.getState().active).toBe("file");
+  });
+
+  it("opens the file a step names without opening the step", () => {
+    render(<ThreadTimeline items={[turn([write("w1", "C:/demo/scratch/patch.py"), { kind: "text", id: "n1", text: "Done." }])]} sessionId="s1" bottomInset={0} />);
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    // The work line first; the changed-files card under the answer names the file too.
+    fireEvent.click(screen.getAllByRole("button", { name: /patch\.py/, expanded: false })[0]);
+    const target = screen.getByTestId("thread-file-target");
+    const step = target.closest("button");
+    fireEvent.click(target);
+    expect(useSideFileStore.getState().file?.path).toBe("C:/demo/scratch/patch.py");
+    expect(step?.getAttribute("aria-expanded")).toBe("false");
+    // The opened step's path is a button too, for the keyboard.
+    fireEvent.click(step!);
+    fireEvent.click(screen.getByTestId("thread-diff-open"));
+    expect(useSideFileStore.getState().nonce).toBe(2);
+  });
+});
+
+describe("projectPath", () => {
+  it("reads a file relative to the thread folder on every OS", () => {
+    expect(projectPath("C:\\Repo\\src\\a.ts", "c:\\repo")).toBe("src/a.ts");
+    expect(projectPath("/home/me/repo/src/a.ts", "/home/me/repo/")).toBe("src/a.ts");
+    expect(projectPath("src/a.ts", "/home/me/repo")).toBe("src/a.ts");
+    expect(projectPath("/etc/x/y/z/a.conf", "/home/me/repo")).toBe("…/y/z/a.conf");
+  });
+});
+
+describe("line indicators", () => {
+  const media = (id: string, url: string): TurnBlock => ({ kind: "text", id: `media-${id}`, text: `![image](<${url}>)` });
+
+  it("reads picture addresses and leaves badges and logos out", () => {
+    expect(pictureUrls(["![image](</api/media/a.png>)", "![image](https://x.test/b.jpg)"])).toEqual(["/api/media/a.png", "https://x.test/b.jpg"]);
+    expect(pictureUrls(["![image](<https://github.com/o/r/actions/workflows/ci.yml/badge.svg>)", "![logo](/brand/logo.svg)"])).toEqual([]);
+  });
+
+  it("shows the newest picture large under the line and the others small at its end", () => {
+    const blocks: TurnBlock[] = [];
+    for (let i = 1; i <= 5; i++) blocks.push(tool(`c${i}`, `shot ${i}`), media(`m${i}`, `/api/media/${i}.png`));
+    show(turn([...blocks, { kind: "text", id: "n1", text: "Looks right." }], "running"));
+    expect(screen.getByTestId("thread-line-picture").querySelector("img")?.getAttribute("src")).toBe("/api/media/5.png");
+    const pictures = screen.getByTestId("thread-line-pictures");
+    expect(pictures.querySelectorAll("img")).toHaveLength(3);
+    expect(pictures.textContent).toBe("+1");
+    expect(pictures.querySelectorAll("img")[2].getAttribute("src")).toBe("/api/media/4.png");
+  });
+
+  it("sets a line's failures apart and says how long it took", () => {
+    show(turn([
+      tool("c1", "npm test", { startedMs: 1_000, durationMs: 2_000 }),
+      tool("c2", "npm run lint", { isError: true, output: "Exit code 1", startedMs: 4_000, durationMs: 8_000 }),
+      { kind: "text", id: "n1", text: "Lint fails." },
+    ]));
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    const line = screen.getByRole("button", { name: /^Ran 2 commands/ });
+    expect(line.querySelector("[class*='text-destructive/80']")?.textContent).toBe("1 failed");
+    expect(line.textContent).toContain("· 11s");
+  });
+});
+
+describe("working line", () => {
+  it("shows the pet getting ready before anything arrived, then only its clock", () => {
+    const { rerender } = render(<ThreadTimeline items={[turn([], "running")]} sessionId="s1" bottomInset={0} />);
+    const line = screen.getByTestId("thread-working");
+    expect(line.querySelector("[data-testid=pet-mark]")).toBeTruthy();
+    expect(line.textContent).toContain("Getting ready");
+    expect(line.textContent).toMatch(/^Working for /);
+    rerender(<ThreadTimeline items={[turn([tool("c1", "ls", { output: null, durationMs: null })], "running")]} sessionId="s1" bottomInset={0} />);
+    expect(screen.getByTestId("thread-working").textContent).not.toContain("Getting ready");
+  });
+});
+
+describe("scroll column", () => {
+  it("keeps the hidden working status inside its own scroll box", () => {
+    render(<ThreadTimeline items={[turn([], "running")]} sessionId="s1" bottomInset={0} />);
+    const box = screen.getByTestId("thread-timeline");
+    // The status line's screen-reader copy is positioned absolutely; an
+    // unpositioned scroll box lets it stretch the page below the thread.
+    expect(box.className.split(" ")).toContain("relative");
+    expect(box.querySelector(".sr-only")).toBeTruthy();
+  });
+});
+
+describe("runtime titles", () => {
+  it("names a line by the runtime's own title for its calls, failures still counted", () => {
+    const item = turn([
+      tool("c1", "npm test"),
+      tool("c2", "npm run lint", { isError: true, output: "Exit code 1" }),
+      { kind: "text", id: "n1", text: "Lint fails." },
+    ], "running");
+    show({ ...item, toolTitles: { c2: "Ran the tests and the linter" } });
+    const line = screen.getByRole("button", { name: /^Ran the tests and the linter/ });
+    expect(line.textContent).toContain("1 failed");
+    expect(screen.queryByText(/^Ran 2 commands/)).toBeNull();
+  });
+});
+
+describe("working line tokens", () => {
+  it("shows the new input and the output so far, cache reads only in the hint", () => {
+    const item = { ...turn([tool("c1", "ls", { output: null, durationMs: null })], "running"), liveUsage: {
+      input_tokens: 1_200, cache_creation_input_tokens: 3_000, cache_read_input_tokens: 250_000, output_tokens: 4_800,
+    } };
+    show(item);
+    const tokens = screen.getByTestId("thread-working-tokens");
+    expect(tokens.textContent).toBe("· ↑ 4.2k · ↓ 4.8k");
+    expect(tokens.getAttribute("title")).toContain("250k");
+  });
+});
+
+
+describe("switching threads", () => {
+  const user = (id: string, text: string) => ({ type: "user" as const, id, text, attachments: [], tsMs: 1 });
+
+  it("paints a newly opened thread's newest messages first and the older ones right after", async () => {
+    const first = [user("a1", "first thread")];
+    const second = Array.from({ length: 20 }, (_, index) => user(`b${index}`, `message ${index}`));
+    const { rerender } = render(<ThreadTimeline items={first} sessionId="a" bottomInset={0} />);
+    rerender(<ThreadTimeline items={second} sessionId="b" bottomInset={0} />);
+    // The newest show at once; the oldest wait a frame.
+    expect(screen.getByText("message 19")).toBeTruthy();
+    expect(screen.queryByText("message 0")).toBeNull();
+    expect(await screen.findByText("message 0")).toBeTruthy();
+    expect(screen.getByText("message 19")).toBeTruthy();
+  });
+
+  it("paints a thread opened from a new thread's page the same way", async () => {
+    render(<ThreadTimeline items={Array.from({ length: 20 }, (_, index) => user(`c${index}`, `line ${index}`))} sessionId="c" bottomInset={0} />);
+    expect(screen.getByText("line 19")).toBeTruthy();
+    expect(screen.queryByText("line 0")).toBeNull();
+    expect(await screen.findByText("line 0")).toBeTruthy();
+  });
+
+  it("paints a thread whose messages arrive after it opened the same way", async () => {
+    const { rerender } = render(<ThreadTimeline items={[user("a1", "first thread")]} sessionId="a" bottomInset={0} />);
+    rerender(<ThreadTimeline items={[]} sessionId="b" bottomInset={0} />);
+    const loaded = Array.from({ length: 20 }, (_, index) => user(`b${index}`, `message ${index}`));
+    rerender(<ThreadTimeline items={loaded} sessionId="b" bottomInset={0} />);
+    expect(screen.getByText("message 19")).toBeTruthy();
+    expect(screen.queryByText("message 0")).toBeNull();
+    expect(await screen.findByText("message 0")).toBeTruthy();
+  });
+});
+
+describe("model fallback line", () => {
+  it("draws a thread that switched models at a limit as one quiet line, and a spent chain as an alert", () => {
+    const switched: NoticeItem = {
+      type: "notice", id: "n1", kind: "model_fallback", text: "Fable limit reached – continued on Opus 5.5.",
+      agentName: "", agentId: "", status: "", tsMs: 1, resolved: "",
+      data: { kind: "model_fallback", limit: "usage", limit_label: "Fable", to_label: "Opus 5.5", resets_at: null },
+    };
+    const spent: NoticeItem = {
+      ...switched, id: "n2", kind: "model_fallback_exhausted", text: "Every model is at its limit.",
+      data: { kind: "model_fallback_exhausted", models: [{ model: "claude-sonnet-5-5", label: "Sonnet 5.5", resets_at: null }] },
+    };
+    render(<ThreadTimeline items={[turn([{ kind: "text", id: "a", text: "Done." }]), switched, spent]} sessionId="s1" bottomInset={0} />);
+    const [first, second] = screen.getAllByTestId("model-fallback-notice");
+    expect(first.textContent).toBe("Fable limit reached – continued on Opus 5.5");
+    expect(first.getAttribute("role")).toBe("note");
+    expect(second.textContent).toContain("Sonnet 5.5");
+    expect(second.getAttribute("role")).toBe("alert");
+  });
+});
+
+describe("a picture sent with a message", () => {
+  it("opens in full on a click", () => {
+    const sent = { type: "user" as const, id: "u1", text: "look at this", tsMs: 1,
+      attachments: [{ name: "shot.png", kind: "image" as const, url: "/api/outputs/shot.png", describedBy: "" }] };
+    render(<ThreadTimeline items={[sent]} sessionId="s1" bottomInset={0} />);
+    expect(screen.queryByTestId("chat-media-viewer")).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-sent-picture"));
+    const viewer = screen.getByTestId("chat-media-viewer");
+    expect(viewer.querySelector("img")?.getAttribute("src")).toBe("/api/outputs/shot.png");
+  });
+});

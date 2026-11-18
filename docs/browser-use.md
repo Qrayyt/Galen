@@ -1,0 +1,253 @@
+# Managed agent browser
+
+Named profiles can be shared with all agents or selected agents. The optional
+Chrome extension connects an existing user's Chrome profile. See
+[browser profiles and shared logins](browser-profiles.md) for setup, assignment
+semantics and the connector's current verification limits.
+
+Dodaios provisions an isolated Browser-Use Python environment and a managed
+browser automatically during installation and after the server becomes ready.
+Opening an agent subscribes to that agent's actual rendered tab in the right
+Options rail. The browser remains open between tasks. Expand the view and take
+control to navigate or sign in, then return control to the agent.
+
+On Windows the complete window preview includes Chrome-owned profile menus,
+context menus and native dialogs. Manual right clicks, double clicks, hover,
+scrolling and typing are forwarded to the displayed owned widget, so website
+sign-in can stay in that window. The frame geometry accompanies pointer input
+to reject clicks from an outdated popup layout. Native OS dialogs remain
+manual-only for agents; direct keyboard/clipboard shortcuts cannot bypass the
+agent workspace boundary. Vision-capable, unrestricted agents receive the
+same complete window image and gated native click/hover/scroll/navigation-key
+tools. Domain-restricted or page-only sessions retain DOM controls.
+
+The Dodaios root chat uses the lead agent's same browser profile and its selected
+chat model. Its Add picker includes the browser tool. Stopping the browser task
+also stops the owning chat, whether it is the root chat or a specialist session.
+
+## Cookie banners, time limits and model replies
+
+- **Consent walls.** Before every agent step the worker refuses a cookie banner
+  or consent wall itself (`society/browser/consent_walls.py`): Google's
+  `consent.google.com`, OneTrust, Cookiebot, Usercentrics, Didomi, Sourcepoint
+  and other TCF banners, and German or English labels inside a consent banner,
+  also in iframes and open shadow roots. It only ever picks "reject all" or
+  "only necessary cookies". A banner that offers only "accept", or a refusal
+  that is really a subscription ("refuse and subscribe", "Pur-Abo"), is left
+  for the agent. The run result lists what was refused (`consent_dismissed`).
+  These clicks need no approval card: they share nothing and are the most
+  private answer the page offers.
+- **Time limits.** A page action that does not return in time fails and the
+  agent tries another way: click 40 s (it may wait for a download it started),
+  typing, scrolling and tab actions 30 s, navigation 60 s; `extract` keeps
+  Browser-Use's 180 s because a model call runs inside it. The step limit
+  (900 s) no longer cuts off a click that waits for the owner's approval card
+  (up to 600 s); the parent's run deadline still bounds the whole task. A
+  request the worker abandons withdraws its approval card (`rpc_cancel`).
+- **Model replies.** Browser-Use needs one JSON object per step. A reply with
+  the JSON in a code fence or after a sentence is read anyway; a prose-only
+  reply gets one plain re-ask inside the same step instead of costing a step
+  (`society/browser/model_reply.py`). Before this, three prose replies in a row
+  ended the run.
+
+## Watch and take over
+
+The owner can watch an agent's browser live and take over for what an agent
+must not or cannot do itself (CAPTCHA, single sign-on, a second factor, a
+tricky form), then hand back. The browser is the local, real one, so the
+session and profile never leave the machine and sites see the owner's own
+network.
+
+- **Watch.** The agent card's browser panel streams the actual rendered tab and
+  is read-only until the owner takes control. The status light lists a running
+  browser task as a running row and opens that agent's panel.
+- **In the chat.** While the assistant's own chat runs a browser task, its
+  browser shows (`components/home/chatBrowser`): as one row at the top of the
+  assistant's Computers ("Dodaios's browser · Working · google.com") with a
+  small live picture and the arrow, or as a small tile in the chat's corner when
+  that panel is not shown. A click opens the stage: the chat moves left, the
+  browser takes the rest of the page (the panel steps aside until the stage is
+  made small). While the assistant drives, a slow light runs around the frame
+  and the arrow carries its name; the control at the foot reads "Dodaios has
+  control · Take over", and after taking over "You have control · Hand back".
+  Clicking the row or tile never takes control. The view attaches only to a
+  browser that is already open, and stays while a task runs, while the person
+  holds control or has the stage open, and for three minutes after a task, so
+  the pauses between the assistant's browser calls do not close it. A picture
+  that just appeared shows the current page at once (the stream sends only
+  changes). Hiding it keeps it away until the next task; a request for a hand
+  brings the stage up by itself, and the takeover card's button opens it there.
+- **No card per click, one card at the committing click.** Reading, searching,
+  navigating and filling a form run without an approval card. The browser asks
+  at the one control that commits something for the person (cancel, buy, book,
+  send, post, delete, confirm): it works up to that control, then a card in the
+  conversation names exactly that click, the site and what the page says about
+  it, with Yes and No. Yes runs that click and the run goes on; No clicks
+  nothing, ends the browser work of that turn and the result says which click
+  was refused. One yes covers the confirming click of the same action on the
+  same page for two minutes ("Cancel subscription", then "Yes, cancel"), so
+  one action is one card. The decision is read from the control's own label
+  and its dialog (`commit_gate.py`, labels in English and German), never from
+  the wording of the task: "do not book anything" is a read. An agent whose
+  mode is Bypass, or whose rules always allow `core:browser:commit`, commits
+  without a card; the result still lists the click under `consequential`.
+  Uploading a file or running script on a page still asks each time.
+- **Never a dead end.** A call whose rules want a person raises that card
+  itself and waits for the answer; it used to end in "fresh approval required"
+  with no card when the chat was in Bypass. An unanswered card returns
+  `approval_required` with the approval id and what was asked. A run that
+  stops at a sign-in, a two-factor code or a human check stays on that page and
+  returns `blocked_on` and `next_action`, which names `request_browser_takeover`
+  and `society_request_login`.
+- **The arrow.** Every agent click is shown as the arrow travelling to the
+  target on a slight arc that starts gently and settles, then pressing. The
+  worker announces the point first (the first move of a session enters in
+  the middle of the page) and dispatches the mouse event after the same glide (`pointer.py`, `glide_seconds`, 0.28 to 0.65 s measured in page
+  pixels), so the page reacts as the arrow lands, in the tile and on the stage
+  alike. No wait while the person drives.
+- **Take over / hand back.** "Take control" pauses the agent's browser actions
+  between steps (the task waits, nothing more reaches the page from the agent)
+  and forwards the owner's clicks and keys to the page. "Return control"
+  resumes the agent.
+- **The person's input follows the hand.** Wheel events go to the page as they
+  come, without waiting for the page's answer to each one: it answers with the
+  next picture it draws, about 30 ms later, and waiting for that let a
+  two-second trackpad scroll play out for five to eight seconds. Events that
+  wait behind each other on the way reach the browser as one with the summed
+  distance (`ControlQueue` in `ui/web/society_browser_routes.py`). A click or
+  key after a scroll waits until the page stands where the scroll left it. An
+  address, Back, Forward or Reload holds the next input for at most a second;
+  a slow page goes on loading by itself. A new picture goes out when the page
+  drew it, not on a fixed beat: up to 30 a second while the person holds
+  control, up to 15 while the page is only watched. In the IDE's Browser tab
+  the wheel scrolls the page under the pointer without a click on it first,
+  unless the assistant is working in the browser.
+- **Agent request.** The lead's `request_browser_takeover(reason)` tool posts
+  ONE written card in the lead conversation (never spoken), adds a desktop
+  notification and a status-light "needs you" row, shows the reason in the
+  panel with a Take control button, and waits. When the owner's phone chat
+  started the turn, the same line goes there if the "decisions" routing is on.
+  The wait ends at hand-back, when the browser goes away, or after an hour.
+- **On a VM or server.** When Dodaios runs on a remote machine
+  ([headless deployment](headless-vps-deployment.md)), the agent browser runs
+  there, headless, and the same frames and pointer events reach the person's
+  window over the app's authenticated WebSocket. Tile, stage, take over and hand
+  back work the same; the person's clicks and keys travel to the remote page.
+  Website logins live in the remote browser's own profile: sign in once through
+  Take over, and the login stays.
+- **Hand-back note.** The agent gets: the page the owner left it on (scheme,
+  host and path only; query strings and fragments can carry tokens), whether
+  the page changed, how many inputs there were, and whether anything was typed.
+  What was typed, and where the owner clicked, is never recorded, logged or
+  shown to the model: input is counted, not kept (`society/browser/takeover.py`).
+
+Known gaps of this first version: a takeover that begins while a task is
+running pauses it but cannot hand the note into that running task (it sees the
+live page again when it resumes; the note reaches the lead through the request
+tool); the page the model screenshots after hand-back can show text the owner
+typed into a visible (non-password) field; a request can only be raised by the
+lead, not from inside a browser task; the stream uses the existing frame
+transport, not a separate CDP screencast.
+
+## Runtime and data
+
+Browser-Use 0.13.10 and Playwright 1.62.0 are pinned independently of the app's
+Python dependencies. The complete dependency graph is locked with hashes for
+all platforms. The installer downloads the browser revision selected by that
+Playwright version, checks a real browser launch, text input and image
+decode, and atomically records readiness. Failed upgrades do not replace the
+previous runtime. The manifest under the configured data directory records
+versions and the installed Python package/license inventory.
+
+The pip bootstrap is pinned separately. Windows ARM uses a managed x64 Python
+helper through Windows emulation because the crypto stack lacks ARM wheels.
+
+This Playwright version delivers **Chrome for Testing 151.0.7922.34**, based on
+Chromium. It does not overwrite the user's installed Chrome. Each agent owns
+a separate persistent profile and workspace. Raw CDP ports are local and are
+never provided to the frontend. The frontend uses the app's authenticated
+WebSocket boundary and short-lived handshake tickets.
+
+Every request the managed browser sends is checked before it leaves
+(`society/browser/request_guard.py`): only http and https, a page only on a
+site the agent may open, and no address inside this computer or its network
+unless the agent was given that host by name. The check listens on one CDP
+session of the whole browser, so it covers every tab, frame and popup, and
+each hop of a redirect is checked like a request of its own. The browser's
+HTTP cache stays on, so a second visit takes a page's files from the cache.
+(Playwright's routing, which did this check before, switches the cache off
+and never shows a redirect to its handler.) The agent's own navigation opens
+http and https addresses only.
+
+Browser-Use cloud sessions, telemetry and automatic browser extensions are
+disabled. Model requests use the existing Dodaios provider interface and
+credentials. A supported text-only subscription or local model can operate
+from DOM observations; a model rejected for image input retries without images.
+Website login, MFA and site-imposed restrictions still require user interaction.
+
+## Licenses
+
+Browser-Use is MIT-licensed. Its license is shipped in
+[the browser asset notices](../dodaios/assets/browser/LICENSE.browser-use).
+Installed wheels retain their distribution license files. Playwright uses
+Apache-2.0; its downloaded browser preserves the vendor's ABOUT and built-in
+credits/terms. Chrome for Testing is a Google Chrome distribution, so the
+Chromium source license must not be mistaken for the only applicable notice.
+
+Primary references:
+- [Browser-Use license](https://github.com/browser-use/browser-use/blob/0.13.10/LICENSE)
+- [Playwright license](https://github.com/microsoft/playwright/blob/main/LICENSE)
+- [Chromium license](https://chromium.googlesource.com/chromium/src/+/main/LICENSE)
+- [Chrome terms](https://www.google.com/chrome/terms/)
+
+Do not remove package notices or browser credits when packaging or mirroring
+runtime artifacts. The isolated environment's manifest inventories the actual
+versions, including optional platform dependencies.
+
+## Verification
+
+Windows: real managed install and rendered frames verified; a real Codex
+subscription task filled and submitted an isolated test form, and a real
+OpenRouter key completed the same task after DOM fallback. A live Chrome UI
+check verified the right-rail browser and the @browser entry.
+
+Linux: Browser-Use/Playwright installed in python:3.11-slim with browser system
+libraries; actual headless launch, text input and screenshot decoding passed.
+The application container includes the required native libraries.
+
+The managed installation and real-browser contracts passed on Linux x64/ARM64,
+Windows x64/ARM64, and macOS Intel/Apple Silicon in
+[the six-platform run](https://github.com/Dodaios/Dodaios/actions/runs/34451340158).
+Subsequent changes must pass the same matrix before integration.
+
+A full ordinary agent-chat turn selected the browser capability, submitted the
+disposable form and verified its success heading using one existing OpenRouter
+key. The browser job completed in three steps; the chat finished in 23.7 seconds.
+The root Dodaios chat separately completed the same real form workflow through
+its selected OpenRouter model in 31.8 seconds, without changing the lead's saved
+provider/model settings. Real file tests also cover upload, completed downloads,
+workspace containment and omission of old downloads from a later task's result.
+Real-browser tests cover pause/resume of the same task, cancelled takeover,
+exclusive ownership and idle animation. A 60-second local Windows animation
+soak delivered 13.61 fps with capture-to-backend p95 age of 74.56 ms. This is a
+transport measurement, not a measurement of the final frontend paint latency.
+
+The corresponding Chrome canvas measurement ran for 188 seconds in the actual
+Options rail: 2,536 rendered frames, 13.48 fps, and 133.45 ms p95 capture-to-paint
+age. The agent was idle throughout. These are local Windows measurements,
+not a performance guarantee for every host or network.
+
+Chrome checks verified the actual right-rail pixels, expanded view, manual text
+entry and form submission, tab creation/switching, reconnection and light/dark
+appearance. These UI checks were on Windows; the native CI matrix exercises
+the shared headless browser contract, not a desktop UI on every host.
+
+Run the deterministic suite with:
+```
+python -m pytest tests/contract/test_browser_contract.py tests/unit/society/test_browser.py
+```
+Real-browser tests use JARVIS_BROWSER_TEST_PYTHON and
+JARVIS_BROWSER_TEST_EXECUTABLE to select an isolated verified environment.
+Set JARVIS_BROWSER_SOAK_SECONDS=60 for the longer animation measurement.
+Live model tests additionally require JARVIS_BROWSER_MODEL_TEST=1 and an
+explicit test data root; they never use real third-party forms.

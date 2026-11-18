@@ -1,0 +1,680 @@
+"""Reminders: memories with a due time, delivered on time.
+
+A reminder is an ordinary memory in the personal vault (ADR-0044) of kind
+``ephemeral`` with ``due_at`` set and ``source.reminder`` true. That gives it
+everything for free: the sidebar's "Coming up" reads ``/upcoming``, the
+morning brief grounds on ``dated_notes()``, export and import carry it, and
+"forget" erases it. It leaves the current set :data:`GRACE_DAYS` after its
+time (``valid_to``), so an overdue reminder stays visible for a week.
+
+:class:`ReminderScheduler` wakes every :data:`TICK_S` seconds, takes every
+current memory whose time has come and that was not delivered yet (a meta
+flag per memory), and delivers it: a ``reminder_due`` notice in the lead
+conversation plus a desktop notification through the
+:class:`~dodaios.notify.notifier.Notifier`. Nothing is spoken. The chat
+draws that notice as the assistant telling the person ("From your Google
+Calendar: Dentist, today 10:00"), with what fits the item right under it: an
+appointment opens in its calendar or is dismissed, a reminder is ticked off
+or snoozed. The notice carries the item's fields (:func:`row_of`) for that.
+The lead reads it back in its history (``agent_chat.recall.reminder_replay``),
+so "move it to tomorrow" right after it has something to point at. The rail
+beside the chat keeps only what the person has to fix themselves (a plugin to
+reconnect), never a reminder.
+
+:func:`capture_dump` turns a brain dump ("tomorrow dentist, buy milk, mail
+Anna about the offer") into separate items without a model call: split on
+the usual separators, a time per piece where one is named.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final
+from zoneinfo import ZoneInfo
+
+from dodaios.notify.when import clean_text, parse_when, strip_when
+
+log = logging.getLogger(__name__)
+
+REMINDER_KIND: Final[str] = "ephemeral"
+TASK_KIND: Final[str] = "project"
+#: How long an overdue reminder stays current (and in "Coming up").
+GRACE_DAYS: Final[int] = 7
+#: How often the scheduler looks for due reminders.
+TICK_S: Final[float] = 30.0
+#: How long the scheduler waits for the conversation after a start.
+READY_WAIT_S: Final[float] = 180.0
+#: A reminder found more than this late (the app was closed) is marked
+#: delivered without a notice: a week-old "take the pizza out" helps nobody.
+STALE_AFTER: Final[timedelta] = timedelta(days=3)
+#: Notice kinds in the lead conversation.
+NOTICE_DUE: Final[str] = "reminder_due"
+NOTICE_CAPTURED: Final[str] = "tasks_captured"
+#: Snooze presets the card offers, in minutes; ``tomorrow`` is resolved by the caller.
+SNOOZE_MINUTES: Final[tuple[int, ...]] = (15, 60, 180)
+
+_DELIVERED = "reminder.delivered:"
+
+
+def _iso_utc(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat(timespec="seconds")
+
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def zone_of(name: str | None) -> ZoneInfo | None:
+    try:
+        return ZoneInfo(name) if name else None
+    except Exception:  # noqa: BLE001 — an unknown zone name is "no zone" to the caller
+        return None
+
+
+def person_zone(name: str | None = None) -> ZoneInfo:
+    """The person's zone: the given name, else the one the UI last reported, else UTC."""
+    zone = zone_of(name)
+    if zone is not None:
+        return zone
+    try:
+        from dodaios.tasks.context import turn_timezone
+
+        zone = zone_of(turn_timezone())
+    except Exception:  # noqa: BLE001 — without a reported zone the clock below is UTC
+        zone = None
+    return zone or ZoneInfo("UTC")
+
+
+def resolve_due(when: str, *, now: datetime, text: str = "") -> tuple[datetime | None, str, bool]:
+    """``(due, remaining_text, has_time)`` for a ``when`` value a tool or route passes.
+
+    ``when`` may be an ISO date or time (as a model usually writes it) or a
+    plain phrase ("Friday at 9"). When ``when`` is empty the phrase is looked
+    for inside ``text`` itself and removed from it.
+    """
+    when = (when or "").strip()
+    if when:
+        iso = _from_iso(when, now)
+        if iso is not None:
+            return iso[0], clean_text(text), iso[1]
+        parsed = parse_when(when, now=now)
+        if parsed is not None:
+            return parsed.at, clean_text(text), parsed.has_time
+        # A phrase the parser does not know: look in the text as a last resort.
+    parsed = parse_when(text, now=now)
+    if parsed is None:
+        return None, clean_text(text), False
+    return parsed.at, strip_when(text, parsed), parsed.has_time
+
+
+def _from_iso(value: str, now: datetime) -> tuple[datetime, bool] | None:
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            day = datetime.fromisoformat(value)
+            return day.replace(hour=9, tzinfo=now.tzinfo), False
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:  # not ISO: the caller tries it as a phrase next
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=now.tzinfo)
+    return moment, True
+
+
+# ------------------------------------------------------------------ writing
+
+
+def is_reminder(memory: Any) -> bool:
+    return bool((getattr(memory, "source", None) or {}).get("reminder"))
+
+
+#: Where a reminder comes from when its memory names no service: the person's own.
+OWN_SOURCE: Final[str] = "dodaios"
+#: An appointment memory written before its source carried the title (until 2026-11-14).
+_OLD_APPOINTMENT = re.compile(
+    r"^Appointment:\s*(?P<title>.*?)\s+on\s+\d{4}-\d{2}-\d{2}(?P<time>\s+\d{2}:\d{2})?"
+)
+
+
+def _item_fields(memory: Any) -> dict[str, Any]:
+    """What the rail shows of an item: whose it is, its own title, and when it runs.
+
+    A calendar appointment names its service, title, calendar, link, start and
+    end (``memory/vault/calendar_sync.py``); a reminder the person asked for is
+    Dodaios' own, its text is its title, and its time is when it comes due.
+    """
+    from dodaios.memory.vault.calendar_sync import BUSY_TITLES, PROVIDER
+
+    source = dict(getattr(memory, "source", None) or {})
+    text = str(memory.text or "")
+    from_calendar = source.get("via") == "calendar" or bool(source.get("event_id"))
+    old = _OLD_APPOINTMENT.match(text) if from_calendar and "title" not in source else None
+    title = str(source.get("title") or "") if "title" in source else (old["title"] if old else text)
+    if "busy_only" in source:
+        busy = bool(source.get("busy_only"))
+    else:
+        busy = from_calendar and title.strip().casefold() in BUSY_TITLES
+    appointment = from_calendar and not is_reminder(memory)
+    start = str(source.get("start") or "") or memory.due_at
+    end = str(source.get("end") or "") or memory.valid_to
+    return {
+        "source": str(source.get("provider") or (PROVIDER if from_calendar else OWN_SOURCE)),
+        "title": "" if busy else title,
+        "busy_only": busy,
+        "start": start if appointment else memory.due_at,
+        "end": end if appointment else None,
+        "all_day": appointment
+        and bool(source.get("all_day") if "all_day" in source else old and not old["time"]),
+        "calendar": str(source.get("calendar") or "") if from_calendar else "",
+        "location": str(source.get("location") or "") if from_calendar else "",
+        "url": str(source.get("url") or "") if from_calendar else "",
+    }
+
+
+def row_of(memory: Any, now: str) -> dict[str, Any]:
+    """The reminder as the API and the notices carry it."""
+    return {
+        "id": memory.id,
+        "text": memory.text,
+        "due_at": memory.due_at,
+        "kind": memory.kind,
+        "reminder": is_reminder(memory),
+        "overdue": bool(memory.due_at) and _is_past(memory.due_at, now),
+        "delivered": False,
+        **_item_fields(memory),
+    }
+
+
+def is_over(memory: Any, now: str) -> bool:
+    """Whether the memory's end has passed, compared as moments.
+
+    The vault compares ends as text against its UTC clock. An appointment
+    memory written before 2026-11-14 kept its event's offset, so as text a
+    10:15–15:00 +01:00 block stayed current until 15:00 UTC, and one that had
+    ended could still come due and be told after its end (hours late east of
+    UTC). Such a memory is over, whatever its text says.
+    """
+    end, clock = _due_moment(getattr(memory, "valid_to", None)), _due_moment(now)
+    return end is not None and clock is not None and end <= clock
+
+
+def _is_past(due_at: str, now: str) -> bool:
+    """``due_at <= now`` as moments: an older appointment memory kept its event's own offset."""
+    due, clock = _due_moment(due_at), _due_moment(now)
+    if due is None or clock is None:
+        return due_at <= now
+    return due <= clock
+
+
+def create_reminder(
+    vault: Any,
+    text: str,
+    due: datetime,
+    *,
+    via: str = "reminders tool",
+    evidence: str = "",
+    zone: str = "",
+) -> Any:
+    """Store ``text`` as a reminder due at ``due`` (aware); returns the ``WriteResult``."""
+    text = " ".join((text or "").split())
+    if not text:
+        raise ValueError("a reminder needs a text")
+    if due.tzinfo is None:
+        raise ValueError("due must be timezone-aware")
+    due_utc = _iso_utc(due)
+    result = vault.remember(
+        text,
+        REMINDER_KIND,
+        origin="user",
+        source={
+            "via": via,
+            "reminder": True,
+            "local": due.isoformat(timespec="minutes"),
+            "zone": zone or str(due.tzinfo),
+            "evidence": (evidence or "")[:300],
+        },
+        valid_to=_iso_utc(due + timedelta(days=GRACE_DAYS)),
+        due_at=due_utc,
+    )
+    _changed()
+    return result
+
+
+def create_task(vault: Any, text: str, *, via: str = "reminders tool", evidence: str = "") -> Any:
+    """An item without a time: a plan the person can see in memory and tick off."""
+    text = " ".join((text or "").split())
+    if not text:
+        raise ValueError("a task needs a text")
+    result = vault.remember(
+        text,
+        TASK_KIND,
+        origin="user",
+        source={"via": via, "task": True, "evidence": (evidence or "")[:300]},
+    )
+    _changed()
+    return result
+
+
+def mark_done(vault: Any, memory_id: str) -> bool:
+    """Tick a reminder or task off: it is no longer current, its history stays."""
+    ok = bool(vault.invalidate(memory_id, reason="done"))
+    if ok:
+        _changed()
+    return ok
+
+
+def snooze(vault: Any, memory_id: str, until: datetime) -> Any | None:
+    """Move a reminder to ``until``: the old one ends, a new one takes its text."""
+    old = vault.get(memory_id)
+    if old is None:
+        return None
+    source = dict(old.source or {})
+    vault.invalidate(memory_id, reason="snoozed")
+    result = vault.remember(
+        old.text,
+        REMINDER_KIND,
+        origin="user",
+        source={
+            **source,
+            "via": "snooze",
+            "reminder": True,
+            "local": until.isoformat(timespec="minutes"),
+            "snoozed_from": memory_id,
+        },
+        valid_to=_iso_utc(until + timedelta(days=GRACE_DAYS)),
+        due_at=_iso_utc(until),
+    )
+    _changed()
+    return result.memory
+
+
+def list_due(vault: Any, *, days: int = 14) -> list[dict[str, Any]]:
+    """Everything with a due time within ``days`` (overdue first), delivered flag set."""
+    now = vault.now()
+    rows = []
+    for memory in vault.upcoming(days=days):
+        if is_over(memory, now):
+            continue
+        row = row_of(memory, now)
+        row["delivered"] = was_told(vault, memory)
+        rows.append(row)
+    return rows
+
+
+def was_told(vault: Any, memory: Any) -> bool:
+    """Whether the reminder was told: itself, or a version it replaced that came due then too.
+
+    The calendar sync replaces an appointment's memory when its sentence
+    changes (a renamed event, a new wording); the appointment was told all
+    the same, and telling it again would be a second notification for one
+    appointment.
+    """
+    current = memory
+    for _step in range(8):
+        if vault.get_meta(_DELIVERED + current.id) is not None:
+            return True
+        prior = getattr(current, "supersedes_id", None)
+        older = vault.get(prior) if prior else None
+        if older is None or _due_moment(older.due_at) != _due_moment(memory.due_at):
+            return False
+        current = older
+    return False
+
+
+def _changed() -> None:
+    from dodaios.memory.vault.runtime import changed
+
+    changed()
+
+
+# ---------------------------------------------------------------- brain dump
+
+# No unbounded whitespace runs on both sides of a separator: the pieces are
+# stripped afterwards, and adjacent `\s*`/`\s+` made the split polynomial on
+# long runs of spaces (a ReDoS shape). Connector words need a space on each side.
+_SPLIT = re.compile(
+    r"[\n;,]|\.(?=\s)|(?<=\s)(?:and then|and|then|also|plus|"
+    r"und dann|und|dann|außerdem|"  # i18n-allow
+    r"y luego|y|luego|además|"  # i18n-allow
+    r"e depois|e|depois|também)(?=\s)",  # i18n-allow
+    re.I,
+)
+_MIN_ITEM_CHARS = 3
+
+
+@dataclass(frozen=True)
+class CapturedItem:
+    text: str
+    due: datetime | None
+    has_time: bool = False
+
+
+def split_dump(text: str, *, now: datetime) -> list[CapturedItem]:
+    """Separate items of a brain dump, each with the time it names (if any)."""
+    items: list[CapturedItem] = []
+    pieces = [
+        piece
+        for line in (text or "").splitlines()
+        for piece in _SPLIT.split(" ".join(line.split()))
+    ]
+    for raw in pieces:
+        piece = (raw or "").strip(" .,;:-")
+        if len(piece) < _MIN_ITEM_CHARS:
+            continue
+        parsed = parse_when(piece, now=now)
+        if parsed is None:
+            cleaned = clean_text(piece)
+            if cleaned:
+                items.append(CapturedItem(cleaned, None))
+            continue
+        rest = strip_when(piece, parsed)
+        if not rest and items:
+            # "tomorrow" on its own dates the item before it ("dentist tomorrow").
+            previous = items.pop()
+            items.append(CapturedItem(previous.text, parsed.at, parsed.has_time))
+            continue
+        if rest:
+            items.append(CapturedItem(rest, parsed.at, parsed.has_time))
+    return items
+
+
+def capture_dump(
+    vault: Any, text: str, *, now: datetime, evidence: str = ""
+) -> list[dict[str, Any]]:
+    """Store every item of a brain dump; returns the rows for the card."""
+    rows: list[dict[str, Any]] = []
+    for item in split_dump(text, now=now):
+        if item.due is not None:
+            result = create_reminder(
+                vault, item.text, item.due, via="brain dump", evidence=evidence
+            )
+        else:
+            result = create_task(vault, item.text, via="brain dump", evidence=evidence)
+        memory = result.memory
+        if memory is None:
+            log.info("reminders: brain dump item not stored (%s): %s", result.action, item.text)
+            continue
+        row = row_of(memory, vault.now())
+        row["op"] = result.action
+        rows.append(row)
+    return rows
+
+
+# -------------------------------------------------------------- the lead chat
+
+
+def lead_target() -> tuple[Any, str] | None:
+    """``(service, session_id)`` of the lead conversation, ``None`` without one."""
+    try:
+        from dodaios.agent_chat.lead import lead_session
+        from dodaios.society.runtime import current_runtime
+
+        runtime = current_runtime()
+        svc = runtime.chat_service() if runtime is not None else None
+        if svc is None:
+            return None
+        session = lead_session(svc, create=False)
+        if session is None:
+            return None
+        return svc, session.session_id
+    except Exception:  # noqa: BLE001 — no conversation is a plain "nowhere to post"
+        log.debug("reminders: lead conversation unavailable", exc_info=True)
+        return None
+
+
+def chat_ready() -> bool:
+    """Whether the app's conversations are up (the agent society is running)."""
+    try:
+        from dodaios.society.runtime import current_runtime
+
+        runtime = current_runtime()
+        return runtime is not None and runtime.chat_service() is not None
+    except Exception:  # noqa: BLE001 — not up yet; asked again next tick
+        return False
+
+
+async def post_notice(svc: Any, session_id: str, payload: dict[str, Any]) -> str:
+    """Post a notice and return its timeline id (``n-<seq>``), or ``""``."""
+    await svc.post_notice(session_id, payload)
+    try:
+        tail = svc.store.list_events(session_id, tail=1)
+    except Exception:  # noqa: BLE001 — the id only sharpens the click target
+        return ""
+    if tail and tail[-1].get("kind") == "notice":
+        seq = tail[-1].get("seq")
+        return f"n-{seq}" if seq else ""
+    return ""
+
+
+# ------------------------------------------------------------------ scheduler
+
+
+def _ui_language() -> str:
+    try:
+        from dodaios.core.config import load_config
+
+        cfg = load_config()
+        lang = str(getattr(getattr(cfg, "ui", None), "language", "") or "en").lower()
+        return lang.split("-", 1)[0]
+    except Exception:  # noqa: BLE001 — English is the catalog's safety net anyway
+        return "en"
+
+
+def notification_language(text: str) -> str:
+    """The language a reminder's notification is worded in (one resolver, ADR doctrine)."""
+    try:
+        from dodaios.core.config import load_config
+        from dodaios.core.turn_language import resolve_output_language
+
+        cfg = load_config()
+        pin = getattr(getattr(cfg, "brain", None), "reply_language", "auto")
+        return resolve_output_language(pin, None, text, default=_ui_language())
+    except Exception:  # noqa: BLE001 — English is the catalog's safety net anyway
+        return "en"
+
+
+def phrase(key: str, lang: str, **fields: object) -> str:
+    from dodaios.i18n import catalog
+
+    return catalog.t(f"notify.{key}", lang, **fields)
+
+
+class ReminderScheduler:
+    """Delivers due reminders; one instance per app."""
+
+    def __init__(
+        self,
+        *,
+        vault: Callable[[], Any | None],
+        target: Callable[[], tuple[Any, str] | None] = lead_target,
+        notifier: Callable[[], Any | None],
+        clock: Callable[[], datetime] = utc_now,
+        tick_s: float = TICK_S,
+        ready: Callable[[], bool] = lambda: True,
+    ) -> None:
+        self._vault = vault
+        self._ready = ready
+        self._born = time.monotonic()
+        self._target = target
+        self._notifier = notifier
+        self._clock = clock
+        self._tick_s = tick_s
+        self._task: asyncio.Task[None] | None = None
+
+    def start(self) -> asyncio.Task[None]:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self.run(), name="reminders")
+        return self._task
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
+            self._task = None
+
+    async def run(self) -> None:
+        while True:
+            try:
+                await self.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — one bad tick must not stop every later reminder
+                log.warning("reminders: tick failed", exc_info=True)
+            await asyncio.sleep(self._tick_s)
+
+    async def tick(self) -> list[str]:
+        """Deliver what is due; returns the ids delivered this round."""
+        if not self._ready() and time.monotonic() - self._born < READY_WAIT_S:
+            # Right after a start the conversation is not there yet: an item
+            # claimed now would be marked told without being told. An app that
+            # never brings one up still delivers (the desktop notification).
+            return []
+        vault = self._vault()
+        if vault is None:
+            return []
+        now = self._clock()
+        try:
+            due = await asyncio.to_thread(vault.upcoming, days=0)
+        except Exception:  # noqa: BLE001 — a locked vault is retried on the next tick
+            log.warning("reminders: could not read due memories", exc_info=True)
+            return []
+        delivered: list[str] = []
+        todo: list[Any] = []
+        for memory in due:
+            key = _DELIVERED + memory.id
+            if vault.get_meta(key) is not None:
+                continue
+            told_before = was_told(vault, memory)
+            # Claim first: a second tick (or a restart mid-delivery) must not
+            # tell the same reminder twice.
+            vault.set_meta(key, _iso_utc(now))
+            if told_before:
+                log.info("reminders: %s replaces a version already told", memory.id)
+                continue
+            if is_over(memory, _iso_utc(now)):
+                log.info("reminders: %s ended %s; not told after it", memory.id, memory.valid_to)
+                continue
+            due_at = _due_moment(memory.due_at)
+            if due_at is not None and now - due_at > STALE_AFTER:
+                log.info("reminders: %s was due %s; too old to tell", memory.id, memory.due_at)
+                continue
+            todo.append(memory)
+            delivered.append(memory.id)
+        if todo:
+            context = _later_today(vault, {memory.id for memory in todo})
+            # Together: items due in the same minute become one message
+            # (``agent_chat/proactive_voice.py`` folds what arrives at once).
+            await asyncio.gather(*(self.deliver(memory, context) for memory in todo))
+        return delivered
+
+    async def deliver(self, memory: Any, context: list[str] | None = None) -> None:
+        lang = notification_language(memory.text)
+        session_id = ""
+        message_id = ""
+        target = self._target()
+        if target is not None:
+            svc, session_id = target
+            try:
+                message_id = await post_notice(
+                    svc,
+                    session_id,
+                    {
+                        # The item as the API lists it (title, start, end,
+                        # calendar, link), so the chat can say it in words.
+                        **_notice_fields(memory),
+                        "kind": NOTICE_DUE,
+                        "status": "",
+                        "text": memory.text,
+                        "memory_id": memory.id,
+                        "due_at": memory.due_at,
+                        "reminder": is_reminder(memory),
+                        # What else is on today, for the assistant's wording;
+                        # never stored (``proactive_voice.CONTEXT_KEY``).
+                        "_voice_context": list(context or []),
+                    },
+                )
+            except Exception:  # noqa: BLE001 — the desktop notification below still goes out
+                log.warning("reminders: notice not posted for %s", memory.id, exc_info=True)
+        notifier = self._notifier()
+        if notifier is None:
+            return
+        title = phrase("reminder_title", lang)
+        await notifier.notify(
+            "reminder",
+            title,
+            memory.text,
+            session_id=session_id,
+            message_id=message_id,
+            # The person asked for this at this time: tell them even while the
+            # window is in front (the notice is a line among many).
+            ignore_focus=True,
+        )
+
+
+def _later_today(vault: Any, exclude: set[str]) -> list[str]:
+    """What else is due later today, as facts for the assistant's wording."""
+    try:
+        from dodaios.agent_chat.proactive_voice import later_today
+
+        now = datetime.now(person_zone())
+        return later_today(list_due(vault, days=1), now=now, exclude=exclude)
+    except Exception:  # noqa: BLE001 — the message is worded without the rest of the day
+        log.debug("reminders: rest of the day unreadable", exc_info=True)
+        return []
+
+
+def _notice_fields(memory: Any) -> dict[str, Any]:
+    """The item's fields for its notice; a memory that cannot say them still gets told."""
+    try:
+        return _item_fields(memory)
+    except Exception:  # noqa: BLE001 — the text alone still makes a notice
+        log.debug("reminders: no item fields for %s", getattr(memory, "id", ""), exc_info=True)
+        return {}
+
+
+def _due_moment(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:  # an unreadable due time is treated as "not yet known"
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+
+
+__all__ = [
+    "GRACE_DAYS",
+    "NOTICE_CAPTURED",
+    "NOTICE_DUE",
+    "OWN_SOURCE",
+    "REMINDER_KIND",
+    "SNOOZE_MINUTES",
+    "STALE_AFTER",
+    "TASK_KIND",
+    "TICK_S",
+    "CapturedItem",
+    "ReminderScheduler",
+    "capture_dump",
+    "create_reminder",
+    "create_task",
+    "is_over",
+    "is_reminder",
+    "lead_target",
+    "list_due",
+    "mark_done",
+    "notification_language",
+    "person_zone",
+    "phrase",
+    "post_notice",
+    "resolve_due",
+    "row_of",
+    "snooze",
+    "split_dump",
+    "utc_now",
+    "was_told",
+]

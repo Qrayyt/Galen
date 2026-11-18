@@ -1,0 +1,452 @@
+"""Public, versioned gateway to the Brain Manager's live tool catalog.
+
+Higher layers receive only secret-free descriptors and execute by name. The
+concrete ``Tool`` objects and ``ToolExecutor`` remain inside the brain layer,
+and every call resolves against the current catalog immediately before use.
+"""
+
+from __future__ import annotations
+
+import copy
+import threading
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
+from uuid import UUID
+
+from dodaios.brain.lead_manifest import LEAD_DROPPED_TOOLS, VOICE_SUPERSEDED_TOOLS
+from dodaios.core.protocols import (
+    RiskTier,
+    SupervisorToolDescriptor,
+    SupervisorToolRequest,
+    Tool,
+    ToolResult,
+)
+
+_VALID_RISK_TIERS = frozenset({"safe", "monitor", "ask", "block"})
+# The lead's seat exceptions (voice-only tools, what a call supersedes, the
+# ambient-pane tools the lead drops) are named in ``lead_manifest``.
+_VOICE_SUPERSEDED_TOOLS = VOICE_SUPERSEDED_TOOLS
+_LEAD_DROPPED_TOOLS = LEAD_DROPPED_TOOLS
+
+
+def _society_store() -> Any | None:
+    """The society store that keeps hand-off receipts, or ``None`` before it is built."""
+    from dodaios.society.runtime import current_runtime
+
+    runtime = current_runtime()
+    return getattr(runtime, "store", None) if runtime is not None else None
+
+
+class BrainSupervisorToolGateway:
+    """Adapter that keeps Brain Manager implementation details private."""
+
+    def __init__(
+        self,
+        manager: Any,
+        *,
+        session_tool: Callable[[str], Awaitable[Tool | None]] | None = None,
+        browser_tool: Callable[[str], Awaitable[Tool | None]] | None = None,
+        session_tools: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any] | None]]
+        | None = None,
+        workspace_tool: Tool | None = None,
+        lead_session: Callable[[str], bool] | None = None,
+        lead_hands: Callable[[str], dict[str, Any]] | None = None,
+    ) -> None:
+        self._manager = manager
+        self._session_tool = session_tool
+        self._browser_tool = browser_tool
+        self._session_tools = session_tools
+        self._workspace_tool = workspace_tool
+        self._lead_session = lead_session
+        self._lead_hands = lead_hands
+        self._lock = threading.Lock()
+        self._fingerprint: tuple[tuple[str, int], ...] = ()
+        self._catalog_version = 0
+
+    def _live_tools(self) -> dict[str, Any]:
+        if self._manager is not None:
+            from dodaios.brain.tool_surface import maybe_reconcile_tool_surface
+
+            maybe_reconcile_tool_surface(self._manager)
+        tools = getattr(self._manager, "_tools", None)
+        if not isinstance(tools, dict):
+            return {}
+        for _attempt in range(2):
+            try:
+                return dict(tools)
+            except RuntimeError:
+                continue
+        return {}
+
+    def catalog(self) -> tuple[SupervisorToolDescriptor, ...]:
+        tools = self._live_tools()
+        fingerprint = tuple(sorted((str(name), id(tool)) for name, tool in tools.items()))
+        with self._lock:
+            if fingerprint != self._fingerprint:
+                self._fingerprint = fingerprint
+                self._catalog_version += 1
+
+        return self._describe(tools)
+
+    @staticmethod
+    def _describe(tools: dict[str, Any]) -> tuple[SupervisorToolDescriptor, ...]:
+        descriptors: list[SupervisorToolDescriptor] = []
+        for name, tool in sorted(tools.items()):
+            if not callable(getattr(tool, "execute", None)):
+                continue
+            schema = getattr(tool, "schema", None)
+            if not isinstance(schema, dict):
+                schema = {"type": "object", "properties": {}}
+            raw_risk_tier = str(getattr(tool, "risk_tier", "monitor"))
+            risk_tier = cast(
+                RiskTier,
+                raw_risk_tier if raw_risk_tier in _VALID_RISK_TIERS else "monitor",
+            )
+            hook = getattr(tool, "risk_tier_for_args", None)
+            impact = getattr(tool, "describe_args", None)
+            descriptors.append(
+                SupervisorToolDescriptor(
+                    name=str(name),
+                    description=str(getattr(tool, "description", "")),
+                    input_schema=copy.deepcopy(schema),
+                    risk_tier=risk_tier,
+                    is_action_tool=bool(getattr(tool, "is_action_tool", False)),
+                    yields_instructions_only=bool(getattr(tool, "yields_instructions_only", False)),
+                    risk_tier_for_args=hook if callable(hook) else None,
+                    describe_args=impact if callable(impact) else None,
+                )
+            )
+        return tuple(descriptors)
+
+    @property
+    def catalog_version(self) -> int:
+        self.catalog()
+        with self._lock:
+            return self._catalog_version
+
+    def is_lead_session(self, session_id: str) -> bool:
+        """Whether ``session_id`` is a Jarvis chat, which has the lead's tool set."""
+        if self._lead_session is None or not session_id:
+            return False
+        try:
+            return bool(self._lead_session(session_id))
+        except Exception:  # noqa: BLE001 - an unknown session is not the lead
+            return False
+
+    def lead_extra_tools(self) -> dict[str, Any]:
+        """What the lead has beyond the shared tools: addressed-pane coding, the board, the team.
+
+        ``workspace-orchestrate`` and ``workspace-git`` address coding panes by
+        stable id (voice has had them all along); ``work_board`` is the one
+        read of what runs and who needs the person; ``team_thread``, ``costs_summary``
+        and ``artifacts`` reach team threads, spend and the agents' output;
+        ``project`` tracks multi-day work and ``standing_task`` what the lead looks
+        after with no end date; ``ask_agent`` relays a
+        conversation with a team agent and ``product_help`` answers how-to
+        questions from the built-in guide. The exceptions between seats are
+        listed in ``lead_manifest``.
+        """
+        from dodaios.brain.artifacts_tool import ArtifactsTool
+        from dodaios.brain.costs_summary_tool import CostsSummaryTool
+        from dodaios.brain.project_tool import ProjectTool
+        from dodaios.brain.standing_task_tool import StandingTaskTool
+        from dodaios.brain.team_thread_tool import TeamThreadTool
+        from dodaios.brain.work_board_tool import WorkBoardTool
+        from dodaios.plugins.tool.product_help import ProductHelpTool
+
+        extra: dict[str, Any] = {ProductHelpTool.name: ProductHelpTool()}
+        # Thin reads and starts over the app's own routes (the ecosystem the lead
+        # must reach: team threads, spend, what the agents made).
+        for tool in (TeamThreadTool(), CostsSummaryTool(), ArtifactsTool(), ProjectTool()):
+            extra[tool.name] = tool
+        # Whose turn a call belongs to decides what it may start: the tool asks this
+        # gateway which chats are the lead's.
+        extra[StandingTaskTool.name] = StandingTaskTool(lead_session=self.is_lead_session)
+        if "message_agent" in self._live_tools():
+            from dodaios.plugins.tool.ask_agent import AskAgentTool
+            from dodaios.society.runtime import current_runtime
+
+            extra[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
+        if self._workspace_tool is not None:
+            extra[self._workspace_tool.name] = self._workspace_tool
+            workspaces = getattr(self._workspace_tool, "gateway", None)
+            if workspaces is not None:
+                from dodaios.brain.workspace_git_tool import WorkspaceGitTool
+
+                extra[WorkspaceGitTool.name] = WorkspaceGitTool(workspaces)
+
+        def board_sources() -> dict[str, Any]:
+            return {**self._live_tools(), **extra}
+
+        extra[WorkBoardTool.name] = WorkBoardTool(board_sources)
+        # The one front door for handing work off; it routes to the specialised
+        # tools above and in the shared set, which stay callable on their own.
+        from dodaios.brain.delegate_tool import DelegateTool
+
+        extra[DelegateTool.name] = DelegateTool(board_sources, store_resolver=_society_store)
+        return extra
+
+    def lead_tools(self) -> dict[str, Any]:
+        """The lead's tool set, the same on every seat (see ``lead_manifest``)."""
+        tools = {
+            name: tool
+            for name, tool in self._live_tools().items()
+            if name not in _LEAD_DROPPED_TOOLS
+        }
+        tools.update(self.lead_extra_tools())
+        return tools
+
+    def lead_shell_tool(self) -> Any | None:
+        """The lead's ``run_shell`` with the owner's vault, or ``None`` when it is off."""
+        from dodaios.society.lead_shell import SHELL_NAME, with_vault_shell
+
+        live = self._live_tools()
+        if SHELL_NAME not in live:
+            return None
+        return with_vault_shell({SHELL_NAME: live[SHELL_NAME]})[SHELL_NAME]
+
+    def lead_session_tools(self, session_id: str) -> dict[str, Any]:
+        """The lead's tools for one chat: the shared set plus the chat's own hands."""
+        tools = self.lead_tools()
+        if self._lead_hands is not None:
+            try:
+                tools.update(self._lead_hands(session_id))
+            except Exception:  # noqa: BLE001 - a chat without its own hands still has the rest
+                pass
+        # The chat's run_shell carries the owner's stored secrets by name and
+        # masks their values (society/lead_shell.py); voice and workers do not.
+        from dodaios.society.lead_shell import with_vault_shell
+
+        return with_vault_shell(tools)
+
+    def _voice_tools(self) -> dict[str, Any]:
+        from dodaios.harness.computer_use_context import peek_computer_use_context
+        from dodaios.plugins.tool.appshot import AppshotTool
+        from dodaios.plugins.tool.live_screen import LiveScreenTool
+        from dodaios.plugins.tool.product_help import ProductHelpTool
+        from dodaios.plugins.tool.remember import RememberTool
+
+        tools = self._live_tools()
+        context = peek_computer_use_context()
+        computer_use = getattr(getattr(self._manager, "_config", None), "computer_use", None)
+        # ADR-0039: the live session's own reasoning model operates the screen
+        # through ``computer``. The mission vehicles (a second model running
+        # its own loop) and the raw coordinate primitives (screen units the
+        # model never sees) are not offered next to it.
+        for name in _VOICE_SUPERSEDED_TOOLS:
+            tools.pop(name, None)
+        if getattr(computer_use, "enabled", True):
+            if context is not None:
+                tools.update(
+                    {
+                        name: tool
+                        for name, tool in (context.tools or {}).items()
+                        if name not in _VOICE_SUPERSEDED_TOOLS
+                    }
+                )
+            from dodaios.plugins.tool.computer import ComputerTool
+
+            tools[ComputerTool.name] = ComputerTool()
+        tools["screen_snapshot"] = LiveScreenTool()
+        # "Take an appshot" said in a live call: the shortcut's capture, with
+        # its effect and sound. Voice-only — a brain turn gets the same
+        # picture from its own Screen Context step.
+        tools["take_appshot"] = AppshotTool()
+        # The live model keeps its own character file (SOUL.md) current while
+        # the call runs, instead of a separate review call after it.
+        from dodaios.plugins.tool.update_soul import UpdateSoulTool
+
+        tools["update_soul"] = UpdateSoulTool()
+        # The live prompt carries only a short product brief; exact how-to
+        # answers come from the built-in guide on demand (the lead has it too).
+        tools["product_help"] = ProductHelpTool()
+        # A spoken "remember this" in a live call is saved while the call
+        # runs, into the MEMORY.md every later conversation reads. Voice-only
+        # like the tools above: the router stays a pure dispatcher (ADR-0011).
+        tools["remember"] = RememberTool()
+        # A voice carries a takeaway, not a table: exact content goes on screen.
+        from dodaios.plugins.tool.show_on_screen import ShowOnScreenTool
+
+        tools[ShowOnScreenTool.name] = ShowOnScreenTool()
+        if "message_agent" in tools:
+            # With a team on this install, a call can relay a conversation with
+            # one of its agents: ask, wait for the answer, say it.
+            from dodaios.plugins.tool.ask_agent import AskAgentTool
+            from dodaios.society.runtime import current_runtime
+
+            tools[AskAgentTool.name] = AskAgentTool(runtime_resolver=current_runtime)
+        if self._workspace_tool is not None:
+            # Live delegates coding to one addressed service. The old prompt
+            # tools silently choose an ambient pane and cannot safely coexist.
+            tools = {
+                name: tool for name, tool in tools.items() if not name.startswith("agentic-ide-")
+            }
+            tools[self._workspace_tool.name] = self._workspace_tool
+            # The same addressed service also answers for a workspace's repository.
+            workspaces = getattr(self._workspace_tool, "gateway", None)
+            if workspaces is not None:
+                from dodaios.brain.workspace_git_tool import WorkspaceGitTool
+
+                tools[WorkspaceGitTool.name] = WorkspaceGitTool(workspaces)
+        return tools
+
+    def voice_catalog(self) -> tuple[SupervisorToolDescriptor, ...]:
+        """Live models can see desktop primitives without a second tool model."""
+        return self._describe(self._voice_tools())
+
+    async def execute(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        request: SupervisorToolRequest,
+    ) -> ToolResult:
+        if request.cancel_token is not None and request.cancel_token.is_cancelled():
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"cancelled ({request.cancel_token.reason or 'requested'})",
+            )
+
+        ref = str(request.config_snapshot.get("approval_ref") or "")
+        if request.origin == "realtime":
+            tools = self._voice_tools()
+        elif request.origin == "agent-chat" and self.is_lead_session(
+            ref.removeprefix("agent-chat:")
+        ):
+            tools = self.lead_session_tools(ref.removeprefix("agent-chat:"))
+        else:
+            tools = self._live_tools()
+        scoped = None
+        if (
+            self._session_tools is not None
+            and request.origin == "agent-chat"
+            and ref.startswith("agent-chat:")
+        ):
+            scoped = await self._session_tools(ref.removeprefix("agent-chat:"), tools)
+        tool = (scoped if scoped is not None else tools).get(name)
+        if scoped is None and name in {"coding-session", "society_browser"}:
+            # Never install this controller in the global worker tool set.
+            # The authenticated chat transport supplies its canonical session reference.
+            ref = str(request.config_snapshot.get("approval_ref") or "")
+            resolver = self._browser_tool if name == "society_browser" else self._session_tool
+            tool = (
+                await resolver(ref.removeprefix("agent-chat:"))
+                if resolver is not None
+                and request.origin == "agent-chat"
+                and ref.startswith("agent-chat:")
+                else None
+            )
+        executor = getattr(self._manager, "_tool_executor", None)
+        if tool is None or not callable(getattr(tool, "execute", None)):
+            return ToolResult(
+                success=False,
+                output=None,
+                error="Supervisor tool is no longer available.",
+            )
+        if executor is None or not callable(getattr(executor, "execute", None)):
+            return ToolResult(
+                success=False,
+                output=None,
+                error="Supervisor tool gateway is not ready.",
+            )
+
+        config_snapshot = dict(request.config_snapshot)
+        ref = str(config_snapshot.get("approval_ref") or "")
+        if ref.startswith("agent-chat:"):
+            from dodaios.core.tool_read_only import chat_is_read_only
+
+            if chat_is_read_only(ref.removeprefix("agent-chat:")):
+                config_snapshot["chat_read_only"] = True
+        config_snapshot.update(
+            {
+                "tool_origin": request.origin,
+                "mission_id": request.mission_id,
+                "worker_id": request.worker_id,
+            }
+        )
+        return await executor.execute(
+            tool,
+            dict(arguments),
+            user_utterance=request.user_utterance,
+            config_snapshot=config_snapshot,
+            trace_id=request.trace_id,
+            rationale=request.rationale,
+            cancel_token=request.cancel_token,
+        )
+
+    async def session_catalog(self, session_id: str) -> tuple[SupervisorToolDescriptor, ...]:
+        """Resolve the permitted session-owned tools without exposing them globally."""
+        if self._session_tools is not None:
+            tools = await self._session_tools(session_id, self._live_tools())
+            if tools is not None:
+                return self._describe(tools)
+        catalog = (
+            self._describe(self.lead_session_tools(session_id))
+            if self.is_lead_session(session_id)
+            else self.catalog()
+        )
+        scoped = []
+        for resolver in (self._session_tool, self._browser_tool):
+            tool = await resolver(session_id) if resolver is not None else None
+            if tool is None:
+                continue
+            scoped.append(
+                SupervisorToolDescriptor(
+                    name=tool.name,
+                    description=tool.description,
+                    input_schema=copy.deepcopy(tool.schema),
+                    risk_tier=cast(RiskTier, tool.risk_tier),
+                    is_action_tool=bool(getattr(tool, "is_action_tool", True)),
+                    risk_tier_for_args=getattr(tool, "risk_tier_for_args", None),
+                )
+            )
+        return (*catalog, *scoped)
+
+    async def execute_confirmed(
+        self,
+        trace_id: UUID,
+        request: SupervisorToolRequest,
+    ) -> ToolResult:
+        executor = getattr(self._manager, "_tool_executor", None)
+        resume = getattr(executor, "execute_confirmed", None)
+        if not callable(resume):
+            return ToolResult(
+                success=False,
+                output=None,
+                error="Supervisor confirmation gateway is not ready.",
+            )
+        config_snapshot = dict(request.config_snapshot)
+        config_snapshot.update(
+            {
+                "tool_origin": request.origin,
+                "mission_id": request.mission_id,
+                "worker_id": request.worker_id,
+            }
+        )
+        return await resume(
+            trace_id,
+            user_utterance=request.user_utterance,
+            config_snapshot=config_snapshot,
+        )
+
+    async def cancel_pending(self, trace_id: UUID, *, reason: str = "voice_vetoed") -> bool:
+        executor = getattr(self._manager, "_tool_executor", None)
+        cancel = getattr(executor, "cancel_pending", None)
+        if not callable(cancel):
+            return False
+        return bool(await cancel(trace_id, reason=reason))
+
+    async def publish_guard_denied(
+        self,
+        name: str,
+        reason: str,
+        *,
+        trace_id: UUID,
+    ) -> None:
+        executor = getattr(self._manager, "_tool_executor", None)
+        publish = getattr(executor, "publish_guard_denied", None)
+        if callable(publish):
+            await publish(name, reason, trace_id=trace_id)
+
+
+__all__ = ["BrainSupervisorToolGateway"]

@@ -1,0 +1,444 @@
+"""The lead's turn contract is the same on every seat.
+
+The matrix is seat (brain, claude-cli, codex-cli) x behaviour (``/slug`` skill,
+trigger-phrase skill, recalled memory, unbacked claim caught, reply language,
+offer instead of action). Every case drives the real chat service on a lead
+conversation; only the model at the end of each seat is scripted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+from dodaios.agent_chat import attachments as chat_attachments
+from dodaios.agent_chat import dodaios_harness, lead_turn_contract, runner_brain
+from dodaios.agent_chat import service as service_mod
+from dodaios.agent_chat.events import make_event, person_words
+from dodaios.agent_chat.runner_api import reply_language_line
+from dodaios.agent_chat.service import AgentChatService
+from dodaios.agent_chat.store import AgentChatStore
+from dodaios.brain.manager import BrainManager
+from dodaios.skills.registry import SkillRegistry
+from dodaios.skills.runner import SkillRunner
+from dodaios.skills.skill_context import SkillContext, set_skill_context
+from tests.fakes.fake_brain_manager import FakeBrainManager
+
+SEATS = ["brain", "claude-cli", "codex-cli"]
+RECALL = "[Memory] The person's dog is called Rex."
+
+
+@dataclass
+class Seen:
+    """What reached the seat, in a seat-independent shape."""
+
+    prompts: list[str] = field(default_factory=list)
+    skills: list[tuple[str, str]] = field(default_factory=list)
+    visible: list[str] = field(default_factory=list)  # prompt + identity, per run
+    languages: list[str] = field(default_factory=list)
+
+
+class _LeadBrain(FakeBrainManager):
+    """The brain seat: the real runner, a scripted model."""
+
+    def __init__(self, replies: list[str], seen: Seen) -> None:
+        super().__init__()
+        self.replies = list(replies)
+        self.seen = seen
+
+    async def generate(self, text: str, **kwargs: Any) -> str:
+        self.seen.prompts.append(text)
+        self.seen.languages.append(kwargs.get("force_output_language") or "")
+        # The manager recalls the vault itself for every turn (BrainManager.generate).
+        recalled = await BrainManager._vault_recall(text)  # noqa: SLF001
+        self.seen.visible.append(f"{text}\n{recalled}")
+        self.reply = self.replies.pop(0)
+        self.chunks = (self.reply,)
+        return await super().generate(text, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _world(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    root = tmp_path / "skills"
+    skills = (("note-skill", None), ("morning-routine", "(morgenroutine|morning routine)"))
+    for name, pattern in skills:
+        d = root / name
+        d.mkdir(parents=True)
+        trigger = (
+            f'triggers:\n  - type: voice\n    pattern: "{pattern}"\n    language: [de, en]\n'
+            if pattern
+            else ""
+        )
+        (d / "SKILL.md").write_text(
+            f'---\nschema_version: "1"\nname: {name}\ndescription: Contract test skill.\n'
+            f"execution: inline\n{trigger}---\nDo the {name} thing: {{{{ content }}}}\n",
+            encoding="utf-8",
+        )
+    registry = SkillRegistry(root=root)
+    registry.reload_sync()
+    set_skill_context(SkillContext(registry=registry, runner=SkillRunner(registry=registry)))
+
+    monkeypatch.setattr("dodaios.memory.vault.runtime.turn_block", lambda _t: RECALL)
+    monkeypatch.setattr(service_mod, "_claude_cli_installed", lambda: True)
+    yield
+    set_skill_context(None)
+
+
+class _Identity:
+    """What a CLI seat's identity text holds on a fresh or file-carried turn."""
+
+    async def render_surface_prompt(self, *, user_text: str, **_: Any):
+        return f"IDENTITY\n{RECALL}", ""
+
+
+async def _run(
+    seat: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    text: str,
+    replies: list[str],
+    *,
+    earlier: tuple[dict[str, Any], ...] = (),
+    **send: Any,
+) -> tuple[Seen, list[dict[str, Any]]]:
+    """One lead turn on ``seat``. ``earlier`` is the thread so far; ``send`` goes to the service."""
+    svc = AgentChatService(AgentChatStore(":memory:"), assistant_name=lambda: "Testo")
+    provider = "openai-codex" if seat == "codex-cli" else "claude-api"
+    session = svc.create_session(
+        provider=provider, model="m", effort="", cwd=str(tmp_path),
+        permission_mode="ask", surface="jarvis",
+    )
+    svc.store.set_lead_session_id(session.session_id)
+    for event in earlier:
+        svc.store.append_event(session.session_id, event)
+    seen = Seen()
+    monkeypatch.setattr(service_mod, "resolve_runner", lambda *a, **k: seat)
+
+    async def seat_for(provider: str):
+        return None if seat == "brain" else (provider, seat)
+
+    monkeypatch.setattr("dodaios.core.task_agent.subscription_seat_off_loop", seat_for)
+    if seat == "brain":
+        fake = _LeadBrain(replies, seen)
+        monkeypatch.setattr(runner_brain, "brain_manager", lambda: fake)
+        monkeypatch.setattr(runner_brain, "_is_lead", lambda _sid: True)
+    else:
+        if seat == "codex-cli":
+            # A resumed vendor conversation: the identity is not repeated, so the
+            # contract itself carries the recalled memory.
+            svc.store.update_session(session.session_id, vendor_session="vendor-1")
+        monkeypatch.setattr(dodaios_harness, "_brain", lambda: _Identity())
+        script = list(replies)
+
+        async def cli_turn(handle, prompt, runner, **_kwargs):
+            seen.prompts.append(prompt)
+            seen.languages.append(handle.output_language)
+            visible = prompt
+            if runner == "claude-cli" or not handle.session.vendor_session:
+                visible += "\n" + await dodaios_harness.identity_prompt(
+                    user_text=prompt, history=[], resume=None, session_id="s"
+                )
+            seen.visible.append(visible)
+            await handle.emit(
+                make_event("assistant_text", {"turn_id": handle.turn_id, "text": script.pop(0)})
+            )
+            await handle.emit(
+                make_event("turn_finished", {"turn_id": handle.turn_id, "status": "done"})
+            )
+            return None
+
+        monkeypatch.setattr(service_mod, "run_cli_turn", cli_turn)
+    await svc.send(session.session_id, text, **send)
+    await asyncio.wait_for(svc._running[session.session_id].task, 10)
+    if seat == "brain":
+        seen.skills = [(n, c) for n, c, _s in fake.noted_skills]
+    else:
+        for prompt in seen.prompts[:1]:
+            for name in ("note-skill", "morning-routine"):
+                if f"Skill instructions for `{name}`" in prompt:
+                    marker = f"Do the {name} thing: "
+                    content = prompt.split(marker, 1)[1].splitlines()[0].strip()
+                    seen.skills.append((name, content))
+    return seen, svc.store.list_events(session.session_id)
+
+
+def _claim_notices(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        e for e in events
+        if e["kind"] == "notice" and e["payload"].get("kind") == "unbacked_claim"
+    ]
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_a_slash_pick_runs_the_skill_on_every_seat(seat, tmp_path, monkeypatch):
+    seen, _ = await _run(seat, tmp_path, monkeypatch, "/note-skill buy milk", ["Noted."])
+    assert seen.skills == [("note-skill", "buy milk")]
+    if seat != "brain":
+        # A coding CLI would read the slash as one of its own commands.
+        assert not seen.prompts[0].lstrip().startswith("/")
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_a_trigger_phrase_runs_the_skill_on_every_seat(seat, tmp_path, monkeypatch):
+    seen, _ = await _run(
+        seat, tmp_path, monkeypatch, "start the morning routine please", ["Started."]
+    )
+    assert [name for name, _ in seen.skills] == ["morning-routine"]
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_recalled_memory_reaches_every_seat(seat, tmp_path, monkeypatch):
+    seen, _ = await _run(seat, tmp_path, monkeypatch, "What is my dog called?", ["Rex."])
+    assert RECALL in seen.visible[0]
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_an_unbacked_claim_is_sent_back_once_on_every_seat(seat, tmp_path, monkeypatch):
+    seen, events = await _run(
+        seat, tmp_path, monkeypatch, "Tell Anna that dinner is at eight.",
+        ["I sent the email to Anna.", "I did not send anything; no tool ran."],
+    )
+    assert len(seen.prompts) == 2
+    assert "no successful tool call of that kind" in seen.prompts[1]
+    assert not _claim_notices(events)
+    assert [e["kind"] for e in events].count("turn_finished") == 1
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_a_claim_unproven_after_the_follow_up_gets_a_notice(seat, tmp_path, monkeypatch):
+    seen, events = await _run(
+        seat, tmp_path, monkeypatch, "Tell Anna that dinner is at eight.",
+        ["I sent the email to Anna.", "I have sent the email to Anna."],
+    )
+    assert len(seen.prompts) == 2
+    assert len(_claim_notices(events)) == 1
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_the_reply_language_is_resolved_and_enforced_on_every_seat(
+    seat, tmp_path, monkeypatch
+):
+    seen, _ = await _run(
+        seat, tmp_path, monkeypatch, "Bitte erstelle mir eine Notiz über den Einkauf heute.",  # i18n-allow  # noqa: E501
+        [
+            "Here is the finished note about your shopping list for today, "
+            "and everything that you need is already on it.",
+            "Hier ist die fertige Notiz über deinen Einkauf von heute, alles ist schon darauf.",  # i18n-allow  # noqa: E501
+        ],
+    )
+    assert seen.languages[0] == "de"
+    assert len(seen.prompts) == 2
+    assert "German" in seen.prompts[1]
+
+
+GERMAN_REQUEST = "Kannst du mir bitte sagen, wie dein Gedächtnis funktioniert?"  # i18n-allow
+GERMAN_ANSWER = "Mein Gedächtnis hat vier Ablagen, und ich schaue für dich nach."  # i18n-allow
+
+
+def _said(text: str, **more: Any) -> dict[str, Any]:
+    return make_event("user_message", {"text": text, **more})
+
+
+def _answered(text: str) -> dict[str, Any]:
+    return make_event("assistant_text", {"turn_id": "earlier", "text": text})
+
+
+def _with_a_file(sentence: str) -> dict[str, Any]:
+    """A message with a file, as the service stores it: the prompt, and the sentence beside it."""
+    return make_event(
+        "user_message",
+        {
+            "text": chat_attachments.compose(
+                sentence,
+                [
+                    SimpleNamespace(
+                        name="notes.txt", kind="document", reference="notes.txt", note="",
+                        detail="The files are empty and nothing is written to them.",
+                    )
+                ],
+            ),
+            "typed": sentence,
+            "attachments": [{"name": "notes.txt"}],
+        },
+    )
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_an_attached_file_does_not_change_the_conversation_language(
+    seat, tmp_path, monkeypatch
+):
+    # Live 2026-11-13: the English note the app writes around a file, and the
+    # file's own text, were read as the person's words. Every short message
+    # after a screenshot ("Ja", "Hallo") was then answered in English.
+    earlier = (
+        _said("Ich habe eine Frage zu meinen Notizen."),  # i18n-allow
+        _answered("Gerne, worum geht es?"),  # i18n-allow
+        _with_a_file(GERMAN_REQUEST),
+        _answered(GERMAN_ANSWER),
+    )
+    assert "Files the user attached" in earlier[2]["payload"]["text"]
+    seen, _ = await _run(seat, tmp_path, monkeypatch, "Ja", [GERMAN_ANSWER], earlier=earlier)
+    assert seen.languages == ["de"]
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_a_delegated_result_is_answered_in_the_conversation_language(
+    seat, tmp_path, monkeypatch
+):
+    # The continuation prompt is composed by the app, in English. It is not
+    # the person's message, now or in the history of a later turn.
+    from dodaios.agent_chat.delegation_wait import continuation_prompt
+
+    prompt = continuation_prompt(
+        [{"agent": "Claude Code", "status": "completed", "report": "The work is done."}],
+        "Ja",
+        later=True,
+    )
+    earlier = (
+        _said(GERMAN_REQUEST),
+        _answered(GERMAN_ANSWER),
+        _said("Ja"),
+        _answered("Ich schicke einen Agenten los."),  # i18n-allow
+    )
+    seen, events = await _run(
+        seat, tmp_path, monkeypatch, prompt, [GERMAN_ANSWER],
+        earlier=earlier, display_text="Ja", background_result=True,
+    )
+    assert seen.languages == ["de"]
+    # The stored continuation does not turn the next turn English either.
+    assert lead_turn_contract.resolve_language("Ok", events) == "de"
+
+
+async def test_a_coding_thread_an_agent_briefs_answers_in_the_persons_language(
+    tmp_path, monkeypatch
+):
+    # Live 2026-11-12: the lead briefs its coding agents in English, so their
+    # threads and reports came back in English to a person who writes German.
+    svc = AgentChatService(AgentChatStore(":memory:"), assistant_name=lambda: "Testo")
+
+    def chat(surface: str) -> str:
+        return svc.create_session(
+            provider="claude-api", model="m", effort="", cwd=str(tmp_path),
+            permission_mode="ask", surface=surface,
+        ).session_id
+
+    lead, thread = chat("jarvis"), chat("agent")
+    svc.store.set_lead_session_id(lead)
+    for event in (_said(GERMAN_REQUEST), _answered(GERMAN_ANSWER)):
+        svc.store.append_event(lead, event)
+    languages: list[str] = []
+    monkeypatch.setattr(service_mod, "resolve_runner", lambda *a, **k: "claude-cli")
+
+    async def cli_turn(handle, prompt, runner, **_kwargs):
+        languages.append(handle.output_language)
+        await handle.emit(
+            make_event("turn_finished", {"turn_id": handle.turn_id, "status": "done"})
+        )
+
+    monkeypatch.setattr(service_mod, "run_cli_turn", cli_turn)
+
+    async def send(text: str, **more: Any) -> None:
+        await svc.send(thread, text, **more)
+        await asyncio.wait_for(svc._running[thread].task, 10)
+
+    await send("Find out why the notebooks stay empty.", author={"agent_id": "jarvis", "name": "T"})
+    # What the person types into the thread themselves is theirs to word.
+    await send("Looks good, thank you.")
+    assert languages == ["de", ""]
+
+
+async def test_a_coding_agent_is_told_which_language_the_person_reads(monkeypatch):
+    line = reply_language_line("agent", "de")
+    assert "messages to the user in this language: de" in line
+    assert "commit messages keep the language the project already uses" in line
+    assert reply_language_line("jarvis", "de") == "\nRespond in this language: de"
+
+    # The line rides on the brief the coding CLI receives.
+    from dodaios.agent_chat import runner_cli
+    from dodaios.agent_chat.runner_api import TurnHandle
+
+    prompts: list[str] = []
+
+    async def once(handle, prompt, runner, resume, **kwargs):
+        prompts.append(prompt)
+        return runner_cli._Outcome("done", None, {}, None, resume)  # noqa: SLF001
+
+    async def emit(_event):
+        return None
+
+    async def deny(*_args):
+        return "deny"
+
+    monkeypatch.setattr(runner_cli, "_run_cli_once", once)
+    handle = TurnHandle(
+        session=SimpleNamespace(
+            surface="agent", session_id="thread-1", vendor_session=None, account_id="",
+        ),
+        turn_id="t1", emit=emit, request_approval=deny, cancel=asyncio.Event(),
+        surface="agent", stance="ask", output_language="de",
+    )
+    await runner_cli.run_cli_turn(handle, "Find the bug.", "claude-cli")
+    assert prompts == ["Find the bug." + line]
+
+
+def test_only_the_persons_own_sentences_are_their_words():
+    events = [
+        _said("Hallo zusammen"),  # i18n-allow
+        _answered("Hello, how can I help?"),
+        _with_a_file("Schau dir das bitte an"),  # i18n-allow
+        # Files alone: no sentence, so nothing to read a language from.
+        _said("Files the user attached…", typed=""),
+        _said("Continue the task.", typed="Ja", origin="background"),
+        _said("Run the plan.", origin="control"),
+        _said("Please continue.", author={"name": "Nova"}),
+        _said("noch eins", steered=True),  # i18n-allow
+    ]
+    assert person_words(events) == [
+        {"role": "user", "content": "Hallo zusammen"},  # i18n-allow
+        {"role": "user", "content": "Schau dir das bitte an"},  # i18n-allow
+        {"role": "user", "content": "noch eins"},  # i18n-allow
+    ]
+
+
+@pytest.mark.parametrize("seat", SEATS)
+async def test_an_offer_instead_of_action_is_corrected_on_every_seat(seat, tmp_path, monkeypatch):
+    seen, _ = await _run(
+        seat, tmp_path, monkeypatch, "Please create a README file.",
+        ["I can create that for you. Shall I start?", "The README file is ready."],
+    )
+    assert len(seen.prompts) == 2
+    assert "offered to do the requested work" in seen.prompts[1]
+
+
+async def test_a_conversation_that_is_not_the_lead_keeps_its_single_pass(tmp_path, monkeypatch):
+    svc = AgentChatService(AgentChatStore(":memory:"), assistant_name=lambda: "Testo")
+    session = svc.create_session(
+        provider="claude-api", model="m", effort="", cwd=str(tmp_path),
+        permission_mode="ask", surface="jarvis",
+    )
+    seen = Seen()
+    monkeypatch.setattr(service_mod, "resolve_runner", lambda *a, **k: "claude-cli")
+
+    async def seat_for(provider: str):
+        return provider, "claude-cli"
+
+    monkeypatch.setattr("dodaios.core.task_agent.subscription_seat_off_loop", seat_for)
+
+    async def cli_turn(handle, prompt, runner, **_kwargs):
+        seen.prompts.append(prompt)
+        await handle.emit(
+            make_event("assistant_text", {"turn_id": handle.turn_id, "text": "I sent the email."})
+        )
+        await handle.emit(
+            make_event("turn_finished", {"turn_id": handle.turn_id, "status": "done"})
+        )
+
+    monkeypatch.setattr(service_mod, "run_cli_turn", cli_turn)
+    await svc.send(session.session_id, "/note-skill hi")
+    await asyncio.wait_for(svc._running[session.session_id].task, 10)
+    assert seen.prompts == ["/note-skill hi"]

@@ -1,0 +1,602 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { useIdeChatStore } from "@/store/ideChat";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { IdeSidePanelFrame } from "./IdeSidePanel";
+import { IdeSidePanelToggle } from "./IdeSidePanelToggle";
+import { useEventStore } from "@/store/events";
+import { useIdeProjectsStore } from "@/store/ideProjects";
+import { useIdeSidePanelStore } from "@/store/ideSidePanel";
+import { resetWorkspacePanesPoll, useWorkspacePanesStore } from "@/store/workspacePanes";
+import type { WorkspacePaneRow } from "@/lib/agenticIdeApi";
+
+vi.mock("@/components/workspace/WorkspaceTerminal", () => ({
+  WorkspaceTerminal: ({ paneKey, workspaceId, active }: { paneKey: string; workspaceId: string; active: boolean }) => (
+    <div data-testid={`shell-${paneKey}`} data-workspace={workspaceId} data-active={String(active)} />
+  ),
+}));
+
+const liveView = vi.hoisted(() => ({ control: vi.fn() }));
+vi.mock("@/components/society/card/useBrowserView", () => ({
+  useBrowserView: () => ({
+    canvas: { current: null }, control: liveView.control, approve: vi.fn(), repaint: vi.fn(),
+    state: {
+      connected: true, ready: true, fullWindow: false, extendedInput: false, previewPaused: false,
+      loginAvailable: false, loginMode: false, loginReady: false, manual: false, running: false,
+      controlPending: false, url: "about:blank", tabs: [], target: "", error: "",
+    },
+  }),
+}));
+
+/** The backend with the assistant's browser available; every call is recorded. */
+function stubLiveBackend(open = false) {
+  const calls: { path: string; body: unknown }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+    calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) : null });
+    const answer = path === "/api/society/agents/jarvis/browser/open"
+      ? { installed: true, mode: "own", open, running: false }
+      : { opened: true };
+    return new Response(JSON.stringify(answer), { status: 200 });
+  }));
+  return calls;
+}
+
+function Harness() {
+  return (
+    <>
+      <IdeSidePanelToggle />
+      <IdeSidePanelFrame>
+        <div data-testid="grid">grid</div>
+      </IdeSidePanelFrame>
+    </>
+  );
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  resetWorkspacePanesPoll();
+  useWorkspacePanesStore.setState({ panes: [], activeId: null, loaded: true, load: async () => {} });
+  useIdeProjectsStore.setState({ activeWorkspaceId: null });
+  useEventStore.setState({ activeSection: "agentic-ide" });
+  useIdeSidePanelStore.setState({ open: false, tabs: ["agents"], active: "agents", terminals: [], maximized: false, inUse: false, layout: null, focusedPane: null });
+  useIdeChatStore.setState({ workspace: { id: "w1", name: "App", path: "/code/app" } });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+/** jsdom has no PointerEvent; without it a fired pointer event loses its coordinates and button. */
+class PointerEventStub extends MouseEvent {
+  pointerId: number;
+  constructor(type: string, init: PointerEventInit = {}) { super(type, init); this.pointerId = init.pointerId ?? 1; }
+}
+
+describe("IdeSidePanel", () => {
+  it("opens independent shell tabs and retains them through switching and collapsing", () => {
+    useIdeSidePanelStore.getState().setOpen(true);
+    render(<Harness />);
+    const add = () => {
+      fireEvent.click(screen.getByTestId("ide-side-panel-add"));
+      fireEvent.click(screen.getByTestId("ide-side-panel-add-terminal"));
+    };
+    add();
+    const first = useIdeSidePanelStore.getState().terminals[0];
+    const firstNode = screen.getByTestId(`shell-${first.id}`);
+    expect(firstNode.dataset.workspace).toBe("w1");
+    add();
+    const second = useIdeSidePanelStore.getState().terminals[1];
+    expect(first.id).not.toBe(second.id);
+    expect(screen.getByRole("tab", { name: "Terminal 1" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Terminal 2" })).toBeTruthy();
+    fireEvent.click(screen.getByTestId("ide-side-panel-tab-agents"));
+    expect(screen.getByTestId(`shell-${first.id}`)).toBe(firstNode);
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(screen.getByTestId(`shell-${first.id}`)).toBe(firstNode);
+    expect(firstNode.dataset.active).toBe("false");
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    fireEvent.click(screen.getByTestId(`ide-side-panel-tab-${first.id}`));
+    expect(firstNode.dataset.active).toBe("true");
+    fireEvent.click(screen.getByTestId(`ide-side-panel-close-${second.id}`));
+    expect(screen.queryByTestId(`shell-${second.id}`)).toBeNull();
+    expect(screen.getByTestId(`shell-${first.id}`)).toBe(firstNode);
+    // Session-only tabs must never respawn shells on a page reload.
+    expect(localStorage.getItem("jarvis.agenticIde.sidePanelTabs.v5")).not.toContain("terminal:");
+  });
+
+  it("keeps terminals pinned to their workspace and offers another shell on every + click", () => {
+    useIdeSidePanelStore.getState().addTerminalTab("w1", "App");
+    render(<Harness />);
+    const first = useIdeSidePanelStore.getState().terminals[0];
+    const node = screen.getByTestId(`shell-${first.id}`);
+    act(() => useIdeChatStore.setState({ workspace: { id: "w2", name: "Other", path: "/code/other" } }));
+    expect(screen.queryByTestId(`ide-side-panel-tab-${first.id}`)).toBeNull();
+    expect(node.dataset.active).toBe("false");
+    fireEvent.click(screen.getByTestId("ide-side-panel-add"));
+    fireEvent.click(screen.getByTestId("ide-side-panel-add-terminal"));
+    expect(useIdeSidePanelStore.getState().terminals[1].workspaceId).toBe("w2");
+    act(() => useIdeChatStore.setState({ workspace: { id: "w1", name: "App", path: "/code/app" } }));
+    fireEvent.click(screen.getByTestId(`ide-side-panel-tab-${first.id}`));
+    expect(screen.getByTestId(`shell-${first.id}`)).toBe(node);
+    expect(node.dataset.active).toBe("true");
+  });
+
+  it("requires a workspace before starting a shell", () => {
+    useIdeSidePanelStore.getState().setOpen(true);
+    useIdeChatStore.setState({ workspace: null });
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-add"));
+    expect((screen.getByTestId("ide-side-panel-add-terminal") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("opens and closes from the caption toggle alone", () => {
+    render(<Harness />);
+    expect(screen.queryByTestId("ide-side-panel")).toBeNull();
+    expect(screen.getByTestId("ide-side-panel-host").style.width).toBe("0px");
+
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(screen.getByTestId("ide-side-panel-toggle").getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByTestId("ide-side-panel")).toBeTruthy();
+    expect(screen.getByTestId("ide-side-panel-tab-agents").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("ide-workspace-agents")).toBeTruthy();
+    expect(screen.getByTestId("ide-side-panel-resizer")).toBeTruthy();
+    expect(localStorage.getItem("jarvis.agenticIde.sidePanelOpen")).toBe("1");
+
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(screen.queryByTestId("ide-side-panel")).toBeNull();
+    expect(localStorage.getItem("jarvis.agenticIde.sidePanelOpen")).toBe("0");
+  });
+
+  it("keeps the grid mounted while the panel opens and closes", () => {
+    render(<Harness />);
+    const grid = screen.getByTestId("grid");
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(screen.getByTestId("grid")).toBe(grid);
+  });
+
+  it("stays open on the launcher when the last tab closes", () => {
+    act(() => useIdeSidePanelStore.getState().setOpen(true));
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-close-agents"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ open: true, tabs: [] });
+    expect(screen.getByTestId("ide-side-panel-launcher").textContent).toContain("Open a surface");
+  });
+
+  it("opens empty on the launcher and adds only the surface picked there", () => {
+    useIdeSidePanelStore.setState({ tabs: [] });
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    const launcher = screen.getByTestId("ide-side-panel-launcher");
+    expect(launcher.textContent).toContain("Browser");
+    expect(launcher.textContent).toContain("Terminal");
+    fireEvent.click(screen.getByTestId("ide-side-panel-launch-files"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ tabs: ["files"], active: "files" });
+    expect(screen.queryByTestId("ide-side-panel-launcher")).toBeNull();
+  });
+
+  it("opens a surface from its letter, but never while the reader types", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: [], active: "agents" }));
+    // A closed menu that stays mounted (hidden) must not mute the letters.
+    render(<><textarea data-testid="composer" /><div role="menu" hidden /><Harness /></>);
+    fireEvent.keyDown(screen.getByTestId("composer"), { key: "g" });
+    expect(useIdeSidePanelStore.getState().tabs).toEqual([]);
+    fireEvent.keyDown(document.body, { key: "g", ctrlKey: true });
+    expect(useIdeSidePanelStore.getState().tabs).toEqual([]);
+    fireEvent.keyDown(document.body, { key: "g" });
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ tabs: ["git"], active: "git" });
+  });
+
+  it("starts a terminal from T and greys it out without a workspace", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: [], active: "agents" }));
+    useIdeChatStore.setState({ workspace: null });
+    render(<Harness />);
+    const row = screen.getByTestId("ide-side-panel-launch-terminal");
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+    expect(row.getAttribute("title")).toBe("Select a workspace to open a terminal.");
+    fireEvent.keyDown(document.body, { key: "t" });
+    expect(useIdeSidePanelStore.getState().terminals).toEqual([]);
+    act(() => useIdeChatStore.setState({ workspace: { id: "w1", name: "App", path: "/code/app" } }));
+    fireEvent.keyDown(document.body, { key: "t" });
+    expect(useIdeSidePanelStore.getState().terminals).toHaveLength(1);
+  });
+
+  it("picks a surface by letter from the open + menu", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    const add = screen.getByTestId("ide-side-panel-add");
+    fireEvent.click(add);
+    expect(screen.getByTestId("ide-side-panel-add-browser").textContent).toContain("B");
+    fireEvent.keyDown(add, { key: "s" });
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ tabs: ["agents", "search"], active: "search" });
+    expect(screen.queryByRole("menu")).toBeNull();
+  });
+
+  it("keeps the browser page loaded while another tab is in front", () => {
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "http://localhost:5173/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser", "agents"], active: "browser" }));
+    render(<Harness />);
+    const frame = screen.getByTestId("ide-browser-frame");
+    expect(frame.getAttribute("src")).toBe("http://localhost:5173/");
+    expect(frame.getAttribute("sandbox")).not.toContain("allow-top-navigation");
+    fireEvent.click(screen.getByTestId("ide-side-panel-tab-agents"));
+    expect(screen.getByTestId("ide-browser-frame")).toBe(frame);
+    fireEvent.change(screen.getByTestId("ide-browser-address"), { target: { value: "8080" } });
+    fireEvent.submit(screen.getByTestId("ide-browser-address").closest("form")!);
+    expect(screen.getByTestId("ide-browser-frame").getAttribute("src")).toBe("http://localhost:8080/");
+    expect(localStorage.getItem("jarvis.agenticIde.browserUrl.v1")).toBe("http://localhost:8080/");
+  });
+
+  it("says a public site refuses the frame instead of showing a white page", async () => {
+    const calls: { path: string; body: unknown }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+      calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) : null });
+      const answer = path === "/api/ide-browser/frame-check"
+        ? { ok: true, frameable: false, reason: "refused" }
+        : { opened: true };
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }));
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "https://github.com/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect(screen.queryByTestId("ide-browser-frame")).toBeNull();
+    const blocked = await screen.findByTestId("ide-browser-blocked");
+    expect(blocked.getAttribute("data-reason")).toBe("refused");
+    expect(blocked.textContent).toContain("github.com cannot be shown here");
+    fireEvent.click(screen.getByTestId("ide-browser-blocked-open"));
+    await act(async () => {});
+    expect(calls).toContainEqual({ path: "/api/settings/open-external", body: { url: "https://github.com/" } });
+  });
+
+  it("shows a public page that allows the frame", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, frameable: true, reason: "" }), { status: 200 })));
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "https://example.com/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect(screen.getByTestId("ide-browser-checking")).toBeTruthy();
+    expect((await screen.findByTestId("ide-browser-frame")).getAttribute("src")).toBe("https://example.com/");
+  });
+
+  it("says an address without an answer does not answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ ok: true, frameable: false, reason: "unreachable" }), { status: 200 })));
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "https://staging.example.test/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    const blocked = await screen.findByTestId("ide-browser-blocked");
+    expect(blocked.getAttribute("data-reason")).toBe("unreachable");
+    expect(blocked.textContent).toContain("staging.example.test did not answer");
+  });
+
+  it("opens a typed word as a search in the person's browser and keeps the page", async () => {
+    const calls: { path: string; body: unknown }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (path: string, init?: RequestInit) => {
+      calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) : null });
+      return new Response(JSON.stringify({ opened: true }), { status: 200 });
+    }));
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "http://localhost:5173/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    const frame = screen.getByTestId("ide-browser-frame");
+    fireEvent.change(screen.getByTestId("ide-browser-address"), { target: { value: "github" } });
+    fireEvent.submit(screen.getByTestId("ide-browser-address").closest("form")!);
+    await act(async () => {});
+    expect(calls).toContainEqual({
+      path: "/api/settings/open-external", body: { url: "https://www.google.com/search?q=github" },
+    });
+    expect(screen.getByTestId("ide-browser-searched").textContent).toContain("“github”");
+    expect(screen.getByTestId("ide-browser-frame")).toBe(frame);
+    expect(localStorage.getItem("jarvis.agenticIde.browserUrl.v1")).toBe("http://localhost:5173/");
+    fireEvent.change(screen.getByTestId("ide-browser-address"), { target: { value: "github login" } });
+    fireEvent.submit(screen.getByTestId("ide-browser-address").closest("form")!);
+    await act(async () => {});
+    expect(calls).toContainEqual({
+      path: "/api/settings/open-external", body: { url: "https://www.google.com/search?q=github%20login" },
+    });
+  });
+
+  it("shows a public site live in the assistant's browser instead of refusing it", async () => {
+    liveView.control.mockReset();
+    const calls = stubLiveBackend();
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "https://github.com/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect(await screen.findByTestId("ide-browser-live")).toBeTruthy();
+    expect(screen.queryByTestId("ide-browser-frame")).toBeNull();
+    expect(screen.queryByTestId("ide-browser-blocked")).toBeNull();
+    expect(calls.some((call) => call.path === "/api/ide-browser/frame-check")).toBe(false);
+    // The restored address opens on the blank browser: control first.
+    expect(liveView.control).toHaveBeenCalledWith("takeover", { enabled: true });
+  });
+
+  it("opens a search live and keeps a local address in the frame", async () => {
+    const calls = stubLiveBackend();
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "http://localhost:5173/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect(screen.getByTestId("ide-browser-frame").getAttribute("src")).toBe("http://localhost:5173/");
+    await act(async () => {});
+    fireEvent.change(screen.getByTestId("ide-browser-address"), { target: { value: "github login" } });
+    fireEvent.submit(screen.getByTestId("ide-browser-address").closest("form")!);
+    expect(await screen.findByTestId("ide-browser-live")).toBeTruthy();
+    expect(screen.queryByTestId("ide-browser-searched")).toBeNull();
+    expect(calls.some((call) => call.path === "/api/settings/open-external")).toBe(false);
+    expect(localStorage.getItem("jarvis.agenticIde.browserUrl.v1")).toBe("https://www.google.com/search?q=github%20login");
+  });
+
+  it("shows the assistant's browser while it is open and no address is set", async () => {
+    stubLiveBackend(true);
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect(await screen.findByTestId("ide-browser-live")).toBeTruthy();
+  });
+
+  it("offers the word again instead of loading an address the old bar made from it", () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+    localStorage.setItem("jarvis.agenticIde.browserUrl.v1", "https://github/");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["browser"], active: "browser" }));
+    render(<Harness />);
+    expect((screen.getByTestId("ide-browser-address") as HTMLInputElement).value).toBe("github");
+    expect(screen.queryByTestId("ide-browser-blocked")).toBeNull();
+    expect(screen.queryByTestId("ide-browser-frame")).toBeNull();
+    expect(fetch).not.toHaveBeenCalledWith("/api/ide-browser/frame-check", expect.anything());
+  });
+
+  it("keeps + usable with every tab listed, open ones ticked, and focuses an open one", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents", "changes", "files"], active: "agents" }));
+    render(<Harness />);
+    const add = screen.getByTestId("ide-side-panel-add") as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
+    fireEvent.click(add);
+    expect(screen.getByTestId("ide-side-panel-add-changes").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByTestId("ide-side-panel-add-changes"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ active: "changes", tabs: ["agents", "changes", "files"] });
+  });
+
+  it("starts with Agents alone and adds Changes and Folder from +", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-add"));
+    expect(screen.getByTestId("ide-side-panel-add-files").getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(screen.getByTestId("ide-side-panel-add-files"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ active: "files", tabs: ["agents", "files"] });
+    expect(screen.getByTestId("ide-side-panel-tab-files")).toBeTruthy();
+  });
+
+  it("offers a closed tab again through +", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: [], active: "agents" }));
+    render(<Harness />);
+    const add = screen.getByTestId("ide-side-panel-add") as HTMLButtonElement;
+    expect(add.disabled).toBe(false);
+    fireEvent.click(add);
+    fireEvent.click(screen.getByTestId("ide-side-panel-add-agents"));
+    expect(useIdeSidePanelStore.getState().tabs).toEqual(["agents"]);
+    expect(screen.getByTestId("ide-side-panel-tab-agents")).toBeTruthy();
+  });
+
+  it("leaves nothing on the right edge while closed and reopens at the tab in front", () => {
+    useIdeSidePanelStore.setState({ tabs: ["agents", "files"], active: "files" });
+    render(<Harness />);
+    expect(screen.queryByTestId("ide-side-panel-rail")).toBeNull();
+    expect(screen.queryByRole("navigation")).toBeNull();
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ open: true, active: "files" });
+  });
+
+  it("puts a dot on the shut panel's toggle while an agent of the workspace waits", () => {
+    const row = (name: string, workspaceId: string, activity: WorkspacePaneRow["activity"]) => ({
+      workspace_id: workspaceId, workspace_name: workspaceId, folder: "/code/app", workspace_active: workspaceId === "w1",
+      key: name, history_id: `${name}@${workspaceId}`, name, agent: "claude", display_name: "Claude Code",
+      accepts_prompts: true, status: "live", exit_code: null, activity, activity_since: 0, worked: true,
+      started_at: 1, last_output_at: 2, last_prompt: "", last_prompt_at: null, recap: "", has_resume: false,
+      readable: true, account: null, account_label: null, archived: false,
+    }) as WorkspacePaneRow;
+    useIdeProjectsStore.setState({ activeWorkspaceId: "w1" });
+    useWorkspacePanesStore.setState({ panes: [row("T1", "w1", "working"), row("T1", "w2", "asking")] });
+    render(<Harness />);
+    expect(screen.queryByTestId("ide-side-panel-waiting")).toBeNull();
+    act(() => useWorkspacePanesStore.setState({ panes: [row("T1", "w1", "asking"), row("T2", "w1", "asking")] }));
+    expect(screen.getByTestId("ide-side-panel-waiting")).toBeTruthy();
+    expect(screen.getByTestId("ide-side-panel-toggle").getAttribute("aria-label")).toBe("Open side panel (2 waiting for you)");
+    // The open panel lists the agents itself.
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(screen.queryByTestId("ide-side-panel-waiting")).toBeNull();
+  });
+
+  it("keeps a stored width wider than the old 720px cap", () => {
+    localStorage.setItem("jarvis.agenticIde.sidePanelWidth.v1", "1100");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    expect(screen.getByTestId("ide-side-panel-host").style.width).toBe("1100px");
+  });
+
+  it("maximizes over the whole view without remounting the tab or resizing the grid", async () => {
+    localStorage.setItem("jarvis.agenticIde.sidePanelWidth.v1", "600");
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    const stage = await screen.findByTestId("ide-side-panel-column-agents");
+    const host = screen.getByTestId("ide-side-panel-host");
+
+    fireEvent.click(screen.getByTestId("ide-side-panel-maximize"));
+    expect(useIdeSidePanelStore.getState().maximized).toBe(true);
+    expect(screen.getByTestId("ide-side-panel-body").className).toContain("absolute inset-0");
+    expect(screen.getByTestId("ide-side-panel-grid").className).toContain("invisible");
+    expect(screen.getByTestId("grid")).toBeTruthy();
+    expect(host.className).not.toContain("relative");
+    expect(host.style.width).toBe("600px");
+    expect(screen.queryByTestId("ide-side-panel-resizer")).toBeNull();
+    expect(screen.getByTestId("ide-side-panel-column-agents")).toBe(stage);
+
+    fireEvent.click(screen.getByTestId("ide-side-panel-maximize"));
+    expect(screen.getByTestId("ide-side-panel-body").className).toBe("relative h-full");
+    expect(screen.getByTestId("ide-side-panel-grid").className).not.toContain("invisible");
+    expect(screen.getByTestId("ide-side-panel-column-agents")).toBe(stage);
+  });
+
+  it("closes when its grip is pushed against the right edge", async () => {
+    vi.stubGlobal("PointerEvent", PointerEventStub);
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    fireEvent.pointerDown(screen.getByTestId("ide-side-panel-resizer"), { clientX: 1000, clientY: 10 });
+    await act(async () => {
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 1900, clientY: 10 }));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    });
+    expect(screen.getByTestId("ide-side-panel-body").dataset.closing).toBe("true");
+    act(() => { window.dispatchEvent(new MouseEvent("pointerup")); });
+    expect(useIdeSidePanelStore.getState().open).toBe(false);
+    expect(localStorage.getItem("jarvis.agenticIde.sidePanelOpen")).toBe("0");
+  });
+
+  it("drops the full view when the panel closes", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-maximize"));
+    fireEvent.click(screen.getByTestId("ide-side-panel-toggle"));
+    expect(useIdeSidePanelStore.getState().maximized).toBe(false);
+  });
+
+  it("frames the panel in blue while the reader works in it", () => {
+    useIdeSidePanelStore.setState({ open: true });
+    const { rerender } = render(<IdeSidePanelFrame markInUse><div data-testid="grid">grid</div></IdeSidePanelFrame>);
+    expect(screen.queryByTestId("ide-side-panel-in-use")).toBeNull();
+    fireEvent.pointerDown(screen.getByTestId("ide-side-panel-tab-agents"));
+    expect(useIdeSidePanelStore.getState().inUse).toBe(true);
+    const ring = screen.getByTestId("ide-side-panel-in-use");
+    expect(ring.className).toContain("ring-accent");
+    expect(ring.className).toContain("pointer-events-none");
+    // A press on the grid is the grid's business (the pane hands the frame back).
+    fireEvent.pointerDown(screen.getByTestId("grid"));
+    expect(useIdeSidePanelStore.getState().inUse).toBe(true);
+    act(() => useIdeSidePanelStore.getState().setInUse(false));
+    expect(screen.queryByTestId("ide-side-panel-in-use")).toBeNull();
+    // The classic pane style draws no blue frames at all.
+    act(() => useIdeSidePanelStore.getState().setInUse(true));
+    rerender(<IdeSidePanelFrame><div data-testid="grid">grid</div></IdeSidePanelFrame>);
+    expect(screen.queryByTestId("ide-side-panel-in-use")).toBeNull();
+    // Closing the panel ends its turn as the area in use.
+    act(() => useIdeSidePanelStore.getState().setOpen(false));
+    expect(useIdeSidePanelStore.getState().inUse).toBe(false);
+  });
+  const rect = (left: number, top: number, width: number, height: number) =>
+    ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON: () => ({}) });
+  /** Content area 800x600 under a 44px strip, so drops can be aimed in jsdom. */
+  const aim = () => {
+    vi.stubGlobal("PointerEvent", PointerEventStub);
+    screen.getByTestId("ide-side-panel-content").getBoundingClientRect = () => rect(0, 50, 800, 600);
+    screen.getByRole("tablist").getBoundingClientRect = () => rect(0, 0, 700, 44);
+  };
+  const drag = (from: HTMLElement, to: { x: number; y: number }) => {
+    const box = { clientX: 20, clientY: 20 };
+    fireEvent.pointerDown(from, { button: 0, ...box });
+    fireEvent.pointerMove(window, { clientX: to.x + 3, clientY: to.y + 3 });
+    fireEvent.pointerMove(window, { clientX: to.x, clientY: to.y });
+    fireEvent.pointerUp(window, { clientX: to.x, clientY: to.y });
+    fireEvent.click(from);
+  };
+  const paneTabs = () => [...document.querySelectorAll<HTMLElement>("[data-testid^='ide-side-panel-pane-header-']")]
+    .map((node) => node.dataset.testid!.replace("ide-side-panel-pane-header-", ""));
+  const twoPanes = () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents", "files", "changes"], active: "agents" }));
+    act(() => useIdeSidePanelStore.getState().dropTab("files", null, "right"));
+  };
+
+  it("shows two tabs side by side from the split button and joins them back", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents", "files"], active: "agents" }));
+    render(<Harness />);
+    fireEvent.click(screen.getByTestId("ide-side-panel-split"));
+    expect(screen.getByTestId("ide-side-panel-content").dataset.panes).toBe("2");
+    expect(paneTabs()).toEqual(["agents", "files"]);
+    expect(useIdeSidePanelStore.getState().active).toBe("files");
+    expect(screen.getByTestId("ide-side-panel-tab-agents").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("ide-side-panel-tab-files").getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByTestId("ide-side-panel-split"));
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ layout: null, active: "files" });
+    expect(paneTabs()).toEqual([]);
+  });
+
+  it("disables the split button while only one tab is open", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents"], active: "agents" }));
+    render(<Harness />);
+    expect((screen.getByTestId("ide-side-panel-split") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("stacks a tab dragged onto the bottom edge under the one in front", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents", "files"], active: "agents" }));
+    render(<Harness />);
+    aim();
+    const tab = screen.getByTestId("ide-side-panel-tab-files");
+    fireEvent.pointerDown(tab, { button: 0, clientX: 300, clientY: 20 });
+    fireEvent.pointerMove(window, { clientX: 302, clientY: 21 });
+    expect(screen.queryByTestId("ide-side-panel-drop-zones")).toBeNull();
+    fireEvent.pointerMove(window, { clientX: 400, clientY: 630 });
+    expect(screen.getByTestId("ide-side-panel-drop-zones").hasAttribute("data-hides-native-browser")).toBe(true);
+    expect(screen.getByTestId("ide-side-panel-drop-bottom")).toBeTruthy();
+    fireEvent.pointerUp(window, { clientX: 400, clientY: 630 });
+    fireEvent.click(tab);
+    const { layout } = useIdeSidePanelStore.getState();
+    expect(layout).toMatchObject({ kind: "split", direction: "column" });
+    expect(paneTabs()).toEqual(["agents", "files"]);
+    expect(useIdeSidePanelStore.getState().active).toBe("files");
+  });
+
+  it("adds a third pane and swaps two panes by dragging a title bar onto the other", () => {
+    render(<Harness />);
+    twoPanes();
+    aim();
+    // Changes onto the right edge of Folder (the right half of the area).
+    drag(screen.getByTestId("ide-side-panel-tab-changes"), { x: 795, y: 350 });
+    expect(paneTabs()).toEqual(["agents", "files", "changes"]);
+    expect(screen.getByTestId("ide-side-panel-content").dataset.panes).toBe("3");
+    // Agents' title bar onto the middle of Changes (the last third): they trade places.
+    const grip = screen.getByTestId("ide-side-panel-pane-header-agents").querySelector<HTMLElement>("[role='button']")!;
+    drag(grip, { x: 667, y: 350 });
+    expect(paneTabs()).toEqual(["changes", "files", "agents"]);
+  });
+
+  it("takes a pane out of the split by dragging it onto the strip or out of the panel", () => {
+    render(<Harness />);
+    twoPanes();
+    aim();
+    const grip = () => screen.getByTestId("ide-side-panel-pane-header-files").querySelector<HTMLElement>("[role='button']")!;
+    fireEvent.pointerDown(grip(), { button: 0, clientX: 500, clientY: 60 });
+    fireEvent.pointerMove(window, { clientX: 300, clientY: 20 });
+    expect(screen.getByRole("tablist").dataset.detachTarget).toBe("true");
+    fireEvent.pointerUp(window, { clientX: 300, clientY: 20 });
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ layout: null, active: "agents" });
+    expect(useIdeSidePanelStore.getState().tabs).toContain("files");
+    // Split again, then drag the pane away from the panel altogether.
+    act(() => useIdeSidePanelStore.getState().dropTab("files", null, "right"));
+    drag(grip(), { x: 1200, y: 300 });
+    expect(useIdeSidePanelStore.getState().layout).toBeNull();
+  });
+
+  it("cancels a tab drag on Escape and ignores a release outside for a tab not in a split", () => {
+    act(() => useIdeSidePanelStore.setState({ open: true, tabs: ["agents", "files"], active: "agents" }));
+    render(<Harness />);
+    aim();
+    fireEvent.pointerDown(screen.getByTestId("ide-side-panel-tab-files"), { button: 0, clientX: 300, clientY: 20 });
+    fireEvent.pointerMove(window, { clientX: 600, clientY: 300 });
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("ide-side-panel-drop-zones")).toBeNull();
+    drag(screen.getByTestId("ide-side-panel-tab-files"), { x: 1200, y: 300 });
+    expect(useIdeSidePanelStore.getState()).toMatchObject({ layout: null, active: "agents" });
+  });
+
+  it("detaches from the title bar, fills the focused pane on a tab click and closes up when a pane's tab closes", () => {
+    render(<Harness />);
+    twoPanes();
+    const store = useIdeSidePanelStore.getState;
+    expect(store().active).toBe("files");
+    act(() => store().select("changes"));
+    expect(paneTabs()).toEqual(["agents", "changes"]);
+    fireEvent.click(screen.getByTestId("ide-side-panel-pane-detach-changes"));
+    expect(store()).toMatchObject({ layout: null, active: "agents" });
+    act(() => store().dropTab("files", null, "bottom"));
+    act(() => store().closeTab("files"));
+    expect(store()).toMatchObject({ layout: null, active: "agents", tabs: ["agents", "changes"] });
+    expect(JSON.parse(localStorage.getItem("jarvis.agenticIde.sidePanelLayout.v1")!)).toMatchObject({ layout: null });
+  });
+});

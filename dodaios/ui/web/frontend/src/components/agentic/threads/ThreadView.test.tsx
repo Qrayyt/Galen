@@ -1,0 +1,601 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentChatCatalog, AgentChatSession } from "@/lib/agentChatApi";
+import type { IdeProject } from "@/lib/agenticIdeApi";
+import { useIdeProjectsStore } from "@/store/ideProjects";
+import { useIdeThreadsStore } from "@/store/ideThreads";
+import { useThreadSubagentsStore } from "@/store/threadSubagents";
+
+const api = vi.hoisted(() => ({
+  fetchAgentChatCatalog: vi.fn(),
+  fetchAgentConnections: vi.fn(),
+  fetchProviderHealth: vi.fn(),
+  fetchAgentChatSessions: vi.fn(),
+  createAgentChatSession: vi.fn(),
+  sendAgentChatMessage: vi.fn(),
+  patchAgentChatSession: vi.fn(),
+  searchAgentChatSessions: vi.fn(),
+  sendQueuedNow: vi.fn(),
+  editQueuedMessage: vi.fn(),
+  fetchAgentChatQueue: vi.fn(),
+  fetchTypeahead: vi.fn(),
+  dismissAside: vi.fn(),
+}));
+vi.mock("@/lib/agentChatApi", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/agentChatApi")>()), ...api }));
+const teams = vi.hoisted(() => ({ rows: [] as unknown[] }));
+vi.mock("@/lib/teamThreadsApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/teamThreadsApi")>()),
+  useTeamThreads: () => ({ data: teams.rows }),
+}));
+vi.mock("@/lib/gitApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/gitApi")>()),
+  inspectGit: vi.fn().mockResolvedValue({ is_repo: false, branches: [], changes: [], remotes: [] }),
+  prepareGit: vi.fn(),
+}));
+vi.mock("@/lib/chatLibraryApi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chatLibraryApi")>()),
+  fetchProjectLaunchers: vi.fn().mockResolvedValue({ file_manager: true, editors: [{ id: "code", label: "VS Code" }], remote_url: null, remote_label: null }),
+}));
+
+import { ThreadView } from "./ThreadView";
+import { ThreadTree } from "./ThreadTree";
+import { useThreadChatStore } from "./threadModel";
+
+class FakeSocket {
+  static instances: FakeSocket[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((msg: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor(readonly url: string) { FakeSocket.instances.push(this); }
+  close() { /* the test drives frames by hand */ }
+}
+
+const CATALOG: AgentChatCatalog = {
+  default_cwd: "/home",
+  shell: "bash",
+  selection: null,
+  providers: [{
+    id: "claude-api", label: "Anthropic Claude", family: "anthropic", runner: "claude-cli", agent: "claude",
+    models_source: "curated", curated_models: [{ id: "claude-opus-5-5", label: "Opus 5.5" }], default_model: "",
+    keyless: false, native_resume: true, effort_levels: ["low", "high"], default_effort: "high",
+    permission_modes: [{ id: "default", label: "Ask first", description: "" }], default_permission_mode: "default",
+    cli_installed: true, typeahead: [],
+  }],
+} as AgentChatCatalog;
+
+const project = { id: "p1", path: "/repo", name: "App", color: null, pinned: false, archived: false, scratch: false,
+  created_at: 0, last_opened_at: 0, exists: true, chats: 0, workspaces: [] } as IdeProject;
+
+function sessionRow(extra: Partial<AgentChatSession> = {}): AgentChatSession {
+  return { session_id: "s1", title: "fix the login test", provider: "claude-api", model: "", effort: "high", cwd: "/repo",
+    permission_mode: "default", surface: "agent", vendor_session: null, created_ms: 1, updated_ms: 2, message_count: 1, preview: "", ...extra };
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  vi.stubGlobal("WebSocket", FakeSocket);
+  // The thread search's list (cmdk) measures itself; jsdom has no ResizeObserver.
+  vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });
+  Element.prototype.scrollIntoView ??= () => {};
+  FakeSocket.instances = [];
+  api.fetchAgentChatCatalog.mockReset().mockResolvedValue(CATALOG);
+  api.fetchAgentConnections.mockReset().mockResolvedValue([]);
+  api.fetchProviderHealth.mockReset().mockResolvedValue([]);
+  api.fetchAgentChatSessions.mockReset().mockResolvedValue([]);
+  api.createAgentChatSession.mockReset().mockResolvedValue(sessionRow());
+  api.sendAgentChatMessage.mockReset().mockResolvedValue({ turn_id: "t1" });
+  api.patchAgentChatSession.mockReset().mockResolvedValue(sessionRow());
+  api.searchAgentChatSessions.mockReset().mockResolvedValue([]);
+  api.dismissAside.mockReset().mockResolvedValue(undefined);
+  api.fetchTypeahead.mockReset().mockResolvedValue({ trigger: "/", items: [], truncated: false });
+  useIdeProjectsStore.setState({ projects: [project], activeWorkspaceId: null });
+  useIdeThreadsStore.setState({ layout: "threads", selection: { projectId: "p1", sessionId: null }, projectOf: {}, seen: {}, archived: {}, focusNonce: 0 });
+  useThreadChatStore.getState().newChat();
+  useThreadSubagentsStore.setState({ sessionId: null, rows: [], open: null });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe("ThreadView", () => {
+  it("starts a new thread in the project's folder with its first message", async () => {
+    render(<ThreadView onScreen />);
+    expect(screen.getByText(/What should we build in/)).toBeTruthy();
+    expect(screen.getByTestId("thread-project-picker").textContent).toContain("App");
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    await waitFor(() => expect(useThreadChatStore.getState().draft.cwd).toBe("/repo"));
+
+    const box = screen.getByTestId("thread-composer-input");
+    fireEvent.change(box, { target: { value: "fix the login test" } });
+    await act(async () => { fireEvent.keyDown(box, { key: "Enter" }); });
+
+    await waitFor(() => expect(api.sendAgentChatMessage).toHaveBeenCalled());
+    expect(api.createAgentChatSession).toHaveBeenCalledWith(expect.objectContaining({ provider: "claude-api", cwd: "/repo", surface: "agent" }));
+    expect(api.sendAgentChatMessage.mock.calls[0][1]).toBe("fix the login test");
+    await waitFor(() => expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: "s1" }));
+    expect(useIdeThreadsStore.getState().projectOf).toEqual({ s1: "p1" });
+  });
+
+  it("starts a new thread on the agent and model the person picked last", async () => {
+    localStorage.setItem("jarvis.ide.threadSeat.v1", JSON.stringify({ provider: "claude-api", model: "claude-opus-5-5", effort: "low", permissionMode: "default" }));
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft).toEqual(expect.objectContaining({ provider: "claude-api", model: "claude-opus-5-5", effort: "low" })));
+    await waitFor(() => expect(screen.getByTestId("thread-model-picker").textContent).toContain("Opus 5.5"));
+  });
+
+  it("files a thread started in a draft under its project when the person moved on meanwhile", async () => {
+    let finishCreate: (row: AgentChatSession) => void = () => {};
+    api.createAgentChatSession.mockReturnValue(new Promise<AgentChatSession>((resolve) => { finishCreate = resolve; }));
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.cwd).toBe("/repo"));
+    const box = screen.getByTestId("thread-composer-input");
+    fireEvent.change(box, { target: { value: "start something" } });
+    await act(async () => { fireEvent.keyDown(box, { key: "Enter" }); });
+    await waitFor(() => expect(api.createAgentChatSession).toHaveBeenCalled());
+
+    // The person opens another thread before the first one exists.
+    act(() => useIdeThreadsStore.getState().openThread("other", "p1"));
+    await act(async () => { finishCreate(sessionRow({ session_id: "s-new" })); });
+
+    await waitFor(() => expect(useIdeThreadsStore.getState().projectOf).toEqual({ "s-new": "p1" }));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: "other" });
+    await waitFor(() => expect(useThreadChatStore.getState().activeSessionId).toBe("other"));
+  });
+
+  it("draws the turn: the message, the work as one line, the answer and how long it took", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "fix the login test" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+      store.ingest({ seq: 3, ts_ms: 1100, kind: "tool_call", payload: { turn_id: "t1", call_id: "c1", name: "Bash", input: { command: "npm test" } } });
+      store.ingest({ seq: 4, ts_ms: 1200, kind: "tool_result", payload: { turn_id: "t1", call_id: "c1", output: "ok", is_error: false, duration_ms: 100 } });
+      store.ingest({ seq: 5, ts_ms: 1300, kind: "tool_call", payload: { turn_id: "t1", call_id: "c2", name: "Read", input: { file_path: "/repo/src/login.ts" } } });
+      store.ingest({ seq: 6, ts_ms: 1400, kind: "tool_result", payload: { turn_id: "t1", call_id: "c2", output: "code", is_error: false, duration_ms: 50 } });
+      store.ingest({ seq: 7, ts_ms: 1500, kind: "assistant_text", payload: { turn_id: "t1", message_id: "m1", text: "The test passes now." } });
+      store.ingest({ seq: 8, ts_ms: 4000, kind: "turn_finished", payload: { turn_id: "t1", status: "done", duration_ms: 3000, usage: null, error: null } });
+    });
+    expect(screen.getByTestId("thread-user-message").textContent).toContain("fix the login test");
+    expect(screen.getByText("The test passes now.")).toBeTruthy();
+    expect(screen.getByTestId("thread-turn").getAttribute("data-status")).toBe("done");
+    expect(screen.getByText(/Worked for/)).toBeTruthy();
+    // A finished turn folds every step behind one line; the answer stays in view.
+    expect(screen.getByTestId("thread-worked-for").textContent).toContain("Worked for 3.0s");
+    expect(screen.queryByTestId("thread-worked-steps")).toBeNull();
+    expect(screen.queryByText("npm test")).toBeNull();
+    fireEvent.click(screen.getByTestId("thread-worked-for"));
+    expect(screen.getByTestId("thread-worked-steps")).toBeTruthy();
+  });
+
+  it("draws Claude Code's magic words in the rainbow, in the box and in the sent message", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const box = screen.getByTestId("thread-composer-input");
+    fireEvent.change(box, { target: { value: "fix the login test" } });
+    expect(screen.queryByTestId("thread-composer-magic")).toBeNull();
+    fireEvent.change(box, { target: { value: "ultrathink: fix the login test" } });
+    const backdrop = screen.getByTestId("thread-composer-magic");
+    expect(backdrop.textContent).toContain("ultrathink: fix the login test");
+    expect(within(backdrop).getByTestId("magic-word").textContent).toBe("ultrathink");
+    // The textarea's own text turns see-through, so the backdrop's colours show.
+    expect(box.className).toContain("text-transparent");
+
+    act(() => {
+      useThreadChatStore.getState().ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "ultracode the migration" } });
+    });
+    await waitFor(() => expect(within(screen.getByTestId("thread-user-message")).getByTestId("magic-word").textContent).toBe("ultracode"));
+  });
+
+  it("draws a slash command the agent knows in blue, in the box and in the sent message", async () => {
+    api.fetchAgentChatCatalog.mockResolvedValue({ ...CATALOG, providers: [{ ...CATALOG.providers[0], typeahead: ["/", "@"] }] });
+    api.fetchTypeahead.mockResolvedValue({ trigger: "/", truncated: false,
+      items: [{ value: "goal", label: "goal", hint: "Set a goal", kind: "command", group: "cli" }] });
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const box = screen.getByTestId("thread-composer-input");
+    // A name the agent does not know stays plain: that is how a typo shows.
+    fireEvent.change(box, { target: { value: "/gaol ship the release" } });
+    await waitFor(() => expect(api.fetchTypeahead).toHaveBeenCalled());
+    expect(screen.queryByTestId("thread-composer-magic")).toBeNull();
+    fireEvent.change(box, { target: { value: "/goal ship the release" } });
+    const backdrop = await screen.findByTestId("thread-composer-magic");
+    // Only the command is blue; the words after it keep the normal colour.
+    expect(within(backdrop).getByTestId("command-word").textContent).toBe("/goal");
+    expect(within(backdrop).getByTestId("command-word").className).toContain("text-info");
+    expect(box.className).toContain("text-transparent");
+
+    act(() => {
+      useThreadChatStore.getState().ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "/goal ship the release" } });
+    });
+    await waitFor(() => expect(within(screen.getByTestId("thread-user-message")).getByTestId("command-word").textContent).toBe("/goal"));
+  });
+
+  it("asks for the command list again when the first read failed", async () => {
+    api.fetchAgentChatCatalog.mockResolvedValue({ ...CATALOG, providers: [{ ...CATALOG.providers[0], typeahead: ["/", "@"] }] });
+    api.fetchTypeahead.mockRejectedValueOnce(new Error("cli starting")).mockResolvedValue({ trigger: "/", truncated: false,
+      items: [{ value: "goal", label: "goal", hint: "Set a goal", kind: "command", group: "cli" }] });
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const box = screen.getByTestId("thread-composer-input");
+    // Pasted whole: the caret never sits in the command, so no list opens.
+    fireEvent.change(box, { target: { value: "/goal ship the release" } });
+    await waitFor(() => expect(api.fetchTypeahead).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("thread-composer-magic")).toBeNull();
+    fireEvent.change(box, { target: { value: "/goal ship the release now" } });
+    const backdrop = await screen.findByTestId("thread-composer-magic");
+    expect(within(backdrop).getByTestId("command-word").textContent).toBe("/goal");
+  });
+
+  it("shows a side question (/btw) as one card that its answer fills, and closes it", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    act(() => {
+      useThreadChatStore.getState().ingest({ seq: 1, ts_ms: Date.now(), kind: "notice",
+        payload: { kind: "aside_asked", aside_id: "a1", text: "why two parsers?", question: "why two parsers?" } });
+    });
+    const card = await screen.findByTestId("thread-aside");
+    expect(within(card).getByTestId("command-word").textContent).toBe("/btw");
+    expect(card.textContent).toContain("why two parsers?");
+    expect(within(card).getByTestId("thread-aside-answer").textContent).toContain("Answering beside the work");
+    // Never a message of the conversation.
+    expect(screen.queryByTestId("thread-user-message")).toBeNull();
+
+    act(() => {
+      useThreadChatStore.getState().ingest({ seq: 2, ts_ms: Date.now(), kind: "notice",
+        payload: { kind: "aside_answered", aside_id: "a1", status: "done", answer: "One reads tabs, one spaces." } });
+    });
+    await waitFor(() => expect(within(screen.getByTestId("thread-aside")).getByTestId("thread-aside-answer").textContent)
+      .toContain("One reads tabs, one spaces."));
+    expect(screen.getAllByTestId("thread-aside")).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("thread-aside-close"));
+    expect(api.dismissAside).toHaveBeenCalledWith("s1", "a1");
+    act(() => {
+      useThreadChatStore.getState().ingest({ seq: 3, ts_ms: Date.now(), kind: "notice", payload: { kind: "aside_dismissed", aside_id: "a1" } });
+    });
+    await waitFor(() => expect(screen.queryByTestId("thread-aside")).toBeNull());
+  });
+
+  it("says a message reaches a Claude turn that only waits for its background tasks", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "watch the build" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+      store.ingest({ seq: 3, ts_ms: 1500, kind: "assistant_text", payload: { turn_id: "t1", message_id: "m1", text: "The build runs." } });
+      store.ingest({ seq: 4, ts_ms: 1600, kind: "background_wait", payload: { turn_id: "t1", tasks: ["Watch the build"] } });
+    });
+    const box = screen.getByTestId("thread-composer-input");
+    await waitFor(() => expect(box.getAttribute("placeholder")).toBe("Queue a follow-up for when the agent is done"));
+    fireEvent.change(box, { target: { value: "also run the linter" } });
+    await act(async () => { fireEvent.keyDown(box, { key: "Enter" }); });
+    await waitFor(() => expect(api.sendAgentChatMessage.mock.calls[0]?.[1]).toBe("also run the linter"));
+
+    // The server took it into the running turn, picture included: it shows there as the person's own line.
+    act(() => {
+      store.ingest({ seq: 5, ts_ms: 1700, kind: "user_message", payload: {
+        turn_id: "t1", steered: true, typed: "also run the linter", text: "also run the linter\n\n[composed attachment text]",
+        attachments: [{ name: "shot.png", kind: "image", described_by: "none", url: "/files/shot.png" }],
+      } });
+    });
+    const steered = screen.getByTestId("thread-steer-message");
+    expect(steered.textContent).toBe("also run the linter");
+    expect(within(steered).getByAltText("shot.png").getAttribute("src")).toBe("/files/shot.png");
+  });
+
+  it("queues a message typed while the agent works, with no pick to make", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    api.sendAgentChatMessage.mockResolvedValue({ turn_id: "", queued: true, queue_id: "q1" });
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "refactor the parser" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+    });
+    const box = screen.getByTestId("thread-composer-input");
+    await waitFor(() => expect(box.getAttribute("placeholder")).toBe("Queue a follow-up for when the agent is done"));
+    expect(screen.queryByRole("radiogroup")).toBeNull();
+    fireEvent.change(box, { target: { value: "then update the docs" } });
+    await act(async () => { fireEvent.keyDown(box, { key: "Enter" }); });
+    await waitFor(() => expect(api.sendAgentChatMessage).toHaveBeenCalled());
+    expect(api.sendAgentChatMessage.mock.calls[0]?.[1]).toBe("then update the docs");
+    expect(api.sendAgentChatMessage.mock.calls[0]?.[4]).toBe("after");
+  });
+
+  it("opens a waiting message to read and rewrite it before it starts", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    api.fetchAgentChatQueue.mockResolvedValue({ paused: false, items: [] });
+    api.editQueuedMessage.mockResolvedValue(true);
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "refactor the parser" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+      store.ingest({ seq: 3, ts_ms: 1000, kind: "notice", payload: { kind: "message_queued", queue_id: "q1", text: "then update the docs" } });
+    });
+    expect((await screen.findByTestId("thread-queue")).textContent).toContain("1 queued");
+    fireEvent.click(screen.getByTestId("thread-queue-open"));
+    const editor = screen.getByTestId("thread-queue-edit") as HTMLTextAreaElement;
+    expect(editor.value).toBe("then update the docs");
+    fireEvent.change(editor, { target: { value: "then update the docs and the changelog" } });
+    await act(async () => { fireEvent.click(screen.getByTestId("thread-queue-save")); });
+    expect(api.editQueuedMessage).toHaveBeenCalledWith("s1", "q1", "then update the docs and the changelog");
+    expect(screen.queryByTestId("thread-queue-edit")).toBeNull();
+
+    // The server's edited notice rewrites the waiting line in place.
+    act(() => {
+      store.ingest({ seq: 4, ts_ms: 1100, kind: "notice", payload: { kind: "message_queued", queue_id: "q1", text: "then update the docs and the changelog", edited: true } });
+    });
+    const rows = screen.getAllByTestId("thread-queue-item");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.textContent).toContain("then update the docs and the changelog");
+  });
+
+  it("puts an edit back into the box when its message started meanwhile", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    api.fetchAgentChatQueue.mockResolvedValue({ paused: false, items: [] });
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "refactor the parser" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+      store.ingest({ seq: 3, ts_ms: 1000, kind: "notice", payload: { kind: "message_queued", queue_id: "q1", text: "draft" } });
+    });
+    fireEvent.click(await screen.findByTestId("thread-queue-open"));
+    fireEvent.change(screen.getByTestId("thread-queue-edit"), { target: { value: "better draft" } });
+    act(() => {
+      store.ingest({ seq: 4, ts_ms: 1100, kind: "notice", payload: { kind: "message_dequeued", queue_id: "q1", status: "sent" } });
+    });
+    await waitFor(() => expect((screen.getByTestId("thread-composer-input") as HTMLTextAreaElement).value).toBe("better draft"));
+    expect(screen.queryByTestId("thread-queue")).toBeNull();
+  });
+
+  it("sends a waiting message right away from its row", async () => {
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow()]);
+    api.fetchAgentChatQueue.mockResolvedValue({ paused: false, items: [] });
+    api.sendQueuedNow.mockResolvedValue("steered");
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.provider).toBe("claude-api"));
+    const store = useThreadChatStore.getState();
+    act(() => {
+      store.ingest({ seq: 1, ts_ms: 1000, kind: "user_message", payload: { text: "refactor the parser" } });
+      store.ingest({ seq: 2, ts_ms: 1000, kind: "turn_started", payload: { turn_id: "t1", provider: "claude-api", model: "", effort: "high", runner: "claude-cli" } });
+      store.ingest({ seq: 3, ts_ms: 1000, kind: "notice", payload: { kind: "message_queued", queue_id: "q1", text: "then update the docs" } });
+    });
+    const button = await screen.findByTestId("thread-queue-send-now");
+    expect(button.textContent).toBe("Send now");
+    expect(button.getAttribute("title")).toBe("Send it into the running turn now");
+    fireEvent.click(button);
+    await waitFor(() => expect(api.sendQueuedNow).toHaveBeenCalledWith("s1", "q1"));
+  });
+});
+
+describe("ThreadTree", () => {
+  it("lists a project's threads by the CLI's own title with the agent's mark", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow({ cli_title: "Fix login test" }), sessionRow({ session_id: "s2", cwd: "/elsewhere", title: "stray" })]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+    expect(screen.queryByText("stray")).toBeNull();
+    fireEvent.click(screen.getByText("Fix login test"));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: "s1" });
+    fireEvent.click(screen.getByTestId("thread-new-p1"));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null });
+  });
+
+  it("searches the threads by title at once and by message from the server", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([
+      sessionRow({ cli_title: "Fix login test", updated_ms: 5 }),
+      sessionRow({ session_id: "s2", title: "Header polish", updated_ms: 9 }),
+      sessionRow({ session_id: "s3", cwd: "/elsewhere", title: "stray login" }),
+    ]);
+    api.searchAgentChatSessions.mockResolvedValue([
+      { session_id: "s2", snippet: "the login button moves left", seq: 4, kind: "user_message", ts_ms: 9, matches: 2,
+        title_match: false, title: "Header polish", cwd: "/repo", updated_ms: 9 },
+      { session_id: "s3", snippet: "login elsewhere", seq: 1, kind: "user_message", ts_ms: 1, matches: 1,
+        title_match: false, title: "stray login", cwd: "/elsewhere", updated_ms: 1 },
+    ]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+
+    fireEvent.click(screen.getByTestId("thread-tree-search"));
+    const dialog = await screen.findByTestId("thread-search");
+    // Empty, it lists the newest threads of the sidebar's projects.
+    expect(within(dialog).getByTestId("thread-search-row-s2")).toBeTruthy();
+    expect(within(dialog).queryByTestId("thread-search-row-s3")).toBeNull();
+
+    fireEvent.change(within(dialog).getByTestId("thread-search-input"), { target: { value: "login" } });
+    expect(within(dialog).getByTestId("thread-search-row-s1")).toBeTruthy();
+    await waitFor(() => expect(within(dialog).getByTestId("thread-search-row-s2").textContent).toContain("the login button moves left"));
+    expect(api.searchAgentChatSessions).toHaveBeenCalledWith("login", expect.anything());
+    // A hit outside every project is not listed, as in the sidebar.
+    expect(within(dialog).queryByTestId("thread-search-row-s3")).toBeNull();
+
+    fireEvent.click(within(dialog).getByTestId("thread-search-row-s2"));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: "s2" });
+    await waitFor(() => expect(screen.queryByTestId("thread-search")).toBeNull());
+  });
+
+  it("archives a thread from its menu and brings it back from the project's archive", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow({ cli_title: "Fix login test" })]);
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+    fireEvent.contextMenu(screen.getByTestId("thread-row-s1"));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Archive/ }));
+    expect(screen.queryByTestId("thread-row-s1")).toBeNull();
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null });
+    expect(JSON.parse(localStorage.getItem("jarvis.agenticIde.threadArchived.v1") ?? "{}")).toHaveProperty("s1");
+
+    fireEvent.click(screen.getByTestId("thread-archived-p1"));
+    fireEvent.click(screen.getByRole("button", { name: "Restore Fix login test" }));
+    expect(screen.getByTestId("thread-row-s1")).toBeTruthy();
+    expect(screen.queryByTestId("thread-archived-p1")).toBeNull();
+  });
+
+  it("lists a team thread once and keeps its members out of the thread list", async () => {
+    teams.rows = [{ team_id: "t1", title: "Add a retry", cwd: "/repo", mode: "peers", state: "needs_input", phase: "review", reason: "", created_ms: 1, updated_ms: 2, members: [] }];
+    api.fetchAgentChatSessions.mockResolvedValue([
+      sessionRow({ cli_title: "Fix login test" }),
+      sessionRow({ session_id: "s2", cli_title: "Add a retry · Claude", team_id: "t1" }),
+    ]);
+    try {
+      render(<ThreadTree />);
+      await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+      expect(screen.queryByText("Add a retry · Claude")).toBeNull();
+      fireEvent.click(screen.getByTestId("team-thread-row-t1"));
+      expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null, team: "t1" });
+      expect(screen.getByTestId("team-thread-row-t1").getAttribute("aria-current")).toBe("page");
+      // The ordinary thread is no longer the one on screen.
+      expect(screen.getByText("Fix login test").closest("button")?.getAttribute("aria-current")).toBeNull();
+      fireEvent.click(screen.getByTestId("team-thread-new-p1"));
+      expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null, team: "new" });
+    } finally {
+      teams.rows = [];
+    }
+  });
+
+  it("leads from a member's own thread back to its team, and keeps the team marked meanwhile", async () => {
+    teams.rows = [{ team_id: "t1", title: "Add a retry", cwd: "/repo", mode: "peers", state: "running", phase: "review", reason: "", created_ms: 1, updated_ms: 2, members: [] }];
+    const member = sessionRow({ session_id: "s2", cli_title: "Add a retry · Claude", team_id: "t1" });
+    api.fetchAgentChatSessions.mockResolvedValue([member]);
+    try {
+      useIdeThreadsStore.getState().openMemberThread("s2", "p1", "t1");
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(<QueryClientProvider client={client}><ThreadTree /><ThreadView onScreen /></QueryClientProvider>);
+      const back = await screen.findByTestId("thread-back-to-team");
+      expect(back.textContent).toContain("Add a retry");
+      expect(screen.getByTestId("team-thread-row-t1").getAttribute("aria-current")).toBe("page");
+      fireEvent.click(within(back).getByRole("button"));
+      expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null, team: "t1" });
+    } finally {
+      teams.rows = [];
+    }
+  });
+
+  it("lists the open thread's sub-agents under it as threads that open, nest and fold", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow({ cli_title: "Fix login test" })]);
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: "s1" } });
+    useThreadSubagentsStore.setState({ open: null });
+    useThreadSubagentsStore.getState().publish("s1", [
+      { id: "a1", parentId: null, depth: 0, title: "Explore the auth code", agentType: "Explore", status: "running", waiting: false },
+      { id: "a2", parentId: "a1", depth: 1, title: "Read the tests", agentType: "", status: "done", waiting: false },
+    ]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+    const rows = screen.getAllByTestId("thread-tree-subagent");
+    expect(rows.map((row) => row.textContent)).toEqual(["Explore the auth code", "Read the tests"]);
+    expect(rows.map((row) => row.getAttribute("data-status"))).toEqual(["running", "done"]);
+    expect(rows[1].style.paddingLeft).toBe("46px");
+
+    fireEvent.click(rows[1]);
+    expect(useThreadSubagentsStore.getState().open).toEqual({ sessionId: "s1", id: "a2" });
+    expect(screen.getAllByTestId("thread-tree-subagent")[1].getAttribute("aria-current")).toBe("page");
+    expect(screen.getByText("Fix login test").closest("button")?.getAttribute("aria-current")).toBe("true");
+
+    // The thread's own row leads back to the main conversation.
+    fireEvent.click(screen.getByText("Fix login test"));
+    expect(useThreadSubagentsStore.getState().open).toBeNull();
+
+    fireEvent.click(screen.getByTestId("thread-subagents-fold"));
+    expect(screen.queryAllByTestId("thread-tree-subagent")).toHaveLength(0);
+    fireEvent.click(screen.getByTestId("thread-subagents-fold"));
+    expect(screen.getAllByTestId("thread-tree-subagent")).toHaveLength(2);
+  });
+
+  it("shows no sub-agent rows for a thread that is not the one on screen", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow({ cli_title: "Fix login test" })]);
+    useIdeThreadsStore.setState({ selection: { projectId: "p1", sessionId: null } });
+    useThreadSubagentsStore.getState().publish("s1", [
+      { id: "a1", parentId: null, depth: 0, title: "Explore", agentType: "", status: "running", waiting: false },
+    ]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+    expect(screen.queryByTestId("thread-tree-subagents")).toBeNull();
+    expect(screen.queryByTestId("thread-subagents-fold")).toBeNull();
+  });
+
+  it("starts a thread or a team from the rows on top, in the project in view, and leads every thread with its agent's logo", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([sessionRow({ cli_title: "Fix login test" })]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Fix login test")).toBeTruthy());
+    const row = screen.getByTestId("thread-row-s1");
+    const mark = await waitFor(() => within(row).getByTestId("agent-mark-claude"));
+    const title = within(row).getByText("Fix login test");
+    expect(mark.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    fireEvent.click(screen.getByTestId("thread-tree-new-thread"));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null });
+    fireEvent.click(screen.getByTestId("thread-tree-new-team"));
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: null, team: "new" });
+  });
+
+  it("marks a thread whose agent asks a question or waits for an approval, in place of its spinner", async () => {
+    api.fetchAgentChatSessions.mockResolvedValue([
+      sessionRow({ session_id: "s1", cli_title: "Asks", running: true, pending_questions: ["q1"] }),
+      sessionRow({ session_id: "s2", cli_title: "Needs an OK", running: true, pending_approvals: ["a1"] }),
+      sessionRow({ session_id: "s3", cli_title: "Works", running: true, pending_questions: [] }),
+    ]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Asks")).toBeTruthy());
+    const mark = (id: string) => within(screen.getByTestId(`thread-row-${id}`));
+    expect(mark("s1").getByRole("img", { name: "Waiting for your answer" })).toBeTruthy();
+    expect(mark("s1").queryByRole("img", { name: "Working" })).toBeNull();
+    expect(mark("s2").getByRole("img", { name: "Waiting for your approval" })).toBeTruthy();
+    expect(mark("s3").getByRole("img", { name: "Working" })).toBeTruthy();
+    expect(mark("s3").queryByRole("img", { name: "Waiting for your answer" })).toBeNull();
+  });
+
+  it("lists threads newest first and folds the rest behind Show more after 20", async () => {
+    // Stamps 0..22 in a shuffled order, so the list has to sort them itself.
+    api.fetchAgentChatSessions.mockResolvedValue(Array.from({ length: 23 }, (_, index) =>
+      sessionRow({ session_id: `s${index}`, cli_title: `Thread ${index}`, updated_ms: (index * 7) % 23 })));
+    render(<ThreadTree />);
+    const stamps = () => screen.queryAllByTestId(/^thread-row-s\d+$/)
+      .map((row) => (Number(row.getAttribute("data-testid")?.slice("thread-row-s".length)) * 7) % 23);
+    await waitFor(() => expect(stamps()).toEqual(Array.from({ length: 20 }, (_, index) => 22 - index)));
+    fireEvent.click(screen.getByRole("button", { name: "Show 3 more" }));
+    expect(stamps()).toEqual(Array.from({ length: 23 }, (_, index) => 22 - index));
+  });
+
+  it("draws a day line where the threads cross into an earlier day, and none over today's", async () => {
+    const now = Date.now();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(12, 0, 0, 0);
+    api.fetchAgentChatSessions.mockResolvedValue([
+      sessionRow({ session_id: "s1", cli_title: "Today A", updated_ms: now }),
+      sessionRow({ session_id: "s2", cli_title: "Yesterday A", updated_ms: yesterday.getTime() }),
+      sessionRow({ session_id: "s3", cli_title: "Yesterday B", updated_ms: yesterday.getTime() - 1 }),
+    ]);
+    render(<ThreadTree />);
+    await waitFor(() => expect(screen.getByText("Yesterday A")).toBeTruthy());
+    const lines = screen.getAllByTestId("thread-day-line");
+    expect(lines.map((line) => line.getAttribute("aria-label"))).toEqual(["Yesterday"]);
+    const before = (a: Element, b: Element) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(before(screen.getByTestId("thread-row-s1"), lines[0])).toBe(true);
+    expect(before(lines[0], screen.getByTestId("thread-row-s2"))).toBe(true);
+  });
+});

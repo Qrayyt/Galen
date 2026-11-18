@@ -1,0 +1,911 @@
+"""Reading how much of each subscription's plan is already spent.
+
+What these pin down is not "does the JSON parse" but the handful of ways a
+usage meter can be confidently wrong, which is worse than having none at all:
+
+* a CACHED reading must never be reported as a live one — it is the number a
+  user picks a subscription on, and for an idle seat it can be days old;
+* a per-model weekly budget must survive alongside the overall weekly one,
+  because 55% overall next to 99% on one model is the case where "plenty left"
+  is the wrong conclusion;
+* which of Codex's two windows is the short one is decided by its LENGTH, not
+  by the slot it arrives in;
+* a CLI with no reader must get an honest "unsupported", never a neighbouring
+  provider's numbers;
+* nothing here ever reaches the network in a test, and nothing ever returns a
+  token.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from dodaios import agent_usage
+from dodaios.agent_accounts import AgentAccount
+
+#: Captured before any fixture runs. The autouse ``_no_network`` fixture below
+#: replaces the module attribute, so a test that wants to exercise the REAL
+#: transport helper cannot read it back off the module — it would get the stub.
+_REAL_HTTP_GET_JSON = agent_usage._http_get_json
+
+
+@pytest.fixture(autouse=True)
+def _no_cache_between_tests() -> None:
+    agent_usage.clear_cache()
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every live probe fails unless a test opts in.
+
+    A unit test that quietly reaches the real provider is a test that passes on
+    the maintainer's machine and hangs in CI, so the default is "no answer" and
+    the disk fallbacks are what get exercised.
+    """
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    # Never read the developer's real macOS Keychain from a unit test.
+    monkeypatch.setattr(agent_usage, "_claude_keychain_bearer", lambda config_dir: None)
+
+
+def _account(platform: str, config_dir: Path, *, builtin: bool = False) -> AgentAccount:
+    return AgentAccount(
+        id=f"{platform}:test",
+        platform=platform,
+        label="Test seat",
+        config_dir=config_dir,
+        builtin=builtin,
+    )
+
+
+# ----------------------------------------------------------------- claude
+
+
+CLAUDE_LIMITS_PAYLOAD = {
+    "five_hour": {"utilization": 2.0, "resets_at": "2026-08-13T13:20:00+00:00"},
+    "seven_day": {"utilization": 74.0, "resets_at": "2026-08-14T06:00:00+00:00"},
+    "limits": [
+        {
+            "kind": "session",
+            "group": "session",
+            "percent": 2,
+            "severity": "normal",
+            "resets_at": "2026-08-13T13:20:00+00:00",
+            "scope": None,
+        },
+        {
+            "kind": "weekly_all",
+            "group": "weekly",
+            "percent": 74,
+            "severity": "normal",
+            "resets_at": "2026-08-14T06:00:00+00:00",
+            "scope": None,
+        },
+        {
+            "kind": "weekly_scoped",
+            "group": "weekly",
+            "percent": 100,
+            "severity": "critical",
+            "resets_at": "2026-08-14T06:00:00+00:00",
+            "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None},
+        },
+    ],
+}
+
+
+def test_claude_keeps_the_scoped_weekly_budget_next_to_the_overall_one() -> None:
+    """A model at 100% must not be hidden behind an overall week at 74%."""
+    windows = agent_usage._claude_windows(CLAUDE_LIMITS_PAYLOAD)
+    kinds = [w.kind for w in windows]
+    assert kinds == ["session", "weekly", "weekly_scoped"]
+    scoped = windows[2]
+    assert scoped.percent == 100
+    assert scoped.severity == "critical"
+    assert scoped.scope_label == "Fable"
+
+
+def test_claude_uses_the_providers_own_severity_not_its_own_arithmetic() -> None:
+    """74% is 'normal' because the provider said so, not because 74 < 80."""
+    payload = {
+        "limits": [
+            {"kind": "weekly_all", "group": "weekly", "percent": 12, "severity": "critical"},
+        ]
+    }
+    (window,) = agent_usage._claude_windows(payload)
+    assert window.severity == "critical"
+
+
+def test_claude_falls_back_to_the_named_fields_when_there_is_no_limits_array() -> None:
+    """An older payload shape still shows both headline numbers."""
+    payload = {
+        "five_hour": {"utilization": 10.0, "resets_at": "2026-08-13T13:20:00+00:00"},
+        "seven_day": {"utilization": 90.0, "resets_at": "2026-08-14T06:00:00+00:00"},
+    }
+    windows = agent_usage._claude_windows(payload)
+    assert [w.kind for w in windows] == ["session", "weekly"]
+    assert windows[0].window_minutes == 300
+    assert windows[1].window_minutes == 10080
+    # No severity is stated in this shape, so the shared scale decides.
+    assert windows[1].severity == "warning"
+
+
+def test_claude_reports_a_disk_reading_as_cached_with_the_providers_timestamp(
+    tmp_path: Path,
+) -> None:
+    """The whole honesty contract: an old number must not look like a live one."""
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "oauthAccount": {"organizationRateLimitTier": "default_claude_max_20x"},
+                "cachedUsageUtilization": {
+                    "fetchedAtMs": 1786557552405,
+                    "utilization": CLAUDE_LIMITS_PAYLOAD,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    usage = agent_usage.read_usage(_account("claude", tmp_path))
+    assert usage.status == "ok"
+    assert usage.source == "cached"
+    assert usage.as_of == pytest.approx(1786557552.405)
+    assert usage.plan == "Ultra"
+    assert len(usage.windows) == 3
+
+
+def test_claude_without_any_login_says_signed_out_rather_than_zero_percent(
+    tmp_path: Path,
+) -> None:
+    """An empty seat must not draw a reassuring 0% bar."""
+    usage = agent_usage.read_usage(_account("claude", tmp_path))
+    assert usage.status == "signed_out"
+    assert usage.windows == ()
+
+
+def test_claude_reads_live_usage_with_the_keychain_bearer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2026-11-17: on macOS the login lives only in the Keychain, so no seat was
+    ever measured and automatic switching never moved a spent seat."""
+    from dodaios import claude_credentials
+
+    monkeypatch.setattr(claude_credentials, "_keychain_item_exists", lambda _service: True)
+    monkeypatch.setattr(
+        agent_usage, "_claude_keychain_bearer", lambda config_dir: "sk-ant-oat01-kc"
+    )
+    sent: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        agent_usage,
+        "_http_get_json",
+        lambda url, headers: sent.append(headers) or CLAUDE_LIMITS_PAYLOAD,
+    )
+    usage = agent_usage.read_usage(_account("claude", tmp_path))
+    assert usage.status == "ok"
+    assert usage.source == "live"
+    assert sent and sent[0]["Authorization"] == "Bearer sk-ant-oat01-kc"
+
+
+def test_default_claude_seat_reads_the_account_file_beside_the_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without CLAUDE_CONFIG_DIR, Claude Code keeps ~/.claude.json, not ~/.claude/.claude.json."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "oauthAccount": {"organizationRateLimitTier": "default_claude_max_20x"},
+                "cachedUsageUtilization": {
+                    "fetchedAtMs": 1786557552405,
+                    "utilization": CLAUDE_LIMITS_PAYLOAD,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    usage = agent_usage.read_usage(_account("claude", tmp_path / ".claude", builtin=True))
+    assert usage.status == "ok"
+    assert usage.source == "cached"
+    assert usage.plan is not None
+
+
+def test_an_unmapped_plan_tier_is_still_shown_readably(tmp_path: Path) -> None:
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"oauthAccount": {"organizationRateLimitTier": "default_claude_max_50x"}}),
+        encoding="utf-8",
+    )
+    usage = agent_usage.read_usage(_account("claude", tmp_path))
+    assert usage.plan == "Max 50X"
+
+
+# ------------------------------------------------------------------ codex
+
+
+def _codex_signed_in(config_dir: Path) -> None:
+    (config_dir / "auth.json").write_text(
+        json.dumps({"tokens": {"access_token": "not-a-real-token", "account_id": "acct"}}),
+        encoding="utf-8",
+    )
+
+
+def test_codex_names_its_windows_by_length_not_by_slot() -> None:
+    """'primary' is not always the weekly one — the window length decides."""
+    windows = agent_usage._codex_rate_limit_windows(
+        {
+            "primary": {"used_percent": 40.0, "window_minutes": 10080, "resets_at": 1786977114},
+            "secondary": {"used_percent": 8.0, "window_minutes": 300, "resets_at": 1786900000},
+        }
+    )
+    # Sorted shortest window first, which is also the display order.
+    assert [w.kind for w in windows] == ["session", "weekly"]
+    assert windows[0].percent == 8.0
+    assert windows[1].percent == 40.0
+    assert windows[0].resets_at is not None and windows[0].resets_at.endswith("+00:00")
+
+
+def test_codex_recognises_a_thirty_day_window_as_monthly() -> None:
+    """Measured on a real seat: 43200 minutes must not read as 'other'."""
+    (window,) = agent_usage._codex_rate_limit_windows(
+        {"primary": {"used_percent": 70.0, "window_minutes": 43200, "resets_at": 1789000000}}
+    )
+    assert window.kind == "monthly"
+
+
+def test_codex_reads_the_newest_rate_limits_out_of_a_session_transcript(
+    tmp_path: Path,
+) -> None:
+    """The disk fallback that carries this feature when the endpoint cannot."""
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions" / "2026" / "08" / "13"
+    sessions.mkdir(parents=True)
+    rollout = sessions / "rollout-2026-08-13T10-00-00-abc.jsonl"
+    lines = [
+        json.dumps({"timestamp": "2026-08-13T09:00:00.000Z", "type": "event_msg", "payload": {}}),
+        json.dumps(
+            {
+                "timestamp": "2026-08-13T09:30:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "rate_limits": {
+                        "primary": {"used_percent": 11.0, "window_minutes": 10080},
+                    },
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "timestamp": "2026-08-13T10:00:00.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "rate_limits": {
+                        "plan_type": "plus",
+                        "primary": {"used_percent": 23.0, "window_minutes": 10080},
+                    },
+                },
+            }
+        ),
+    ]
+    rollout.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    assert usage.status == "ok"
+    assert usage.source == "cached"
+    assert usage.plan == "Plus"
+    # The LAST record wins — an earlier one in the same file is strictly older.
+    assert [w.percent for w in usage.windows] == [23.0]
+
+
+def test_codex_finds_the_record_in_a_transcript_larger_than_the_tail_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only the tail is read, so the seek must not cut the answer off."""
+    monkeypatch.setattr(agent_usage, "ROLLOUT_TAIL_BYTES", 2048)
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir(parents=True)
+    rollout = sessions / "rollout-big.jsonl"
+    padding = [json.dumps({"type": "noise", "payload": {"blob": "x" * 200}}) for _ in range(200)]
+    answer = json.dumps(
+        {
+            "timestamp": "2026-08-13T10:00:00.000Z",
+            "payload": {"rate_limits": {"primary": {"used_percent": 5.0, "window_minutes": 300}}},
+        }
+    )
+    rollout.write_text("\n".join([*padding, answer]) + "\n", encoding="utf-8")
+
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    assert usage.status == "ok"
+    assert [w.kind for w in usage.windows] == ["session"]
+
+
+def test_codex_on_an_api_key_says_there_is_no_plan_limit(tmp_path: Path) -> None:
+    """Per-request billing has no window to spend down — an empty bar would lie."""
+    (tmp_path / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "sk-test"}), encoding="utf-8")
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    assert usage.status == "unsupported"
+
+
+def test_codex_signed_in_but_never_used_is_unavailable_not_zero(tmp_path: Path) -> None:
+    _codex_signed_in(tmp_path)
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    assert usage.status == "unavailable"
+    assert usage.windows == ()
+
+
+# ---------------------------------------------------------------- generic
+
+
+def test_an_unknown_cli_gets_an_honest_answer_not_a_neighbours_numbers(
+    tmp_path: Path,
+) -> None:
+    """The failure an `if claude / else codex` pair would produce silently."""
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"cachedUsageUtilization": {"utilization": CLAUDE_LIMITS_PAYLOAD}}),
+        encoding="utf-8",
+    )
+    usage = agent_usage.read_usage(_account("some-new-cli", tmp_path))
+    assert usage.status == "unsupported"
+    assert usage.windows == ()
+
+
+def test_supports_usage_reports_only_the_clis_with_a_real_reader() -> None:
+    assert agent_usage.supports_usage("claude") is True
+    assert agent_usage.supports_usage("codex") is True
+    assert agent_usage.supports_usage("some-new-cli") is False
+
+
+# ------------------------------------------------------------- collect/cache
+
+
+def test_collect_serves_the_cache_until_the_ttl_expires(tmp_path: Path) -> None:
+    """The panel polls; a percentage does not move fast enough to re-ask each time."""
+    calls: list[str] = []
+    account = _account("claude", tmp_path)
+
+    def counting_reader(acc: AgentAccount) -> agent_usage.AccountUsage:
+        calls.append(acc.id)
+        return agent_usage.AccountUsage(account_id=acc.id, platform=acc.platform, status="ok")
+
+    original = agent_usage._READERS["claude"]
+    agent_usage._READERS["claude"] = counting_reader
+    try:
+        agent_usage.collect([account])
+        agent_usage.collect([account])
+        assert calls == [account.id]
+        # A forced refresh is what the manual button does, and it must bypass it.
+        agent_usage.collect([account], refresh=True)
+        assert len(calls) == 2
+        # A zero TTL means "never reuse", which is how the tests above stay honest.
+        agent_usage.collect([account], ttl=0)
+        assert len(calls) == 3
+    finally:
+        agent_usage._READERS["claude"] = original
+
+
+def test_a_reader_that_raises_costs_one_row_not_the_panel(tmp_path: Path) -> None:
+    account = _account("claude", tmp_path)
+
+    def exploding_reader(_acc: AgentAccount) -> agent_usage.AccountUsage:
+        raise RuntimeError("provider changed everything")
+
+    original = agent_usage._READERS["claude"]
+    agent_usage._READERS["claude"] = exploding_reader
+    try:
+        usage = agent_usage.read_usage(account)
+    finally:
+        agent_usage._READERS["claude"] = original
+    assert usage.status == "unavailable"
+
+
+def test_no_reading_ever_carries_a_credential(tmp_path: Path) -> None:
+    """The wire shape is display-only by construction."""
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"cachedUsageUtilization": {"utilization": CLAUDE_LIMITS_PAYLOAD}}),
+        encoding="utf-8",
+    )
+    (tmp_path / ".credentials.json").write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat-secret",
+                    "refreshToken": "refresh-secret",
+                    "expiresAt": 1,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    payload = json.dumps(agent_usage.read_usage(_account("claude", tmp_path)).to_dict())
+    assert "secret" not in payload
+    assert "sk-ant" not in payload
+
+
+# ------------------------------------------------------------------ shared
+
+
+@pytest.mark.parametrize(
+    ("percent", "expected"),
+    [(0.0, "normal"), (79.9, "normal"), (80.0, "warning"), (94.9, "warning"), (95.0, "critical")],
+)
+def test_one_severity_scale_serves_every_provider(percent: float, expected: str) -> None:
+    """Two rows at the same percentage must never be coloured differently."""
+    assert agent_usage._severity(percent) == expected
+
+
+def test_an_unreachable_host_is_left_alone_but_an_http_error_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An offline machine must not pay a six-second timeout on every poll.
+
+    The asymmetry is the point: being unreachable is expensive and stays true
+    for a while, so it earns a cooldown. An HTTP status answers instantly, so
+    retrying it costs nothing — and cooling THAT down would keep a seat on
+    cached numbers for minutes after a one-off server hiccup.
+    """
+    monkeypatch.setattr(agent_usage, "_http_get_json", _REAL_HTTP_GET_JSON)
+    agent_usage.clear_cache()
+
+    attempts: list[str] = []
+
+    class _Unreachable:
+        def get(self, url: str, **_kw: object) -> object:
+            attempts.append(url)
+            raise OSError("no route to host")
+
+    class _Rejecting:
+        def get(self, url: str, **_kw: object) -> object:
+            attempts.append(url)
+
+            class _Response:
+                status_code = 403
+
+                def json(self) -> object:
+                    return {}
+
+            return _Response()
+
+    monkeypatch.setattr(agent_usage._HTTP_POOL, "client", lambda: _Unreachable())
+    assert agent_usage._http_get_json("https://example.invalid/u", {}) is None
+    assert agent_usage._http_get_json("https://example.invalid/u", {}) is None
+    assert attempts == ["https://example.invalid/u"], "the second probe must be skipped"
+
+    attempts.clear()
+    agent_usage.clear_cache()
+    monkeypatch.setattr(agent_usage._HTTP_POOL, "client", lambda: _Rejecting())
+    assert agent_usage._http_get_json("https://example.invalid/v", {}) is None
+    assert agent_usage._http_get_json("https://example.invalid/v", {}) is None
+    assert len(attempts) == 2, "a rejected request must still be retried"
+
+
+def test_an_over_consumed_window_is_clamped_to_full_rather_than_dropped() -> None:
+    """103% means 'full'; refusing to draw it would hide the worst state."""
+    assert agent_usage._clamp_percent(103) == 100.0
+    assert agent_usage._clamp_percent(-5) == 0.0
+    assert agent_usage._clamp_percent("nope") is None
+    assert agent_usage._clamp_percent(True) is None
+
+
+def test_codex_spark_never_replaces_the_main_weekly_allowance(tmp_path: Path) -> None:
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    def event(stamp, limit_id, percent):
+        return json.dumps(
+            {
+                "timestamp": stamp,
+                "payload": {
+                    "rate_limits": {
+                        "limit_id": limit_id,
+                        "plan_type": "pro",
+                        "primary": {"used_percent": percent, "window_minutes": 10080},
+                    }
+                },
+            }
+        )
+
+    # The same stream can report the main allowance followed by a Spark update.
+    (sessions / "rollout-main.jsonl").write_text(
+        event("2026-09-10T12:00:00Z", "codex", 46)
+        + "\n"
+        + event("2026-09-10T12:01:00Z", "codex_bengalfox", 0),
+        encoding="utf-8",
+    )
+    # A newly touched transcript is not necessarily the freshest measurement.
+    (sessions / "rollout-old.jsonl").write_text(
+        event("2026-09-09T12:00:00Z", "codex", 20), encoding="utf-8"
+    )
+    usage = agent_usage.read_usage(_account("codex", tmp_path))
+    assert usage.status == "ok" and usage.source == "cached"
+    assert [(w.kind, w.percent) for w in usage.windows] == [("weekly", 46)]
+
+
+def test_codex_spark_only_is_unavailable_not_an_empty_main_budget(tmp_path: Path) -> None:
+    _codex_signed_in(tmp_path)
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "rollout-spark.jsonl").write_text(
+        json.dumps(
+            {
+                "payload": {
+                    "rate_limits": {
+                        "limit_id": "codex_bengalfox",
+                        "primary": {"used_percent": 0, "window_minutes": 10080},
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert agent_usage.read_usage(_account("codex", tmp_path)).status == "unavailable"
+
+
+@pytest.mark.parametrize("percent", [0, 54, 100])
+def test_grok_build_reads_live_credit_usage_for_its_own_account(tmp_path, monkeypatch, percent):
+    scope = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+    (tmp_path / "auth.json").write_text(
+        json.dumps(
+            {
+                scope: {
+                    "auth_mode": "oidc",
+                    "key": "grok-test-bearer",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def get(url, headers):
+        assert url == "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+        assert headers["Authorization"] == "Bearer grok-test-bearer"
+        return {
+            "config": {
+                "creditUsagePercent": percent,
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "end": "2026-09-14T12:59:05Z",
+                },
+            }
+        }
+
+    monkeypatch.setattr(agent_usage, "_http_get_json", get)
+    usage = agent_usage.read_usage(_account("grok-build", tmp_path))
+    assert usage.status == "ok" and usage.source == "live"
+    assert usage.windows[0].kind == "weekly" and usage.windows[0].percent == percent
+    assert usage.windows[0].resets_at is not None
+    assert "grok-test-bearer" not in json.dumps(usage.to_dict())
+
+
+def test_grok_missing_usage_does_not_invent_zero(tmp_path, monkeypatch):
+    scope = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828"
+    (tmp_path / "auth.json").write_text(
+        json.dumps(
+            {
+                scope: {
+                    "auth_mode": "oidc",
+                    "key": "grok-test-bearer",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda *args: {"config": {}})
+    usage = agent_usage.read_usage(_account("grok-build", tmp_path))
+    assert usage.status == "unavailable" and usage.windows == ()
+
+
+# ------------------------------------------------- claude, remembered readings
+
+
+@pytest.fixture(autouse=True)
+def _remembered_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remembered readings go to the test's own folder, never the user's data dir."""
+    monkeypatch.setattr(agent_usage, "_remembered_path", lambda: tmp_path / "remembered.json")
+    agent_usage.clear_cache()
+
+
+def _signed_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from dodaios import claude_credentials
+
+    monkeypatch.setattr(
+        claude_credentials,
+        "claude_login_in",
+        lambda _dir: SimpleNamespace(status="valid", access_token="token"),  # noqa: S106
+    )
+
+
+def _future(hours: float) -> int:
+    import time
+
+    return int(time.time() + hours * 3600)
+
+
+def test_the_stream_reports_fractions_and_the_meter_shows_percent() -> None:
+    """``rate_limit_event`` says 0.16; the meter must say 16 %, per window."""
+    info = {
+        "status": "allowed",
+        "rateLimitType": "five_hour",
+        "utilization": 0.42,
+        "resetsAt": _future(2),
+        "unifiedWindows": {
+            "seven_day": {"utilization": 0.16, "resetsAt": _future(48), "status": "allowed"},
+            "seven_day_opus": {"utilization": 0.9, "resetsAt": _future(48)},
+            "five_hour_without_number": {"status": "allowed"},
+        },
+    }
+    windows = {(w.kind, w.scope_label): w for w in agent_usage._claude_stream_windows(info)}
+    assert windows[("weekly", None)].percent == 16
+    assert windows[("session", None)].percent == 42
+    assert windows[("session", None)].window_minutes == 300
+    assert windows[("weekly_scoped", "Opus")].severity == "warning"
+    assert len(windows) == 3, "a window without a number is not drawn"
+
+
+def test_a_rate_limited_endpoint_shows_what_the_stream_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint answers 429; the turn's own stream still fills the meter, marked as reported."""
+    from dodaios import agent_accounts
+
+    seat = _account("claude", tmp_path)
+    monkeypatch.setattr(agent_accounts, "list_accounts", lambda _platform: [seat])
+    agent_usage.note_claude_rate_limit(
+        str(tmp_path),
+        {"unifiedWindows": {"seven_day": {"utilization": 0.16, "resetsAt": _future(48)}}},
+    )
+    usage = agent_usage.read_usage(seat)
+    assert usage.status == "ok"
+    assert usage.source == "cached"
+    assert usage.as_of is not None
+    assert [(w.kind, w.percent) for w in usage.windows] == [("weekly", 16)]
+
+
+def test_a_stream_reading_for_another_seat_is_not_painted_on_this_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dodaios import agent_accounts
+
+    seat = _account("claude", tmp_path / "one")
+    monkeypatch.setattr(agent_accounts, "list_accounts", lambda _platform: [seat])
+    agent_usage.note_claude_rate_limit(
+        str(tmp_path / "two"), {"unifiedWindows": {"seven_day": {"utilization": 0.5}}}
+    )
+    assert agent_usage.read_usage(seat).status != "ok"
+
+
+def test_a_live_reading_is_remembered_and_a_reset_window_is_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint fails after a good read: its numbers stay, minus windows that reset."""
+    from datetime import UTC, datetime
+
+    _signed_in(monkeypatch)
+    seat = _account("claude", tmp_path)
+    past = datetime.fromtimestamp(_future(-1), UTC).isoformat()
+    later = datetime.fromtimestamp(_future(30), UTC).isoformat()
+    payload = {
+        "five_hour": {"utilization": 60.0, "resets_at": past},
+        "seven_day": {"utilization": 20.0, "resets_at": later},
+    }
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: payload)
+    live = agent_usage.read_usage(seat)
+    assert live.source == "live"
+    assert len(live.windows) == 2
+
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    remembered = agent_usage.read_usage(seat)
+    assert remembered.source == "cached"
+    assert [(w.kind, w.percent) for w in remembered.windows] == [("weekly", 20)]
+
+    # A new process reads the same numbers back from disk.
+    agent_usage.clear_cache()
+    assert [w.kind for w in agent_usage.read_usage(seat).windows] == ["weekly"]
+
+
+def test_the_week_shows_once_whichever_source_named_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The endpoint's ``weekly_all`` and the stream's ``seven_day`` are one limit, and the
+    stream's week-with-extra-usage is no limit of the plan (live report, 2026-11-11)."""
+    from datetime import UTC, datetime
+
+    from dodaios import agent_accounts
+
+    _signed_in(monkeypatch)
+    seat = _account("claude", tmp_path)
+    monkeypatch.setattr(agent_accounts, "list_accounts", lambda _platform: [seat])
+    later = datetime.fromtimestamp(_future(48), UTC).isoformat()
+    payload = {
+        "limits": [
+            {"kind": "weekly_all", "group": "weekly", "percent": 41, "resets_at": later},
+            {
+                "kind": "weekly_scoped",
+                "group": "weekly",
+                "percent": 56,
+                "resets_at": later,
+                "scope": {"model": {"display_name": "Fable"}},
+            },
+        ]
+    }
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: payload)
+    agent_usage.read_usage(seat)
+    agent_usage.note_claude_rate_limit(
+        str(tmp_path),
+        {
+            "unifiedWindows": {
+                "seven_day": {"utilization": 0.41, "resetsAt": _future(48)},
+                "seven_day_overage_included": {"utilization": 0.58, "resetsAt": _future(48)},
+            }
+        },
+    )
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    agent_usage.clear_cache()
+    usage = agent_usage.read_usage(seat)
+    assert sorted((w.kind, w.scope_label) for w in usage.windows) == [
+        ("weekly", None),
+        ("weekly_scoped", "Fable"),
+    ]
+
+
+def test_a_full_reading_drops_a_limit_the_plan_no_longer_has(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plan with only a weekly limit never keeps showing an old five-hour window."""
+    from datetime import UTC, datetime
+
+    from dodaios import agent_accounts
+
+    _signed_in(monkeypatch)
+    seat = _account("claude", tmp_path)
+    monkeypatch.setattr(agent_accounts, "list_accounts", lambda _platform: [seat])
+    agent_usage.note_claude_rate_limit(
+        str(tmp_path),
+        {"unifiedWindows": {"five_hour": {"utilization": 0.3, "resetsAt": _future(3)}}},
+    )
+    later = datetime.fromtimestamp(_future(48), UTC).isoformat()
+    payload = {
+        "limits": [{"kind": "weekly_all", "group": "weekly", "percent": 41, "resets_at": later}]
+    }
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: payload)
+    agent_usage.read_usage(seat)
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    agent_usage.clear_cache()
+    assert [w.kind for w in agent_usage.read_usage(seat).windows] == ["weekly"]
+
+
+def test_a_rate_limited_login_is_not_asked_again_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Asking every minute keeps a 429 alive; the next try waits, and only for that login."""
+    monkeypatch.setattr(agent_usage, "_http_get_json", _REAL_HTTP_GET_JSON)
+    attempts: list[str] = []
+
+    class _Limited:
+        def get(self, url: str, **kw: object) -> object:
+            attempts.append(str((kw.get("headers") or {}).get("Authorization")))
+
+            class _Response:
+                status_code = 429
+                headers = {"retry-after": "0"}
+
+            return _Response()
+
+    monkeypatch.setattr(agent_usage._HTTP_POOL, "client", lambda: _Limited())
+    one = {"Authorization": "Bearer one"}
+    two = {"Authorization": "Bearer two"}
+    assert agent_usage._http_get_json("https://example.invalid/usage", one) is None
+    assert agent_usage._http_get_json("https://example.invalid/usage", one) is None
+    assert agent_usage._http_get_json("https://example.invalid/usage", two) is None
+    assert attempts == ["Bearer one", "Bearer two"]
+
+
+def _reset_payload(eligible: bool = True, reason: str | None = None) -> dict:
+    """The usage answer with the seat's kept resets, as the endpoint shapes it."""
+    from datetime import UTC, datetime
+
+    later = datetime.fromtimestamp(_future(30), UTC).isoformat()
+    return {
+        "seven_day": {"utilization": 20.0, "resets_at": later},
+        "cedar_ember": {
+            "eligible": eligible,
+            "ineligible_reason": reason,
+            "at_limit": False,
+            "exhausted": [],
+            "grants": [
+                {
+                    "id": "grant-1",
+                    "label": "Welcome reset",
+                    "resets_total": 2,
+                    "resets_left": 1,
+                    "ends_at": later,
+                    "clears": ["session", "weekly", "bogus"],
+                    "usable_now": False,
+                    "use_requires_limit": True,
+                    "type": "full",
+                },
+                {"id": "", "resets_left": 3},
+                {"id": "grant-2", "resets_left": -1},
+            ],
+            "next_grant_id": "grant-1",
+        },
+        "juniper_tide": {"eligible": False, "ineligible_reason": "surface"},
+    }
+
+
+def test_banked_claude_resets_come_with_the_usage_and_outlast_a_rate_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One request carries usage and resets; a 429 later still shows the resets."""
+    _signed_in(monkeypatch)
+    seat = _account("claude", tmp_path)
+    asked: list[str] = []
+
+    def answer(url: str, headers: dict) -> dict:
+        asked.append(url)
+        return _reset_payload()
+
+    monkeypatch.setattr(agent_usage, "_http_get_json", answer)
+    assert agent_usage.read_usage(seat).source == "live"
+    assert asked == [agent_usage._CLAUDE_USAGE_URL]
+    assert "cedar_ember=1" in asked[0]
+
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: None)
+    resets = agent_usage.claude_resets(seat.id)
+    assert resets is not None
+    assert resets["eligible"] is True
+    assert "weekly" not in resets, "an ineligible weekly offer is not shown"
+    (grant,) = resets["grants"]
+    assert grant["id"] == "grant-1"
+    assert (grant["resets_left"], grant["resets_total"]) == (1, 2)
+    assert grant["clears"] == ["session", "weekly"]
+    assert grant["use_requires_limit"] is True
+
+    # A new process reads them back from disk, and the windows stayed beside them.
+    agent_usage.clear_cache()
+    assert agent_usage.claude_resets(seat.id)["grants"][0]["label"] == "Welcome reset"
+    assert [w.kind for w in agent_usage.read_usage(seat).windows] == ["weekly"]
+
+
+def test_a_usage_answer_without_reset_blocks_names_none() -> None:
+    assert agent_usage._claude_resets({"seven_day": {"utilization": 3}}) is None
+    assert agent_usage._claude_resets(None) is None
+    hidden = agent_usage._claude_resets(_reset_payload(eligible=False, reason="surface"))
+    assert hidden is not None
+    assert (hidden["eligible"], hidden["ineligible_reason"], hidden["grants"]) == (
+        False,
+        "surface",
+        [],
+    )
+
+
+def test_an_answer_without_numbers_falls_back_to_the_plain_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _signed_in(monkeypatch)
+    seat = _account("claude", tmp_path)
+    answers = {
+        agent_usage._CLAUDE_USAGE_URL: {"cedar_ember": {"eligible": False}},
+        agent_usage._CLAUDE_PLAIN_USAGE_URL: {"seven_day": {"utilization": 41.0}},
+    }
+    monkeypatch.setattr(agent_usage, "_http_get_json", lambda url, headers: answers[url])
+    usage = agent_usage.read_usage(seat)
+    assert [(w.kind, w.percent) for w in usage.windows] == [("weekly", 41)]
+
+
+@pytest.mark.parametrize(
+    ("tier", "plan"),
+    [
+        ("default_claude_max_20x", "Ultra"),
+        ("default_claude_max_5x", "Max"),
+        ("default_claude_ultra", "Ultra"),
+        ("default_claude_pro", "Pro"),
+    ],
+)
+def test_claude_plan_uses_the_current_plan_names(tier: str, plan: str) -> None:
+    """Anthropic renamed Max 20x to Ultra and Max 5x to Max on 2026-10-30."""
+    claude_json = {"oauthAccount": {"organizationRateLimitTier": tier}}
+    assert agent_usage._claude_plan_name(claude_json) == plan

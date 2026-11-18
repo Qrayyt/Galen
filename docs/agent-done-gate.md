@@ -1,0 +1,97 @@
+# Agent done gate
+
+A coding agent ends its turn only when its work has landed. Hooks enforce
+this, not instructions: every coding CLI's Stop event runs
+`scripts/agent_done_gate.py`, and while the answer is WAIT or FIX the agent is
+sent back to work with one imperative next step.
+
+## Done
+
+| # | Condition |
+|---|-----------|
+| D1 | the branch's worktree has no uncommitted changes (generated paths in `ignore_dirty` excepted) |
+| D2 | every local commit of the branch is on the remote |
+| D3 | the branch's pull request is merged into `main` |
+| D4 | the `main_workflows` are green on `main` for the merge commit (or for a later `main` commit that contains it) |
+| D5 | the local `main` checkout contains the merge commit; the gate fast-forwards it (never killed on a short timer), and a checkout with local edits, or with an `index.lock` (another git command is writing it), is left alone and noted |
+| D6 | every issue the pull request fixes is closed: GitHub closes an issue the PR body names with `Fixes #<n>` when the PR merges, and the gate asks the agent to close one that stayed open |
+
+## Verdicts
+
+| Verdict | Meaning | Stop? |
+|---------|---------|-------|
+| DONE | D1–D6 hold | yes |
+| NONE | no branch work in this session | yes |
+| HOLD | draft PR, opt-out label (`wip`, `needs-human`, `do-not-merge`, `no-auto-merge`), or `--hold` | yes |
+| WAIT | CI running, PR queued, merge freeze, main CI running | no |
+| FIX | red checks, conflicts, unpushed commits, auto-merge missing, parked CI run, red main CI for the merge commit, an open issue the PR names without `Fixes #<n>` or `Refs #<n>`, a fixed issue still open after the merge | no |
+| STUCK | WAIT longer than `wait_budget_hours` or the same FIX more than `fix_budget_blocks` times | yes, with a report |
+
+The gate fails open: if it cannot check (no `gh`, no network, a bug), the
+session may stop and a note says nothing was verified.
+
+The hooks start the gate with the first `python` or `python3` on `PATH`.
+Where that is older than the repository supports (macOS ships 3.9 as
+`/usr/bin/python3`), the gate hands the run to a supported one: the
+checkout's `.venv`, for a worktree the `.venv` of the checkout it belongs to,
+then `python3.14` down to `python3.11` on `PATH`. Until 2026-11-12 it crashed
+at import there and the hook swallowed the crash, so on such a machine no
+agent was checked at all.
+
+## Issues
+
+A pull request that fixes an issue says `Fixes #<n>` in its body, so the merge
+closes the issue. One that only touches it says `Refs #<n>`. While an open PR
+names an open issue of this repository without either, the gate answers FIX:
+the agent decides which it is. After the merge, an issue the PR fixes that is
+still open is a FIX too, with the `gh issue close` command to run.
+
+## Which branches
+
+The branch checked out in the hook's `cwd`, plus every branch the session
+created or pushed (`git worktree add -b`, `checkout -b`, `switch -c`, `push`),
+read from the commands in the session transcript. Remembered per session in
+`<git common dir>/agent-done-gate/sessions/`.
+
+## Wiring
+
+| CLI | Where | How it blocks |
+|-----|-------|---------------|
+| Claude Code (also other models run through it) | `.claude/settings.json` Stop hook | `{"decision": "block", "reason": ...}` |
+| Codex | `~/.codex/hooks.json` via `scripts/install_agent_done_gate.py` | same JSON shape; trust the hook once (`/hooks`) |
+| Kimi CLI | `~/.kimi-code/config.toml` via the installer | exit code 2, reason on stderr |
+| OpenCode | `.opencode/plugins/agent-done-gate.js` | on `session.idle`, sends the next step as a prompt |
+
+Codex and Kimi run `~/.agent-done-gate/hook.py`, which finds the session's
+repository and runs that repository's gate; repositories without the gate are
+left alone. Run `python scripts/install_agent_done_gate.py` once per machine
+(`--check`, `--uninstall`). The launcher logs to `~/.agent-done-gate/hook.log`.
+
+While WAIT, the hook itself polls (up to `hook_wait_seconds`) before it answers, so
+an agent does not spin. Agents can also wait explicitly:
+`python scripts/agent_done_gate.py --wait`.
+
+## Commands
+
+```
+python scripts/agent_done_gate.py            # verdict, exit 0 = may stop, 3 = continue
+python scripts/agent_done_gate.py --json
+python scripts/agent_done_gate.py --wait     # poll while WAIT (up to 9 min)
+python scripts/agent_done_gate.py --hold "the user wants this local"
+python scripts/agent_done_gate.py --release
+```
+
+Use `--hold` only when the user asked not to land a branch.
+
+## Merge freeze
+
+A pull request labelled `merge-freeze` holds `main` still for up to two hours
+(`scripts/ci/merge_freeze.py`): the gate answers WAIT for other PRs,
+`scripts/agent_land.py` requests no auto-merge, and the merge train enqueues
+nothing. An older label no longer counts.
+
+## Configuration
+
+`.github/agent-done-gate.json`: `required_checks`, `main_workflows`,
+`ignore_dirty`, `wait_budget_hours`, `fix_budget_blocks`,
+`hook_wait_seconds`, `poll_seconds`.

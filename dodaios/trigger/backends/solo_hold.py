@@ -1,0 +1,207 @@
+"""A modifier-only hold key that fires only while it is held ALONE.
+
+A hold-to-dictate key made of modifiers only (a bare ``cmd`` on macOS, the
+key offered there) is also the first half of every shortcut that uses it:
+``cmd+c``, ``cmd+tab``, ``cmd+shift+4``, a Command-click. The chord matchers
+compare the held set as a SUPERSET, so each of those shortcuts used to start a
+dictation on the Command key-down: the microphone opened, the Dodaios Bar
+sprang into its level bars, and the empty recording ended on a "nothing was
+heard" mark. Seen live on 2026-11-14, where it read as "the wake word keeps
+firing although nobody said it".
+
+``SoloHold`` is the gate in front of such a chord's push-to-talk callbacks:
+
+- the press is CONFIRMED only after the chord has been held alone for
+  ``SOLO_HOLD_S``; a key (or click) that joins before then turns the hold
+  into a shortcut and nothing is confirmed, not even on release;
+- a key that joins after the press was confirmed cancels the recording
+  (``on_cancel``), and the release that follows fires nothing;
+- a release after a confirmed press fires ``on_release`` as before.
+
+Waiting the whole window before anything happened made the Dodaios Bar rise
+a noticeable moment after the key went down (reported 2026-11-14). So a gate
+can also be given an ``on_early`` hook: it fires AT the key-down of a chord
+held alone, so the recording and the bar start at once. Inside the window the
+early start is only on approval: a key that joins, or a release (a tap on
+Command dictates nothing anyone could say in that time), takes it back
+through ``on_abandon``, which must leave no trace. Without ``on_early`` the
+gate behaves as it always did.
+
+The backends feed it chord-down / foreign-input / chord-up edges from their
+own listener thread; the early hook fires on that thread, the confirmation
+from a timer thread. All state changes happen under one lock, and the
+callbacks run outside it.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+log = logging.getLogger(__name__)
+
+#: How long a modifier-only hold key must be held alone before its press is
+#: confirmed (and, with an early start, how long that start stays on approval).
+#: Long enough that the second key of an ordinary shortcut lands first (people
+#: press ``c`` of ``cmd+c`` well inside this), short enough that a deliberate
+#: hold-and-speak loses no more than a breath.
+SOLO_HOLD_S = 0.3
+
+#: Builds the one-shot timer behind a pending press (``threading.Timer``'s
+#: signature). A module attribute so tests can drive time by hand.
+_timer_factory: Callable[..., Any] = threading.Timer
+
+_UP = "up"
+_PENDING = "pending"
+_ACTIVE = "active"
+_SPOILED = "spoiled"
+
+Callback = Callable[[], None] | None
+
+
+@dataclass(frozen=True)
+class SoloHoldHooks:
+    """The extra callbacks of one gated chord, beside its press and release.
+
+    ``cancel``: a key joined after the press was confirmed. ``early``: the
+    chord went down alone (fires at once). ``abandon``: an early start is
+    taken back, because a key joined or the chord went up inside the window.
+    """
+
+    cancel: Callback = None
+    early: Callback = None
+    abandon: Callback = None
+
+
+def gate_for(on_press: Callback, on_release: Callback, hooks: Any) -> SoloHold:
+    """Build the gate for one chord; ``hooks`` is a ``SoloHoldHooks`` or a bare cancel."""
+    if isinstance(hooks, SoloHoldHooks):
+        return SoloHold(
+            on_press,
+            on_release,
+            hooks.cancel,
+            on_early=hooks.early,
+            on_abandon=hooks.abandon,
+        )
+    return SoloHold(on_press, on_release, hooks)
+
+
+class SoloHold:
+    """Push-to-talk gate for one modifier-only chord (see module docstring)."""
+
+    def __init__(
+        self,
+        on_press: Callback,
+        on_release: Callback,
+        on_cancel: Callback,
+        *,
+        on_early: Callback = None,
+        on_abandon: Callback = None,
+        delay_s: float | None = None,
+        timer_factory: Callable[..., Any] | None = None,
+    ) -> None:
+        self._on_press = on_press
+        self._on_release = on_release
+        self._on_cancel = on_cancel
+        self._on_early = on_early
+        self._on_abandon = on_abandon
+        # Read when the gate is built, not when this module is imported, so a
+        # test can swap the clock for every gate a backend creates.
+        self._delay_s = SOLO_HOLD_S if delay_s is None else delay_s
+        self._timer_factory = timer_factory or _timer_factory
+        self._lock = threading.Lock()
+        self._state = _UP
+        self._timer: Any = None
+        # Bumped on every edge, so a timer that fires after the hold it was
+        # started for has ended can tell and do nothing.
+        self._generation = 0
+
+    @property
+    def state(self) -> str:
+        return self._state
+
+    def down(self, *, alone: bool) -> None:
+        """The chord went down; ``alone`` is false when other input is held too."""
+        with self._lock:
+            self._cancel_timer_locked()
+            self._generation += 1
+            if not alone:
+                self._state = _SPOILED
+                return
+            self._state = _PENDING
+            generation = self._generation
+            timer = self._timer_factory(self._delay_s, self._fire, args=(generation,))
+            timer.daemon = True
+            self._timer = timer
+        # Before the timer runs, so the confirmation can never overtake it.
+        _call(self._on_early, "early")
+        timer.start()
+
+    def spoil(self) -> None:
+        """Other input joined while the chord is down: it is a shortcut."""
+        cancel = abandon = False
+        with self._lock:
+            if self._state == _PENDING:
+                self._cancel_timer_locked()
+                self._state = _SPOILED
+                abandon = True
+            elif self._state == _ACTIVE:
+                self._state = _SPOILED
+                cancel = True
+        if cancel:
+            _call(self._on_cancel, "cancel")
+        elif abandon and self._on_early is not None:
+            _call(self._on_abandon, "abandon")
+
+    def up(self) -> None:
+        """The chord went up."""
+        with self._lock:
+            previous = self._state
+            self._cancel_timer_locked()
+            self._generation += 1
+            self._state = _UP
+        if previous == _ACTIVE:
+            _call(self._on_release, "release")
+        elif previous == _PENDING and self._on_early is not None:
+            # A tap: the early start had nothing to record.
+            _call(self._on_abandon, "abandon")
+
+    def reset(self) -> None:
+        """Forget the hold (listener stop, grant lost); only an early start is taken back."""
+        with self._lock:
+            previous = self._state
+            self._cancel_timer_locked()
+            self._generation += 1
+            self._state = _UP
+        if previous == _PENDING and self._on_early is not None:
+            # Before the early start there was nothing running; leave it so.
+            _call(self._on_abandon, "abandon")
+
+    def _fire(self, generation: int) -> None:
+        with self._lock:
+            if generation != self._generation or self._state != _PENDING:
+                return
+            self._state = _ACTIVE
+            self._timer = None
+        _call(self._on_press, "press")
+
+    def _cancel_timer_locked(self) -> None:
+        timer = self._timer
+        self._timer = None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:  # noqa: BLE001 - a stale timer is checked by generation
+                log.debug("solo-hold timer cancel failed", exc_info=True)
+
+
+def _call(callback: Callback, edge: str) -> None:
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception:  # noqa: BLE001 - a handler error must not kill the listener
+        log.exception("solo-hold %s handler failed (edge dropped)", edge)

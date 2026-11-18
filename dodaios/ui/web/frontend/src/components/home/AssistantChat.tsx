@@ -1,0 +1,73 @@
+import { lazy, Suspense, useEffect } from "react";
+
+import { useT } from "@/i18n";
+import { useAgentChatStore } from "@/store/agentChat";
+import { useEventStore } from "@/store/events";
+import { useHomeStore } from "@/store/home";
+
+const ChatStage = lazy(() =>
+  import("@/components/home/ChatStage").then((module) => ({ default: module.ChatStage })),
+);
+// An agent's own chat, opened from the sidebar — society code, its own chunk.
+const HomeAgentChat = lazy(() => import("@/components/home/HomeAgentChat"));
+// The assistant's live browser beside the chat; its own chunk.
+const ChatWithBrowser = lazy(() =>
+  import("@/components/home/chatBrowser/ChatBrowserStage").then((module) => ({ default: module.ChatWithBrowser })),
+);
+
+/**
+ * The front page: ONE chat with the assistant (2026-10-01), and since
+ * 2026-11-09 one endless conversation: there is no blank "new chat" page.
+ *
+ * Nothing but the conversation — no header row, no side card; only while the
+ * assistant uses its browser does that browser show beside it. An empty chat
+ * is a short greeting over the composer in the middle of the page;
+ * the composer itself carries every control,
+ * including the round voice button. A call is not another page: the
+ * conversation stays on screen, the call window (components/home/CallWindow)
+ * opens above the composer while the call runs, and what is said lands in
+ * the conversation as ordinary messages.
+ */
+export function AssistantChat() {
+  const t = useT();
+  const agentChatId = useHomeStore((s) => s.agentChatId);
+  // An explicitly selected archived voice chat owns the lane.
+  const voiceThreadOpen = useEventStore((s) => s.activeKind === "voice" && Boolean(s.activeThreadId));
+  // The page always shows the one conversation (agent_chat/lead.py): with no
+  // session on stage — first paint, a deleted chat — it opens it, unless an
+  // archived voice chat was put on stage on purpose.
+  const activeSessionId = useAgentChatStore((s) => s.activeSessionId);
+  const continuedVoiceId = useHomeStore((s) => s.continuedVoiceId);
+  useEffect(() => {
+    if (agentChatId || activeSessionId !== null || continuedVoiceId || voiceThreadOpen) return;
+    useAgentChatStore.getState().newChat();
+  }, [activeSessionId, agentChatId, continuedVoiceId, voiceThreadOpen]);
+  const loading = (
+    <div role="status" className="flex min-h-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+      {t("common.loading")}
+    </div>
+  );
+
+  if (agentChatId) {
+    return (
+      <div className="relative flex min-h-0 flex-1 flex-col" data-testid="assistant-chat" data-agent={agentChatId}>
+        <Suspense fallback={loading}>
+          <HomeAgentChat agentId={agentChatId} />
+        </Suspense>
+      </div>
+    );
+  }
+
+  // The browser stage (components/home/chatBrowser) wraps the chat: a live
+  // tile in its corner while the assistant browses, the chat on the left and
+  // the browser on the right once the person opens it large.
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col" data-testid="assistant-chat">
+      <Suspense fallback={loading}>
+        <ChatWithBrowser>
+          <ChatStage />
+        </ChatWithBrowser>
+      </Suspense>
+    </div>
+  );
+}

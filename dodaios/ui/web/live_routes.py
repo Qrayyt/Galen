@@ -1,0 +1,332 @@
+"""Guided GPT-Live setup; mounted under the authenticated provider API."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Literal
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field
+
+from dodaios.core.config import BrainTierConfig
+from dodaios.live.config import LiveConfig
+
+router = APIRouter(prefix="/api/live", tags=["live"])
+
+
+@router.get("/login-helper", summary="Check local ChatGPT login helper availability")
+async def get_live_login_helper() -> dict:
+    """Verify an existing private helper without installing or signing in."""
+    from dodaios.live.login_helper import login_helper_status
+
+    return await asyncio.to_thread(login_helper_status)
+
+
+@router.post("/login-helper", summary="Install the verified native ChatGPT login helper")
+async def install_live_login_helper(request: Request) -> dict:
+    """Provision Codex without Node after an explicit install action."""
+    import threading
+
+    from dodaios.live.login_helper import LoginHelperError, install_login_helper
+
+    cancel = threading.Event()
+    worker = asyncio.create_task(
+        asyncio.to_thread(install_login_helper, cancel), name="live-login-helper-install"
+    )
+
+    async def watch_disconnect() -> None:
+        while True:
+            if (await request.receive())["type"] == "http.disconnect":
+                cancel.set()
+                return
+
+    watcher = asyncio.create_task(watch_disconnect(), name="live-login-helper-disconnect")
+    try:
+        completed, _ = await asyncio.wait((worker, watcher), return_when=asyncio.FIRST_COMPLETED)
+        if watcher in completed:
+            cancel.set()
+        return await asyncio.shield(worker)
+    except LoginHelperError as exc:
+        raise HTTPException(exc.status, detail={"code": exc.code, "message": str(exc)}) from None
+    except asyncio.CancelledError:
+        cancel.set()
+        # Cancelling to_thread does not stop its thread. Join its cooperative
+        # cleanup before releasing the request, without orphaning an installer.
+        await asyncio.shield(asyncio.gather(worker, return_exceptions=True))
+        raise
+    finally:
+        cancel.set()
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
+@router.get("/options", summary="List available thinking models and Live voices")
+async def get_live_options(
+    auth_mode: Literal["api_key", "chatgpt_subscription"] = "api_key",
+    account_id: str = "",
+) -> dict:
+    from dodaios.agent_chat.effort import effort_levels
+    from dodaios.brain.model_catalog import shared_catalog
+
+    if auth_mode == "chatgpt_subscription":
+        from dodaios.live.subscription_auth import SubscriptionAuth, SubscriptionAuthError
+        from dodaios.live.subscription_reasoning import (
+            SubscriptionReasoning,
+            SubscriptionReasoningError,
+        )
+        from dodaios.plugins.realtime.openai_subscription_live import SUBSCRIPTION_VOICES
+
+        auth = SubscriptionAuth(account_id)
+        reasoning = SubscriptionReasoning(credentials=auth.credentials)
+        try:
+            models = await reasoning.list_models()
+        except (SubscriptionAuthError, SubscriptionReasoningError):
+            raise HTTPException(
+                409, "Connect an eligible ChatGPT account to load its models."
+            ) from None
+        finally:
+            await reasoning.aclose()
+            await auth.aclose()
+        return {
+            "models": models,
+            "source": "chatgpt_subscription",
+            "efforts": ["", *effort_levels("openai")],
+            "voices": list(SUBSCRIPTION_VOICES),
+        }
+    catalog = await shared_catalog().list_models("openai")
+    return {
+        "models": [{"id": m.id, "label": m.label} for m in catalog.models],
+        "source": catalog.source,
+        "efforts": ["", *effort_levels("openai")],
+        "voices": list(LIVE_API_VOICES),
+    }
+
+
+#: The Live voices an API key can pick (the call window's voice picker reads
+#: the same list through ``/api/voice/voices``).
+LIVE_API_VOICES: tuple[str, ...] = (
+    "quartz",
+    "ripple",
+    "vesper",
+    "willow",
+    "stone",
+    "gleam",
+    "meridian",
+    "bossa",
+    "tempo",
+    "beacon",
+    "delta",
+    "cinder",
+)
+
+
+def _config(request: Request):
+    from dodaios.core.config import load_config
+
+    return getattr(request.app.state, "config", None) or load_config()
+
+
+def _profile_for_runtime(cfg) -> LiveConfig:
+    """The selected Live provider wins after a CLI/provider-only switch."""
+    from dodaios.ui.web.provider_spec import get_spec
+
+    spec = get_spec(str(getattr(cfg.brain.realtime, "provider", "")))
+    if spec is None or spec.configuration_surface != "live":
+        return cfg.live
+    mode = "chatgpt_subscription" if spec.auth_mode == "codex" else "api_key"
+    return cfg.live.model_copy(update={"auth_mode": mode})
+
+
+@router.get("/profile", summary="Read GPT-Live setup and migration state")
+async def get_live_profile(request: Request) -> dict:
+    cfg = _config(request)
+    profile = _profile_for_runtime(cfg)
+    from dodaios.core.config import get_secret_any
+    from dodaios.plugins.realtime.openai_live import OpenAILiveProvider
+
+    ready = await asyncio.to_thread(get_secret_any, OpenAILiveProvider.credential_candidates)
+    from dodaios.live.subscription_auth import SubscriptionAuth
+
+    auth = SubscriptionAuth.from_runtime_config(cfg)
+    try:
+        status = await auth.status()
+    finally:
+        await auth.aclose()
+    return {
+        "profile": profile.model_dump(),
+        "key_ready": bool(ready),
+        "active": getattr(cfg.brain.realtime, "provider", "") == profile.provider_id,
+        "agent_configured": cfg.brain.worker is not None,
+        "subscription": {
+            "account_id": status["account_id"],
+            "account_connected": status["connected"],
+            # What the last call start proved for this login. A connected
+            # account the voice route refused is "unavailable" with a reason,
+            # never a bare "connected" (issue #828).
+            "voice_status": status["voice_status"],
+            "voice_code": status["voice_code"],
+            "voice_reason": status["voice_reason"],
+            "plan": status["plan"],
+            "reason": status["reason"],
+        },
+    }
+
+
+@router.put("/profile", summary="Save the selected GPT-Live voice and thinking model")
+async def save_live_profile(body: LiveConfig, request: Request) -> dict:
+    from dodaios.core.config_writer import set_live_profile
+
+    effective = body.for_session()
+    if not effective.backend_model.strip() or not body.configured:
+        raise HTTPException(422, "Choose a thinking model before enabling GPT-Live.")
+    if body.auth_mode == "chatgpt_subscription":
+        from dodaios.plugins.realtime.openai_subscription_live import SUBSCRIPTION_VOICES
+
+        if body.subscription_voice not in SUBSCRIPTION_VOICES:
+            raise HTTPException(422, "Choose a voice available for the ChatGPT subscription.")
+    cfg = _config(request)
+    await asyncio.to_thread(set_live_profile, body.model_dump())
+    cfg.live = body
+    cfg.brain.realtime = BrainTierConfig(provider=body.provider_id, model=effective.model)
+    cfg.voice.mode = "realtime"
+    # The writer retired any classic voice profile; the running config has to
+    # agree, or the next call still resolves to that profile until a restart.
+    cfg.voice.profile = ""
+    return {"profile": body.model_dump(), "applies": "next_call"}
+
+
+@router.post("/use-key-for-agent", summary="Use the selected OpenAI model for agents and text chat")
+async def use_live_key_for_agent(request: Request) -> dict:
+    from dodaios.core.config_writer import set_worker_model, set_worker_provider
+
+    cfg = _config(request)
+    if _profile_for_runtime(cfg).auth_mode != "api_key":
+        raise HTTPException(409, "Switch to API-key mode before reusing an API key for agents.")
+    if not cfg.live.configured or not cfg.live.backend_model:
+        raise HTTPException(409, "Set up GPT-Live first.")
+    await asyncio.to_thread(set_worker_provider, "openai")
+    await asyncio.to_thread(set_worker_model, cfg.live.backend_model)
+    cfg.brain.worker = BrainTierConfig(provider="openai", model=cfg.live.backend_model)
+    return {"provider": "openai", "model": cfg.live.backend_model}
+
+
+class ComposerInput(BaseModel):
+    session_id: str = Field(min_length=1, max_length=128)
+    request_id: str = Field(min_length=1, max_length=128)
+    text: str = Field(default="", max_length=32000)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+
+
+@router.get("/composer", summary="Read the active call accepting keyboard input")
+def composer_session() -> dict:
+    from dodaios.live.runtime import active
+
+    session = next((s for s in active() if s.is_active and s.composer_available), None)
+    return {"session_id": session.session_id if session else None}
+
+
+async def _composer_cwd(request: Request, session: Any) -> str:
+    """Use the running call's existing chat binding and one stable folder."""
+    from dodaios.agent_chat.voice_mirror import VoiceChatMirror
+    from dodaios.ui.web.agent_chat_routes import _async_service
+
+    folder = getattr(session, "_composer_cwd", "")
+    if folder:
+        return folder
+    svc = await _async_service(request)
+    target = (
+        None if getattr(svc, "voice_session_continued", None)
+        else VoiceChatMirror._target_session(svc, session.session_id)
+    )
+    if target is not None:
+        svc.pin_voice_call(session.session_id, target.session_id)
+    folder = (target.cwd if target is not None else "") or svc.default_cwd("jarvis")
+    session._composer_cwd = folder
+    return folder
+
+
+def _composer_attachments(
+    cwd: str, raw: list[dict],
+) -> list[tuple[str, list[dict], str, dict]]:
+    """Resolve only uploaded files in this call's drop folder."""
+    import base64
+    import hashlib
+    import mimetypes
+    from pathlib import Path
+    from urllib.parse import urlencode
+
+    from dodaios.agent_chat.attachments import compose, to_analysis
+    from dodaios.agentic_ide.drops import dereference
+    from dodaios.core.image_references import MAX_BYTES
+
+    root = Path(cwd).resolve()
+    result = []
+    analyses = to_analysis(raw)
+    if len(analyses) != len(raw):
+        raise ValueError("An attachment has invalid upload metadata.")
+    for item in analyses:
+        relative = dereference(item.reference)
+        path = (root / relative).resolve()
+        if (
+            not relative
+            or not path.is_relative_to(root / ".jarvis" / "drops")
+            or not path.is_file()
+        ):
+            raise ValueError("The attachment is not an existing upload in this chat folder.")
+        note = compose("[Files supplied by the user, context rather than a new request]", [item])
+        size = path.stat().st_size
+        content = [{"type": "input_text", "text": note}]
+        mime = mimetypes.guess_type(path.name)[0] or ""
+        if item.kind == "image":
+            if size > MAX_BYTES:
+                raise ValueError("This image is too large for live input.")
+            if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+                raise ValueError("This image format is not supported by live input.")
+            content.append({
+                "type": "input_image",
+                "image_url": (
+                    f"data:{mime};base64,"
+                    + base64.b64encode(path.read_bytes()).decode("ascii")
+                ),
+            })
+        elif not item.detail:
+            raise ValueError(
+                "No readable text could be extracted from this file; it remains attached."
+            )
+        receipt = {
+            "name": path.name,
+            "kind": item.kind,
+            "described_by": item.described_by,
+            "size_bytes": size,
+        }
+        if mime.startswith(("image/", "video/")) and mime != "image/svg+xml":
+            receipt["url"] = "/api/agent-chat/attachments/file?" + urlencode({
+                "cwd": cwd, "reference": item.reference,
+            })
+        key = hashlib.sha256((item.reference + "\0" + item.detail).encode()).hexdigest()
+        result.append((key, content, note, receipt))
+    return result
+
+
+@router.post("/composer", summary="Send text or files into the running live call")
+async def submit_composer(body: ComposerInput, request: Request) -> dict:
+    from dodaios.live.runtime import active, on_session_loop
+
+    session = next((s for s in active() if s.session_id == body.session_id), None)
+    if session is None or not session.composer_available:
+        raise HTTPException(
+            status_code=409, detail="The selected voice call is no longer available."
+        )
+    cwd = await _composer_cwd(request, session)
+    try:
+        built = await asyncio.to_thread(_composer_attachments, cwd, body.attachments)
+        attachments = [(key, content, note) for key, content, note, _receipt in built]
+        display = [receipt for _key, _content, _note, receipt in built]
+        await on_session_loop(
+            session, session.submit_composer,
+            request_id=body.request_id, text=body.text.strip(), attachments=attachments,
+            display_attachments=display,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"session_id": session.session_id, "accepted": True}

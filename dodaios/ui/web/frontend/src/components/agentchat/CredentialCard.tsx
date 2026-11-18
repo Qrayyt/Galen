@@ -1,0 +1,199 @@
+import { memo, useId, useRef, useState, type FormEvent } from "react";
+import { KeyRound, ShieldCheck, X } from "lucide-react";
+import { fill, useT } from "@/i18n";
+import { AgentChatApiError, declineAgentChatCredential, submitAgentChatCredential, type CredentialResult } from "@/lib/agentChatApi";
+import { useAgentChat } from "./AgentChatStoreContext";
+import { ActionCard } from "./actionCard/ActionCard";
+import { ConnectCard } from "./ConnectCard";
+import { LoginCard } from "./LoginCard";
+import type { CredentialState } from "./reduce";
+
+/**
+ * An agent's secure credential field (dodaios/agent_chat/credential_requests.py).
+ *
+ * The person pastes a token the agent asked for; the value goes from this
+ * field to the vault in one request and is never kept in the chat: no event,
+ * no store and no reply carries it. The agent only learns that the
+ * environment variable is set.
+ *
+ * Kept small on purpose: the label is the card's only heading, then the field
+ * with one button, then one line that says where the value goes. What the
+ * secret is for is the agent's reply above the card and the vault's note.
+ */
+
+export const CredentialCard = memo(function CredentialCard({ credential }: { credential: CredentialState }) {
+  if (credential.kind === "login") return <LoginCard credential={credential} />;
+  if (credential.kind === "plugin" || credential.kind === "cli") return <ConnectCard credential={credential} />;
+  return <TokenCard credential={credential} />;
+});
+
+function TokenCard({ credential }: { credential: CredentialState }) {
+  return (
+    <div className="my-2 w-full max-w-xl">
+      {credential.status !== null ? <ClosedCard credential={credential} /> : (
+        <OpenCard key={credential.requestId} credential={credential} />
+      )}
+    </div>
+  );
+}
+
+function OpenCard({ credential }: { credential: CredentialState }) {
+  const t = useT();
+  const sessionId = useAgentChat((s) => s.activeSessionId);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<CredentialResult["status"] | null>(null);
+  const errorId = useId();
+  const footerId = useId();
+  const sending = useRef(false);
+  const agent = credential.asker || t("credential_card.fallback_agent");
+  // A PEM block keeps its line breaks; every other secret is one line.
+  const multiline = credential.secretKind === "private_key";
+
+  const failure = (err: unknown): string => {
+    if (err instanceof AgentChatApiError) {
+      const keys: Record<string, string> = {
+        invalid_token: "invalid_token", network_error: "network_error", validation_timeout: "validation_timeout",
+        storage_failed: "storage_failed", request_busy: "request_busy", request_closed: "expired",
+      };
+      const key = keys[err.code];
+      if (key) return t(`credential_card.${key}`);
+    }
+    if (err instanceof AgentChatApiError && (err.status === 400 || err.status === 422)) return t("credential_card.invalid");
+    if (err instanceof AgentChatApiError && (err.status === 404 || err.status === 410)) return t("credential_card.expired");
+    if (err instanceof TypeError) return t("credential_card.network_error");
+    return t("credential_card.failed");
+  };
+
+  const run = async (action: (sid: string) => Promise<CredentialResult>, expected: CredentialResult["status"]) => {
+    if (sending.current || !sessionId) return;
+    sending.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await action(sessionId);
+      if (!result.ok || result.status !== expected || result.request_id !== credential.requestId) {
+        throw new AgentChatApiError("credential-unconfirmed", 502);
+      }
+      setValue("");
+      // The HTTP receipt is sufficient even while the event stream reconnects.
+      setResolved(result.status);
+    } catch (err) {
+      setError(failure(err));
+      sending.current = false;
+      setBusy(false);
+    }
+  };
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    const secret = value.trim();
+    if (secret) void run((sid) => submitAgentChatCredential(sid, credential.requestId, secret), "saved");
+  };
+
+  if (resolved) return <ClosedCard credential={{ ...credential, status: resolved }} />;
+
+  const describedBy = error ? `${footerId} ${errorId}` : footerId;
+  const fieldProps = {
+    value,
+    disabled: busy,
+    autoComplete: "new-password",
+    autoCorrect: "off",
+    autoCapitalize: "off",
+    spellCheck: false,
+    "data-1p-ignore": true,
+    "data-lpignore": "true",
+    name: `credential-${credential.requestId}`,
+    maxLength: 16384,
+    placeholder: credential.placeholder || fill(t("credential_card.placeholder"), { label: credential.label }),
+    "aria-label": credential.label,
+    "aria-invalid": Boolean(error),
+    "aria-describedby": describedBy,
+    "data-testid": "credential-input",
+  } as const;
+  const fieldClass =
+    "min-w-0 flex-1 rounded-lg border border-border bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:border-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60";
+
+  // The shared action card frame, without a separate title: the label sits in
+  // the source chip, the field and its one button below it.
+  return (
+    <ActionCard
+      id={`credential:${credential.requestId}`}
+      testId="credential-card"
+      state="open"
+      source={{ icon: <KeyRound strokeWidth={1.75} />, label: credential.label }}
+      title={null}
+      ariaLabel={`${t("credential_card.aria")}: ${credential.label}`}
+      lines={credential.replace ? [fill(t("credential_card.replace_note"), { agent })] : undefined}
+      trailing={
+        <button
+          type="button"
+          onClick={() => void run((sid) => declineAgentChatCredential(sid, credential.requestId), "declined")}
+          disabled={busy}
+          aria-label={t("credential_card.decline")}
+          title={t("credential_card.decline")}
+          className="action-card-dismiss"
+        >
+          <X aria-hidden className="h-4 w-4" />
+        </button>
+      }
+    >
+      <form onSubmit={submit} className={multiline ? "flex flex-col gap-2" : "flex gap-2"}>
+        {multiline ? (
+          <textarea
+            {...fieldProps}
+            rows={4}
+            onChange={(event) => setValue(event.target.value)}
+            className={`${fieldClass} py-2 font-mono text-xs [-webkit-text-security:disc]`}
+          />
+        ) : (
+          <input
+            {...fieldProps}
+            type="password"
+            onChange={(event) => setValue(event.target.value)}
+            className={`${fieldClass} h-[34px]`}
+          />
+        )}
+        <button
+          type="submit"
+          disabled={busy || !value.trim()}
+          className={`action-card-button h-[34px] shrink-0 justify-center${multiline ? " self-end" : ""}`}
+          data-tone="primary"
+          data-testid="credential-save"
+        >
+          {busy ? t("credential_card.saving") : t("credential_card.save")}
+        </button>
+      </form>
+      <div className="mt-2 space-y-0.5 text-xs leading-5 text-muted-foreground">
+        <p id={footerId} className="m-0 flex items-center gap-1.5" title={t("credential_card.stays_open")}>
+          <ShieldCheck aria-hidden className="h-3.5 w-3.5 shrink-0" />
+          <span>{fill(t("credential_card.footer"), { agent })}</span>
+        </p>
+        {error ? (
+          <p id={errorId} role="alert" className="m-0 text-destructive">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    </ActionCard>
+  );
+}
+
+function ClosedCard({ credential }: { credential: CredentialState }) {
+  const t = useT();
+  const saved = credential.status === "saved";
+  const key = saved ? "saved" : credential.status === "declined" ? "declined" : credential.status === "timeout" ? "timeout" : "cancelled";
+  const sentence = fill(t(`credential_card.${key}`), { label: credential.label, env: credential.env });
+  return (
+    <ActionCard
+      id={`credential:${credential.requestId}`}
+      testId="credential-card"
+      state={credential.status ?? ""}
+      source={{ icon: <KeyRound strokeWidth={1.75} />, label: credential.label }}
+      title={null}
+      ariaLabel={sentence}
+      settled={{ tone: saved ? "success" : "muted", label: sentence }}
+    />
+  );
+}

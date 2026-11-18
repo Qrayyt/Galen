@@ -1,0 +1,414 @@
+"""The Agentic IDE's thread layout: the backend pieces it reads.
+
+A thread is an agent-chat session on the IDE's own surface. Its list row is
+named by the title the coding CLI gave the conversation itself (unless the
+person renamed it), it reports waiting approvals, its diff panel reads the
+thread's folder — a worktree no workspace has open included — and its
+terminal drawer opens a shell in that folder.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from dodaios.agent_chat.events import make_event
+from dodaios.agent_chat.service import AgentChatService
+from dodaios.agent_chat.store import AgentChatStore
+from dodaios.agentic_ide import cli_title, thread_folders
+from dodaios.ui.web import workspace_routes
+from dodaios.ui.web.agent_chat_routes import router as chat_router
+from dodaios.ui.web.agentic_ide_git_routes import router as git_router
+
+
+@pytest.fixture(autouse=True)
+def _fresh_titles(monkeypatch):
+    monkeypatch.setattr(cli_title, "RECHECK_S", 0.0)
+    cli_title.reset_for_tests()
+    yield
+    cli_title.reset_for_tests()
+
+
+def _write_jsonl(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(json.dumps(row) + "\n")
+
+
+def _settled(agent: str, sid: str, expected: str) -> str:
+    """The thread title once the background read caught up (it never blocks the list)."""
+    deadline = time.monotonic() + 3.0
+    title = cli_title.session_title(agent, sid)
+    while title != expected and time.monotonic() < deadline:
+        time.sleep(0.02)
+        title = cli_title.session_title(agent, sid)
+    return title
+
+
+# ------------------------------------------------------------ CLI titles
+
+
+def test_a_thread_takes_claude_s_own_title_from_its_seat_s_folder(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "_account_home", lambda agent, account: tmp_path)
+    sid = "6f1c2d1e-0000-4000-8000-000000000001"
+    transcript = tmp_path / "projects" / "C--repo" / f"{sid}.jsonl"
+    _write_jsonl(transcript, [{"type": "user", "message": "fix the login test"}])
+    assert _settled("claude", sid, "") == ""
+
+    _write_jsonl(transcript, [{"type": "ai-title", "aiTitle": "Fix login test"}])
+    assert _settled("claude", sid, "Fix login test") == "Fix login test"
+
+    _write_jsonl(transcript, [{"type": "custom-title", "customTitle": "Login fix"}])
+    assert _settled("claude", sid, "Login fix") == "Login fix"
+
+
+def test_a_thread_takes_codex_s_thread_name(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "_account_home", lambda agent, account: tmp_path)
+    _write_jsonl(
+        tmp_path / "session_index.jsonl", [{"id": "thread-1", "thread_name": "Speed up the build"}]
+    )
+    # The first read answers from the (empty) cache at once; the record lands next.
+    assert _settled("codex", "thread-1", "Speed up the build") == "Speed up the build"
+
+
+def test_a_thread_takes_grok_build_s_own_session_summary(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "_account_home", lambda agent, account: tmp_path)
+    sid = "562e6e6d-896f-4921-8f07-78ac3cf449e8"
+    folder = tmp_path / "sessions" / "C%3A%5Crepo" / sid
+    folder.mkdir(parents=True)
+    (folder / "summary.json").write_text(
+        json.dumps({"info": {"id": sid}, "session_summary": "PR 1191 shader pets"}),
+        encoding="utf-8",
+    )
+    assert _settled("grok-build", sid, "PR 1191 shader pets") == "PR 1191 shader pets"
+
+
+def test_a_thread_takes_antigravity_s_own_title(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "_account_home", lambda agent, account: tmp_path)
+    sid = "9acf4021-ea31-42aa-bfed-4233a1f0f847"
+    cache = tmp_path / "antigravity-cli" / "cache"
+    cache.mkdir(parents=True)
+    rows = {"conversations": {sid: {"summary": {"ID": sid, "Title": "Git Push Run"}}}}
+    (cache / "conversation_metadata.json").write_text(json.dumps(rows), encoding="utf-8")
+    assert _settled("antigravity", sid, "Git Push Run") == "Git Push Run"
+
+
+def test_no_title_for_other_clis_or_unsafe_ids(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "_account_home", lambda agent, account: tmp_path)
+    assert cli_title.session_title("opencode", "abc") == ""
+    assert cli_title.session_title("claude", "../escape") == ""
+    assert cli_title.session_title("claude", "") == ""
+
+
+# ------------------------------------------------------------ session list
+
+
+def _chat_app(tmp_path: Path) -> tuple[FastAPI, AgentChatService]:
+    service = AgentChatService(
+        AgentChatStore(tmp_path / "db.sqlite"), default_cwd=lambda: str(tmp_path)
+    )
+    app = FastAPI()
+    app.include_router(chat_router)
+    app.state.agent_chat = service
+    return app, service
+
+
+def test_the_thread_list_offers_the_cli_title_until_the_person_renames(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        cli_title,
+        "session_title",
+        lambda agent, sid, account="": "Fix login test" if agent == "claude" else "",
+    )
+    app, service = _chat_app(tmp_path)
+    session = service.store.create_session(
+        provider="claude-api",
+        model="",
+        effort="",
+        cwd=str(tmp_path),
+        permission_mode="default",
+        surface="agent",
+    )
+    service.store.append_event(
+        session.session_id, make_event("user_message", {"text": "fix the login test please"})
+    )
+    service.store.update_session(
+        session.session_id, vendor_session="6f1c2d1e-0000-4000-8000-000000000001"
+    )
+
+    with TestClient(app) as client:
+        row = client.get("/api/agent-chat/sessions?surface=agent").json()["sessions"][0]
+        assert row["title"] == "fix the login test please"
+        assert row["cli_title"] == "Fix login test"
+        assert row["pending_approvals"] == []
+
+        client.patch(
+            f"/api/agent-chat/sessions/{session.session_id}", json={"title": "My own name"}
+        )
+        row = client.get("/api/agent-chat/sessions?surface=agent").json()["sessions"][0]
+        assert row["title"] == "My own name"
+        assert row["cli_title"] == ""
+
+
+def test_a_thread_the_cli_did_not_name_gets_a_topic_title(tmp_path, monkeypatch) -> None:
+    from dodaios.sessions import chat_titles
+
+    class _Titler:
+        def titles_for(self, requests):
+            return {(r.kind, r.conv_id): "Thread mode titles" for r in requests}
+
+    monkeypatch.setattr(chat_titles, "titler_for_state", lambda state: _Titler())
+    monkeypatch.setattr(cli_title, "session_title", lambda *args, **kwargs: "")
+    app, service = _chat_app(tmp_path)
+    session = service.store.create_session(
+        provider="claude-api",
+        model="",
+        effort="",
+        cwd=str(tmp_path),
+        permission_mode="default",
+        surface="agent",
+    )
+    service.store.append_event(
+        session.session_id, make_event("user_message", {"text": "Hallo, ich möchte Titel"})
+    )
+    with TestClient(app) as client:
+        row = client.get("/api/agent-chat/sessions?surface=agent").json()["sessions"][0]
+        assert row["title"] == "Thread mode titles"
+
+
+def test_the_titler_reads_the_person_s_words_of_a_message_with_files(
+    tmp_path, monkeypatch
+) -> None:
+    """A first message with a file still gives an automatic title, never a typed one.
+
+    The store titles the chat from the person's sentence (or the file's name);
+    the titler must compare with the same words. Fed the composed prompt, it
+    took every such title for one the person typed and never named the thread.
+    """
+    from dodaios.agent_chat import attachments as chat_attachments
+    from dodaios.sessions import chat_titles
+
+    seen: dict[str, chat_titles.TitleRequest] = {}
+
+    class _Titler:
+        def titles_for(self, requests):
+            seen.update({r.seed: r for r in requests})
+            return {}
+
+    monkeypatch.setattr(chat_titles, "titler_for_state", lambda state: _Titler())
+    monkeypatch.setattr(cli_title, "session_title", lambda *args, **kwargs: "")
+    app, service = _chat_app(tmp_path)
+    files = [{"name": "shot.png", "kind": "image"}]
+
+    def thread(typed: str, title: str = "", *, before_the_fix: bool = False) -> str:
+        prompt = chat_attachments.compose(typed, chat_attachments.to_analysis(files))
+        # A thread from before the fix was named after the prompt written for the model.
+        from_prompt = " ".join(prompt.split())[:79].rstrip() + "…"
+        session = service.store.create_session(
+            provider="claude-api", model="", effort="", cwd=str(tmp_path),
+            permission_mode="default", surface="agent",
+            title=from_prompt if before_the_fix else title,
+        )
+        service.store.append_event(
+            session.session_id,
+            make_event("user_message", {"text": prompt, "typed": typed, "attachments": files}),
+        )
+        return from_prompt
+
+    thread("look at this")
+    thread("")
+    old_title = thread("", before_the_fix=True)
+    thread("look at this", title="My own name")
+
+    with TestClient(app) as client:
+        client.get("/api/agent-chat/sessions?surface=agent")
+
+    def automatic(seed: str) -> bool:
+        request = seen[seed]
+        openers = [text for role, text in request.loader() if role == "user"]
+        assert all("Files the user attached" not in text for text in openers)
+        return seed in {request.auto_title(text) for text in openers}
+
+    assert automatic("look at this")
+    assert automatic("shot.png")
+    assert automatic(old_title)
+    assert not automatic("My own name")
+
+
+def test_the_front_page_list_is_left_alone(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli_title, "session_title", lambda *args, **kwargs: "never")
+    app, service = _chat_app(tmp_path)
+    service.store.create_session(
+        provider="claude-api",
+        model="",
+        effort="",
+        cwd=str(tmp_path),
+        permission_mode="",
+        surface="jarvis",
+    )
+    monkeypatch.setattr("dodaios.ui.web.agent_chat_routes._title_chats", lambda *args: None)
+    with TestClient(app) as client:
+        row = client.get("/api/agent-chat/sessions?surface=jarvis").json()["sessions"][0]
+        assert "cli_title" not in row
+
+
+# ------------------------------------------------------------ folder diff
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Path:
+    folder = tmp_path / "repo"
+    folder.mkdir()
+    _git(["init", "-q"], folder)
+    _git(["config", "user.email", "test@example.com"], folder)
+    _git(["config", "user.name", "Test"], folder)
+    (folder / "app.py").write_text("one\ntwo\n", encoding="utf-8")
+    _git(["add", "app.py"], folder)
+    _git(["commit", "-q", "-m", "init"], folder)
+    return folder
+
+
+def test_a_thread_s_diff_panel_reads_its_own_folder(repo: Path, monkeypatch) -> None:
+    monkeypatch.setattr(thread_folders, "_known_roots", lambda: [repo.resolve()])
+    (repo / "app.py").write_text("one\nthree\n", encoding="utf-8")
+    (repo / "new.txt").write_text("hello\n", encoding="utf-8")
+    app = FastAPI()
+    app.include_router(git_router)
+    with TestClient(app) as client:
+        changes = client.get("/api/agentic-ide/git/changes", params={"folder": str(repo)}).json()
+        assert changes["available"] is True
+        assert {item["path"]: item["status"] for item in changes["files"]} == {
+            "app.py": "modified",
+            "new.txt": "untracked",
+        }
+
+        diff = client.get(
+            "/api/agentic-ide/git/diff", params={"folder": str(repo), "path": "app.py"}
+        ).json()
+        kinds = [(line["kind"], line["text"]) for hunk in diff["hunks"] for line in hunk["lines"]]
+        assert ("del", "two") in kinds and ("add", "three") in kinds
+
+        outside = client.get(
+            "/api/agentic-ide/git/diff", params={"folder": str(repo), "path": "../escape.txt"}
+        )
+        assert outside.status_code == 400
+
+
+def test_the_folder_routes_read_only_connected_projects(repo: Path, tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr(thread_folders, "_known_roots", lambda: [project.resolve()])
+    app = FastAPI()
+    app.include_router(git_router)
+    with TestClient(app) as client:
+        changes = client.get("/api/agentic-ide/git/changes", params={"folder": str(repo)})
+        assert changes.status_code == 403
+        diff = client.get(
+            "/api/agentic-ide/git/diff", params={"folder": str(repo), "path": "app.py"}
+        )
+        assert diff.status_code == 403
+
+
+# ------------------------------------------------------------ title bar badges
+
+
+def test_a_thread_s_github_and_done_gate_status_read_its_cli_session(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    from dodaios.agentic_ide import done_gate_status, github_status
+
+    monkeypatch.setattr(thread_folders, "_known_roots", lambda: [repo.resolve()])
+    seen: dict[str, object] = {}
+
+    def board(key, records, *, wait=0):
+        seen["key"], seen["records"] = key, records
+        return {"panes": {"thread": None}, "refreshing": False}
+
+    def gates(records):
+        seen["gates"] = records
+        return {"thread": None}
+
+    monkeypatch.setattr(github_status, "board", board)
+    monkeypatch.setattr(done_gate_status, "board", gates)
+    app, service = _chat_app(tmp_path)
+    app.include_router(git_router)
+    session = service.store.create_session(
+        provider="claude-api",
+        model="",
+        effort="",
+        cwd=str(repo),
+        permission_mode="default",
+        surface="agent",
+    )
+    vendor = "6f1c2d1e-0000-4000-8000-000000000002"
+    service.store.update_session(session.session_id, vendor_session=vendor)
+    with TestClient(app) as client:
+        status = client.get(
+            "/api/agentic-ide/git/thread-status",
+            params={"session_id": session.session_id, "instant": "1"},
+        )
+        assert status.status_code == 200 and status.json()["panes"] == {"thread": None}
+        assert seen["key"] == f"thread:{session.session_id}"
+        (record,) = seen["records"]
+        assert (record.pane, record.agent, record.session_id) == ("thread", "claude", vendor)
+        assert Path(record.folder) == repo.resolve()
+
+        gate = client.get(
+            "/api/agentic-ide/git/thread-done-gate", params={"session_id": session.session_id}
+        )
+        assert gate.json() == {"panes": {"thread": None}}
+        (gate_record,) = seen["gates"]
+        assert gate_record.session_id == vendor
+
+        missing = client.get("/api/agentic-ide/git/thread-status", params={"session_id": "nope"})
+        assert missing.status_code == 404
+
+
+def test_a_thread_outside_a_connected_project_has_no_status(
+    repo: Path, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(thread_folders, "_known_roots", lambda: [])
+    app, service = _chat_app(tmp_path)
+    app.include_router(git_router)
+    session = service.store.create_session(
+        provider="claude-api",
+        model="",
+        effort="",
+        cwd=str(repo),
+        permission_mode="default",
+        surface="agent",
+    )
+    with TestClient(app) as client:
+        status = client.get(
+            "/api/agentic-ide/git/thread-status", params={"session_id": session.session_id}
+        )
+        assert status.json() == {"panes": {"thread": None}}
+
+
+# ------------------------------------------------------------ terminal drawer
+
+
+def test_the_drawer_terminal_opens_only_inside_a_connected_project(tmp_path: Path, monkeypatch):
+    project = tmp_path / "project"
+    (project / ".worktrees" / "fix").mkdir(parents=True)
+    monkeypatch.setattr(thread_folders, "_known_roots", lambda: [project.resolve()])
+    assert workspace_routes._terminal_folder(str(project)) == project.resolve()
+    worktree = project / ".worktrees" / "fix"
+    assert workspace_routes._terminal_folder(str(worktree)) == worktree.resolve()
+    assert workspace_routes._terminal_folder(str(tmp_path)) is None
+    assert workspace_routes._terminal_folder("relative/path") is None
+    assert workspace_routes._terminal_folder(str(tmp_path / "missing")) is None
+    assert workspace_routes._terminal_folder("") is None
+    assert workspace_routes._terminal_folder(None) is None

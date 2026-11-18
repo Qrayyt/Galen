@@ -1,0 +1,160 @@
+"""The status light folds the board, jobs, attention and seat health into counts."""
+
+from __future__ import annotations
+
+import time
+from types import SimpleNamespace
+
+from dodaios.brain.seat_health import CLASS_AUTH, SeatHealth, SeatVerdict
+from dodaios.core.status_light import MAX_ROWS, build_status_light
+
+BOARD = {
+    "needs_you": [],
+    "coding_agents": {
+        "workspaces": [
+            {
+                "workspace": "api",
+                "workspace_id": "w1",
+                "agents": [
+                    {"terminal_id": "t1", "name": "Agent 1", "state": "busy"},
+                    {"terminal_id": "t2", "name": "Agent 2", "cli": "claude",
+                     "title": "Fix the login", "state": "needs_input"},
+                ],
+            }
+        ]
+    },
+    "team": {"working": [{"agent_id": "a1", "name": "Researcher"}], "idle": 2},
+    "missions": [
+        {"mission_id": "m1", "state": "RUNNING", "request": "Write the report"},
+        {"mission_id": "m2", "state": "WAITING_CAPACITY", "request": "Big job"},
+    ],
+    "tasks": [{"task_id": "k1", "title": "Nightly sync", "state": "running"}],
+}
+
+
+def _job(job_id: str, ref: str = "") -> SimpleNamespace:
+    return SimpleNamespace(
+        id=job_id, kind="mission", title=f"job {job_id}", state="running", ref=ref
+    )
+
+
+def test_counts_and_links() -> None:
+    card = {
+        "kind": "question",
+        "agent_id": "jarvis",
+        "session_id": "s",
+        "ref_id": "q1",
+        "summary": "Which database?",
+        "since_ms": 5,
+    }
+    light = build_status_light(board=BOARD, attention=[card], jobs=[_job("j1")])
+    kinds = [row["kind"] for row in light["running"]]
+    assert kinds == ["pane", "team", "mission", "task", "job"]
+    assert light["counts"] == {"running": 5, "needs_you": 3, "prepared": 0}
+    first = light["needs_you"][0]
+    assert first["link"] == {"agent_id": "jarvis", "session_id": "s", "ref_id": "q1"}
+    assert {row["kind"] for row in light["needs_you"]} == {"question", "pane", "mission"}
+    assert light["tone"] == "calm"
+
+
+def test_job_of_a_board_mission_is_not_listed_twice() -> None:
+    light = build_status_light(board=BOARD, jobs=[_job("j1", ref="m1"), _job("j2")])
+    assert [row["id"] for row in light["running"] if row["kind"] == "job"] == ["j2"]
+
+
+def test_trouble_sets_a_warning_tone() -> None:
+    seat = SeatVerdict("openai", "work", CLASS_AUTH, time.time() + 3600, True)
+    light = build_status_light(seats=[seat])
+    assert light["tone"] == "warn"
+    assert light["trouble"][0]["provider"] == "openai"
+    assert light["trouble"][0]["blocked"] is True
+
+
+def test_empty_sources_are_quiet_and_rows_are_bounded() -> None:
+    assert build_status_light()["counts"] == {"running": 0, "needs_you": 0, "prepared": 0}
+    many = build_status_light(jobs=[_job(str(n)) for n in range(MAX_ROWS + 10)])
+    assert many["counts"]["running"] == MAX_ROWS + 10
+    assert len(many["running"]) == MAX_ROWS
+
+
+def test_seat_health_lists_only_live_verdicts() -> None:
+    now = [1000.0]
+    health = SeatHealth(clock=lambda: now[0])
+    health.record_failure("openai", "work", "401 invalid api key")
+    health.record_failure("grok", "", "boom")
+    troubled = health.troubled()
+    assert [seat.provider for seat in troubled] == ["openai"]
+    now[0] += 10 * 24 * 3600
+    assert health.troubled() == []
+
+
+def test_watchdog_findings_set_a_warning_tone() -> None:
+    light = build_status_light(
+        findings=[{"key": "f1", "kind": "silent_turn", "title": "Turn is silent"}]
+    )
+    assert light["tone"] == "warn"
+    assert light["findings"] == [{"id": "f1", "kind": "silent_turn", "title": "Turn is silent"}]
+
+
+def test_a_failing_provider_finding_names_the_provider_and_the_failure() -> None:
+    light = build_status_light(
+        findings=[{
+            "key": "seat_failure:openai-live-subscription:realtime:model_unavailable",
+            "kind": "seat_failure",
+            "title": "openai-live-subscription (realtime) is failing: model_unavailable",
+            "evidence": {"provider": "openai-live-subscription", "modality": "realtime",
+                         "status": "model_unavailable", "provider_label": "OpenAI GPT-Live"},
+        }]
+    )
+    row = light["findings"][0]
+    assert row["provider"] == "OpenAI GPT-Live"
+    assert row["modality"] == "realtime"
+    assert row["status"] == "model_unavailable"
+
+
+def test_prepared_items_are_counted_apart_and_never_warn() -> None:
+    light = build_status_light(
+        prepared=[{"id": "pr1", "kind": "mail_reply", "title": "Reply to Bob", "thread_key": "t1"}]
+    )
+    assert light["counts"] == {"running": 0, "needs_you": 0, "prepared": 1}
+    assert light["prepared"][0]["title"] == "Reply to Bob" and light["tone"] == "calm"
+
+
+def test_a_waiting_coding_agent_says_who_it_is_and_where() -> None:
+    light = build_status_light(board=BOARD)
+    pane = next(row for row in light["needs_you"] if row["kind"] == "pane")
+    assert pane["agent"] == "claude"
+    assert pane["name"] == "Fix the login"
+    assert pane["workspace"] == "api"
+    assert pane["title"] == "Fix the login (api)"
+    assert pane["link"] == {"section": "agentic-ide", "workspace_id": "w1", "pane": "Agent 2"}
+
+
+def test_a_card_carries_the_name_of_the_agent_that_asks() -> None:
+    card = {"kind": "question", "agent_id": "a1", "agent_name": "Researcher",
+            "session_id": "s", "ref_id": "q1", "summary": "Which database?", "since_ms": 5}
+    browser = {"agent_id": "a2", "request_id": "r1", "reason": "Log in", "title": "Scout"}
+    light = build_status_light(attention=[card], browsers=[browser])
+    assert [row["agent_name"] for row in light["needs_you"]] == ["Researcher", "Scout"]
+
+
+def test_a_failing_provider_keeps_its_id_beside_its_name() -> None:
+    finding = {"key": "f1", "kind": "seat_failure", "title": "x", "evidence": {
+        "provider": "openai-live", "provider_label": "OpenAI GPT-Live", "status": "bad_key"}}
+    row = build_status_light(findings=[finding])["findings"][0]
+    assert row["provider"] == "OpenAI GPT-Live"
+    assert row["provider_id"] == "openai-live"
+
+
+def test_a_connect_card_says_which_service_it_asks_for() -> None:
+    connect = {"kind": "credential", "agent_id": "jarvis", "session_id": "s", "ref_id": "c1",
+               "summary": "Gmail", "since_ms": 5, "detail": {
+                   "label": "Gmail", "connect": "plugin", "service": "gmail",
+                   "why": "Then I read your unread mail."}}
+    secret = {"kind": "credential", "agent_id": "jarvis", "session_id": "s", "ref_id": "c2",
+              "summary": "GitHub token", "since_ms": 6, "detail": {"label": "GitHub token"}}
+    first, second = build_status_light(attention=[connect, secret])["needs_you"]
+    assert first["connect"] == {
+        "kind": "plugin", "id": "gmail", "label": "Gmail", "why": "Then I read your unread mail.",
+    }
+    assert "connect" not in second

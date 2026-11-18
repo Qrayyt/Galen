@@ -1,0 +1,1013 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { AgentChatEvent, AgentChatProvider, AgentChatSession } from "@/lib/agentChatApi";
+import { providerKind } from "@/components/agentchat/AgentComposer";
+import { EMPTY_TIMELINE, type Timeline, type UserItem } from "@/components/agentchat/reduce";
+import { FRAME_IDLE_MS, TURN_START_GRACE_MS, createAgentChatStore, draftKey, joinProviderOptions, runningForTimeline } from "@/store/agentChat";
+import { invalidateAgentChatSessions } from "@/lib/agentChatApi";
+import { captureComposerDraftTarget, readComposerDraft, writeComposerDraft } from "@/components/agentchat/composerDrafts";
+
+/**
+ * The store knows its surface: the front page's store speaks for the typed
+ * Jarvis chat (`jarvis`), an IDE's for its coding sessions (`agent`). Each
+ * asks the backend for its own list and catalog, stamps the surface on the
+ * sessions it creates, and keeps its draft under its own key.
+ */
+
+function session(id: string, surface?: AgentChatSession["surface"]): AgentChatSession {
+  return {
+    session_id: id,
+    title: id,
+    provider: "claude-api",
+    model: "",
+    effort: "high",
+    cwd: "C:\\work",
+    permission_mode: "ask",
+    ...(surface === undefined ? {} : { surface }),
+    vendor_session: null,
+    created_ms: 1,
+    updated_ms: 2,
+    message_count: 1,
+    preview: id,
+  };
+}
+
+interface Call {
+  url: string;
+  method: string;
+  body: Record<string, unknown> | null;
+}
+
+/** A fetch that answers every agent-chat route with something plausible and records what was asked. */
+function stubFetch(sessions: AgentChatSession[]): Call[] {
+  const calls: Call[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
+      calls.push({ url, method, body });
+      const reply = (data: unknown) => new Response(JSON.stringify(data), { status: 200 });
+      if (url.startsWith("/api/agent-chat/catalog")) return reply({ providers: [], default_cwd: "C:\\work", shell: "pwsh" });
+      if (url.startsWith("/api/jarvis-agent/status")) return reply({ mapping: [] });
+      if (url.startsWith("/api/agent-chat/sessions?")) return reply({ sessions });
+      if (url === "/api/agent-chat/sessions" && method === "POST") {
+        return reply({ ...session("new"), ...(body ?? {}) });
+      }
+      if (url.endsWith("/messages")) return reply({ turn_id: "t1" });
+      return new Response(null, { status: 404 });
+    }),
+  );
+  return calls;
+}
+
+/** jsdom's WebSocket would try to reach a real host; a silent stand-in is enough here. */
+class FakeSocket {
+  onopen: (() => void) | null = null;
+  onmessage: ((msg: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  close() {}
+}
+
+describe("agent-chat store surfaces", () => {
+
+  it("reconciles a Society permission draft from a clamped PATCH response", async () => {
+    const active = { ...session("society:reader", "society"), permission_mode: "plan" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(active), { status: 200 })));
+    const store = createAgentChatStore("society", "reader");
+    store.setState({ activeSessionId: active.session_id, activeSession: active });
+
+    await store.getState().setDraft({ permissionMode: "bypass" });
+
+    expect(store.getState().activeSession?.permission_mode).toBe("plan");
+    expect(store.getState().draft.permissionMode).toBe("plan");
+  });
+
+  it("keeps the latest Society draft while session PATCHes complete in order", async () => {
+    const active = { ...session("society:reader", "society"), permission_mode: "plan" };
+    const pending: Array<(response: Response) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => pending.push(resolve))));
+    const store = createAgentChatStore("society", "reader-serial");
+    store.setState({ activeSessionId: active.session_id, activeSession: active });
+
+    const first = store.getState().setDraft({ permissionMode: "ask" });
+    const second = store.getState().setDraft({ permissionMode: "bypass" });
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    pending[0](new Response(JSON.stringify({ ...active, permission_mode: "ask" })));
+    await first;
+    expect(store.getState().draft.permissionMode).toBe("bypass");
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    pending[1](new Response(JSON.stringify({ ...active, permission_mode: "plan" })));
+    await second;
+    expect(store.getState().draft.permissionMode).toBe("plan");
+  });
+
+  it("snaps a stored mode the row's ladder does not know onto the row's default", async () => {
+    // The v1 draft was shared with the IDE and could carry a vendor word
+    // ("skip-permissions"); on the Jarvis ladder that must become "ask", not
+    // an unlabelled pill.
+    window.localStorage.setItem(
+      draftKey("jarvis"),
+      JSON.stringify({
+        provider: "antigravity",
+        model: "",
+        effort: "high",
+        permissionMode: "skip-permissions",
+        buildMode: "skip-permissions",
+        cwd: "C:\\ide",
+      }),
+    );
+    const modes = ["ask", "accept-edits", "plan", "bypass"].map((id) => ({ id, label: id, description: "" }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        const reply = (data: unknown) => new Response(JSON.stringify(data), { status: 200 });
+        if (url.startsWith("/api/agent-chat/catalog")) {
+          return reply({
+            providers: [
+              {
+                id: "antigravity",
+                label: "Antigravity",
+                family: "antigravity",
+                runner: "agy-cli",
+                models_source: "curated",
+                curated_models: [],
+                default_model: "",
+                keyless: false,
+                native_resume: true,
+                effort_levels: ["low", "medium", "high"],
+                default_effort: "medium",
+                cli_installed: true,
+                permission_modes: modes,
+                default_permission_mode: "ask",
+              },
+            ],
+            default_cwd: "C:\\home",
+            shell: "pwsh",
+          });
+        }
+        if (url.startsWith("/api/jarvis-agent/status")) return reply({ mapping: [] });
+        if (url.startsWith("/api/providers/")) return reply({ models: [] });
+        return new Response(null, { status: 404 });
+      }),
+    );
+    const store = createAgentChatStore("jarvis");
+    await store.getState().loadCatalog();
+    const draft = store.getState().draft;
+    expect(draft.provider).toBe("antigravity");
+    expect(draft.permissionMode).toBe("ask");
+    expect(draft.buildMode).toBe("ask");
+    expect(draft.effort).toBe("high");
+  });
+
+  it("paints the last catalog at once and keeps it across a new chat while it refreshes", async () => {
+    // The composer showed "Provider" for seconds on every start and every new
+    // chat: the catalog began empty and the route waits on CLI model lists.
+    const calls = stubFetch([]);
+    const first = createAgentChatStore("jarvis");
+    expect(first.getState().catalog).toBeNull();
+    await first.getState().loadCatalog();
+
+    const next = createAgentChatStore("jarvis");
+    expect(next.getState().catalog).toEqual(first.getState().catalog);
+    expect(next.getState().catalogStale).toBe(true);
+    await next.getState().loadCatalog();
+    expect(next.getState().catalogStale).toBe(false);
+
+    const before = calls.filter((c) => c.url.startsWith("/api/agent-chat/catalog")).length;
+    next.getState().newChat();
+    expect(next.getState().catalog).not.toBeNull();
+    expect(next.getState().catalogStale).toBe(true);
+    await vi.waitFor(() => expect(next.getState().catalogStale).toBe(false));
+    expect(calls.filter((c) => c.url.startsWith("/api/agent-chat/catalog")).length).toBeGreaterThan(before);
+    // Each surface keeps its own copy.
+    expect(createAgentChatStore("agent").getState().catalog).toBeNull();
+  });
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("counts a brain seat as connected only when an API KEY is saved", () => {
+    // The Agents tab calls a Claude Code login "connected" — right for a row
+    // a CLI runs. On the front page's chat the same row is the Anthropic
+    // endpoint, where that login buys nothing, so it must read as unconnected
+    // until a key is there.
+    const row = (runner: string, keyless = false) => ({
+      id: "claude-api",
+      label: "Anthropic Claude",
+      family: "claude",
+      runner,
+      models_source: "live" as const,
+      curated_models: [],
+      default_model: "",
+      keyless,
+      native_resume: true,
+      effort_levels: ["low", "high"],
+      default_effort: "high",
+      permission_modes: [{ id: "ask", label: "ask", description: "" }],
+      default_permission_mode: "ask",
+      cli_installed: null,
+    });
+    const seat = (runner: string, conn: Record<string, unknown>) => {
+      const store = createAgentChatStore("jarvis");
+      store.setState({
+        catalog: { providers: [row(runner)], default_cwd: "C:\work", shell: "pwsh" },
+        connections: [{ jarvis: "claude-api", is_active_brain: false, ...conn }],
+      } as never);
+      return store.getState().providerOptions()[0].connected;
+    };
+    const subscriptionOnly = { key_set: true, api_key_set: false, oauth_connected: true };
+    expect(seat("brain", subscriptionOnly)).toBe(false);
+    expect(seat("api", subscriptionOnly)).toBe(false);
+    // The CLI seat itself is exactly what that login is for.
+    expect(seat("claude-cli", subscriptionOnly)).toBe(true);
+    expect(seat("brain", { key_set: true, api_key_set: true })).toBe(true);
+    // A backend too old to report the finer field still answers as before.
+    expect(seat("brain", { key_set: true })).toBe(true);
+  });
+
+  it("connects a chat-only API seat when its catalog reports an API key", () => {
+    const provider: AgentChatProvider & { api_key_set: boolean } = {
+      id: "deepseek",
+      label: "DeepSeek",
+      family: "deepseek",
+      runner: "api",
+      models_source: "live",
+      curated_models: [],
+      default_model: "deepseek-flash",
+      keyless: false,
+      native_resume: false,
+      effort_levels: [""],
+      default_effort: "",
+      permission_modes: [],
+      default_permission_mode: "ask",
+      cli_installed: null,
+      api_key_set: true,
+    };
+    expect(joinProviderOptions([provider], [])[0].connected).toBe(true);
+    expect(joinProviderOptions([{ ...provider, api_key_set: false }], [])[0].connected).toBe(false);
+  });
+
+  it("counts a coding CLI the Agents tab has no card for as connected once installed", () => {
+    // OpenCode, Kimi, GLM Coding Plan and the DeepSeek harness keep their own
+    // login; the Agents tab has no card for them, and "no card" must not read
+    // as "not connected" — installed is what this app can know. The row also
+    // wears the IDE's mark for that CLI, so both pickers draw it alike.
+    const row = (cli_installed: boolean) => ({
+      id: "opencode",
+      label: "OpenCode",
+      family: "opencode",
+      runner: "opencode-cli",
+      models_source: "curated" as const,
+      curated_models: [],
+      default_model: "",
+      keyless: false,
+      native_resume: true,
+      effort_levels: [""],
+      default_effort: "",
+      permission_modes: [{ id: "auto", label: "auto", description: "" }],
+      default_permission_mode: "auto",
+      cli_installed,
+      agent: "opencode",
+    });
+    const seat = (cli_installed: boolean) => {
+      const store = createAgentChatStore("agent");
+      store.setState({
+        catalog: { providers: [row(cli_installed)], default_cwd: "C:\\work", shell: "pwsh" },
+        connections: [],
+      } as never);
+      return store.getState().providerOptions()[0];
+    };
+    expect(seat(true).connected).toBe(true);
+    expect(seat(true).agentMark).toBe("opencode");
+    expect(seat(false).connected).toBe(false);
+  });
+
+  it("groups a brain seat with the API keys, never with the CLIs", () => {
+    expect(providerKind({ runner: "brain", keyless: false })).toBe("api");
+    expect(providerKind({ runner: "api", keyless: false })).toBe("api");
+    expect(providerKind({ runner: "claude-cli", keyless: false })).toBe("cli");
+    expect(providerKind({ runner: "brain", keyless: true })).toBe("local");
+  });
+
+  it("names the front page's draft key as it always was, and gives the IDE its own", () => {
+    expect(draftKey("jarvis")).toBe("jarvis.agentChat.draft.v2");
+    expect(draftKey("agent")).toBe("jarvis.agentChat.draft.agent.v1");
+  });
+
+  it("creates a front-page session stamped with its surface", async () => {
+    const calls = stubFetch([]);
+    const store = createAgentChatStore("jarvis");
+    store.setState({
+      draft: { provider: "claude-api", model: "", effort: "high", permissionMode: "ask", buildMode: "ask", cwd: "C:\\work" },
+    });
+    await store.getState().send("hello");
+    const create = calls.find((c) => c.url === "/api/agent-chat/sessions" && c.method === "POST");
+    expect(create?.body).toMatchObject({ provider: "claude-api", permission_mode: "ask", surface: "jarvis" });
+    expect(store.getState().activeSessionId).toBe("new");
+    expect(store.getState().sessions[0]?.surface).toBe("jarvis");
+  });
+
+  it("asks the list for its own surface and drops rows of the other", async () => {
+    const calls = stubFetch([session("mine", "agent"), session("theirs", "jarvis")]);
+    const store = createAgentChatStore("agent");
+    await store.getState().loadSessions();
+    const list = calls.find((c) => c.url.startsWith("/api/agent-chat/sessions?"));
+    expect(list?.url).toContain("surface=agent");
+    expect(store.getState().sessions.map((s) => s.session_id)).toEqual(["mine"]);
+  });
+
+  it("keeps rows that name no surface — an older backend still lists its chats", async () => {
+    stubFetch([session("old"), session("front", "jarvis"), session("ide", "agent")]);
+    const store = createAgentChatStore("jarvis");
+    await store.getState().loadSessions();
+    expect(store.getState().sessions.map((s) => s.session_id)).toEqual(["old", "front"]);
+  });
+
+  it("asks the catalog for its surface", async () => {
+    const calls = stubFetch([]);
+    const store = createAgentChatStore("jarvis");
+    await store.getState().loadCatalog();
+    const catalog = calls.find((c) => c.url.startsWith("/api/agent-chat/catalog"));
+    expect(catalog?.url).toBe("/api/agent-chat/catalog?surface=jarvis");
+  });
+
+  it("keeps one draft per surface, under separate keys", async () => {
+    stubFetch([]);
+    const front = createAgentChatStore("jarvis");
+    const ide = createAgentChatStore("agent");
+    await front.getState().setDraft({ cwd: "C:\\front" });
+    await ide.getState().setDraft({ cwd: "C:\\ide" });
+    expect(front.getState().draft.cwd).toBe("C:\\front");
+    expect(ide.getState().draft.cwd).toBe("C:\\ide");
+    expect(JSON.parse(window.localStorage.getItem(draftKey("jarvis")) ?? "{}")).toMatchObject({ cwd: "C:\\front" });
+    expect(JSON.parse(window.localStorage.getItem(draftKey("agent")) ?? "{}")).toMatchObject({ cwd: "C:\\ide" });
+    // A fresh store of each surface reads back its own, not the other's.
+    expect(createAgentChatStore("jarvis").getState().draft.cwd).toBe("C:\\front");
+    expect(createAgentChatStore("agent").getState().draft.cwd).toBe("C:\\ide");
+  });
+});
+
+function timelineWith(text: string): Timeline {
+  const item: UserItem = { type: "user", id: text, tsMs: 1, text, attachments: [] };
+  return { ...EMPTY_TIMELINE, items: [item], lastSeq: 1 };
+}
+
+describe("followup admission", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("shares session creation and preserves rapid message order until every request settles", async () => {
+    let open!: (response: Response) => void;
+    let finishFirst!: (response: Response) => void;
+    const messages: string[] = [];
+    let creations = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/agent-chat/sessions" && init?.method === "POST") {
+        creations += 1;
+        return new Promise<Response>((resolve) => { open = resolve; });
+      }
+      if (url.endsWith("/messages")) {
+        messages.push(JSON.parse(String(init?.body)).text);
+        if (messages.length === 1) return new Promise<Response>((resolve) => { finishFirst = resolve; });
+        return new Response(JSON.stringify({ queued: true, queue_id: "q2" }));
+      }
+      return new Response(JSON.stringify({ sessions: [] }));
+    }));
+    const store = createAgentChatStore("jarvis");
+    const first = store.getState().send("first");
+    const second = store.getState().send("second");
+    await vi.waitFor(() => expect(creations).toBe(1));
+    const target = captureComposerDraftTarget(store, null);
+    const unsent = { text: "still typing while the chat opens", choices: [] };
+    writeComposerDraft(store, null, unsent);
+    open(new Response(JSON.stringify(session("created", "jarvis"))));
+    await vi.waitFor(() => expect(messages).toEqual(["first"]));
+    expect(readComposerDraft(store, "created")).toEqual(unsent);
+    expect(readComposerDraft(store, null).text).toBe("");
+    expect(target.sessionId).toBe("created");
+    const third = store.getState().send("third");
+    expect(store.getState().busy).toBe(true);
+    finishFirst(new Response(JSON.stringify({ turn_id: "t1" })));
+    expect(await Promise.all([first, second, third])).toEqual(["sent", "sent", "sent"]);
+    expect(messages).toEqual(["first", "second", "third"]);
+    expect(creations).toBe(1);
+    expect(store.getState().busy).toBe(false);
+    expect(readComposerDraft(store, "created")).toEqual(unsent);
+  });
+
+  it("continues queued submissions after one HTTP failure without changing the selected chat", async () => {
+    let failFirst!: (response: Response) => void;
+    const messages: { url: string; text: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/messages")) {
+        messages.push({ url, text: JSON.parse(String(init?.body)).text });
+        if (messages.length === 1) return new Promise<Response>((resolve) => { failFirst = resolve; });
+        return new Response(JSON.stringify({ queued: true, queue_id: "q" }));
+      }
+      return new Response(JSON.stringify({ sessions: [] }));
+    }));
+    const store = createAgentChatStore("society");
+    store.setState({ activeSessionId: "society:a" });
+    const first = store.getState().send("first");
+    const second = store.getState().send("second");
+    await vi.waitFor(() => expect(messages).toHaveLength(1));
+    store.setState({ activeSessionId: "society:b", busy: false, lastError: null });
+    failFirst(new Response(JSON.stringify({ detail: "temporarily unavailable" }), { status: 503 }));
+    expect(await first).toBe("failed");
+    expect(await second).toBe("stale");
+    expect(messages.map((row) => row.text)).toEqual(["first", "second"]);
+    expect(messages.every((row) => row.url.includes("society%3Aa"))).toBe(true);
+    expect(store.getState()).toMatchObject({ activeSessionId: "society:b", busy: false, lastError: null });
+  });
+
+  it("does not reopen a new chat after the person switched away during creation", async () => {
+    let open!: (response: Response) => void;
+    const messages: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/agent-chat/sessions" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => { open = resolve; });
+      }
+      if (url.endsWith("/messages")) messages.push(url);
+      return new Response(JSON.stringify({ sessions: [], turn_id: "t" }));
+    }));
+    const store = createAgentChatStore("jarvis");
+    const sending = store.getState().send("for the original chat");
+    await vi.waitFor(() => expect(open).toBeTypeOf("function"));
+    store.setState({ activeSessionId: "elsewhere", busy: false });
+    open(new Response(JSON.stringify(session("created", "jarvis"))));
+    expect(await sending).toBe("stale");
+    expect(messages).toEqual(["/api/agent-chat/sessions/created/messages"]);
+    expect(store.getState().activeSessionId).toBe("elsewhere");
+  });
+
+  it("marks a replaced blank draft so a rejected creation cannot restore into the new chat", async () => {
+    let rejectCreation!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+      if (String(input) === "/api/agent-chat/sessions" && init?.method === "POST") {
+        return new Promise<Response>((resolve) => { rejectCreation = resolve; });
+      }
+      return new Response(JSON.stringify({ sessions: [], providers: [] }));
+    }));
+    const store = createAgentChatStore("jarvis");
+    const original = captureComposerDraftTarget(store, null);
+    const sending = store.getState().send("original send");
+    await vi.waitFor(() => expect(rejectCreation).toBeTypeOf("function"));
+    store.getState().newChat();
+    writeComposerDraft(store, null, { text: "deliberate new draft", choices: [] });
+    rejectCreation(new Response(JSON.stringify({ detail: "unavailable" }), { status: 503 }));
+    expect(await sending).toBe("failed");
+    expect(original.superseded).toBe(true);
+    expect(captureComposerDraftTarget(store, null)).not.toBe(original);
+    expect(readComposerDraft(store, null).text).toBe("deliberate new draft");
+    expect(store.getState()).toMatchObject({ activeSessionId: null, lastError: null });
+  });
+});
+
+describe("agent-chat store session switch", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("drops the previous transcript the moment another session opens", () => {
+    const store = createAgentChatStore("society");
+    store.setState({
+      activeSessionId: "society:visual-qa",
+      timeline: timelineWith("visual-qa-flowchart"),
+      sessions: [session("society:visual-qa", "society"), session("society:gmail", "society")],
+    });
+    store.getState().openSession("society:gmail");
+    expect(store.getState().activeSessionId).toBe("society:gmail");
+    expect(store.getState().timeline.items).toEqual([]);
+    expect(store.getState().busy).toBe(false);
+  });
+
+  it("restores a visited session's transcript immediately on switch-back", () => {
+    const store = createAgentChatStore("society");
+    store.setState({
+      activeSessionId: "society:visual-qa",
+      timeline: timelineWith("visual-qa-flowchart"),
+      sessions: [session("society:visual-qa", "society"), session("society:gmail", "society")],
+    });
+    store.getState().openSession("society:gmail");
+    store.setState({ timeline: timelineWith("gmail-inbox") });
+    store.getState().openSession("society:visual-qa");
+    expect(store.getState().timeline.items[0]).toMatchObject({ text: "visual-qa-flowchart" });
+    store.getState().openSession("society:gmail");
+    expect(store.getState().timeline.items[0]).toMatchObject({ text: "gmail-inbox" });
+  });
+});
+
+
+it("opening a society catalog never runs paid provider health probes", async () => {
+  const calls = stubFetch([]);
+  await createAgentChatStore("society").getState().loadCatalog();
+  expect(calls.some((call) => call.url.includes("provider-health"))).toBe(false);
+  await createAgentChatStore("jarvis").getState().loadCatalog();
+  expect(calls.some((call) => call.url.includes("provider-health"))).toBe(true);
+});
+
+function chatEvent(seq: number, kind: string, payload: Record<string, unknown>): AgentChatEvent {
+  return { seq, ts_ms: seq, kind, payload };
+}
+
+it("drops the stop control when a watched turn ends, even if the session poll still says it is running", async () => {
+  const row = { ...session("s1", "agent"), running: true };
+  stubFetch([{ ...row }]);
+  try {
+    const store = createAgentChatStore("agent", "running-flag");
+    store.setState({ activeSessionId: "s1", activeSession: row, sessions: [row], timeline: EMPTY_TIMELINE });
+    store.getState().ingest(chatEvent(1, "turn_started", { turn_id: "t1" }));
+    store.getState().ingest(chatEvent(2, "assistant_text", { turn_id: "t1", message_id: "m1", text: "PR 1186 is not merged." }));
+    expect(store.getState().activeSession?.running).toBe(true);
+    store.getState().ingest(chatEvent(3, "turn_finished", { turn_id: "t1", status: "done", duration_ms: 17000 }));
+    expect(store.getState().activeSession?.running).toBe(false);
+    expect(store.getState().sessions[0]?.running).toBe(false);
+    // The list route can still say running until the turn task leaves the
+    // server. That must not put the stop control back over a finished turn.
+    await store.getState().loadSessions();
+    expect(store.getState().activeSession?.running).toBe(false);
+    expect(store.getState().sessions[0]?.running).toBe(false);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps a running mark while the open thread's events have not arrived", async () => {
+  const row = { ...session("s1", "agent"), running: true };
+  stubFetch([row]);
+  try {
+    const store = createAgentChatStore("agent", "running-flag-pending");
+    store.setState({ activeSessionId: "s1", activeSession: row, sessions: [row], timeline: EMPTY_TIMELINE });
+    await store.getState().loadSessions();
+    expect(store.getState().activeSession?.running).toBe(true);
+    expect(store.getState().sessions[0]?.running).toBe(true);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("unchanged session refreshes preserve list identity, while title/account changes update it", async () => {
+  const supplied = [session("one", "jarvis"), session("two", "jarvis")];
+  stubFetch(supplied);
+  try {
+    const store = createAgentChatStore("jarvis");
+    await store.getState().loadSessions();
+    const original = store.getState().sessions;
+    await store.getState().loadSessions();
+    expect(store.getState().sessions).toBe(original);
+    supplied[0] = { ...supplied[0], title: "Renamed", account_id: "another-seat" };
+    await store.getState().loadSessions();
+    const updated = store.getState().sessions;
+    expect(updated).not.toBe(original);
+    expect(updated[0]).toMatchObject({ title: "Renamed", account_id: "another-seat" });
+    expect(updated[1]).toBe(original[1]);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+/** A socket the test drives: it records where each one connected and lets the test send frames. */
+class ScriptedSocket {
+  static all: ScriptedSocket[] = [];
+  onopen: (() => void) | null = null;
+  onmessage: ((msg: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  closed = false;
+  constructor(readonly url: string) {
+    ScriptedSocket.all.push(this);
+  }
+  close() {
+    this.closed = true;
+  }
+  open() {
+    this.onopen?.();
+  }
+  frame(data: unknown) {
+    this.onmessage?.({ data: JSON.stringify(data) });
+  }
+  static last(): ScriptedSocket {
+    return ScriptedSocket.all[ScriptedSocket.all.length - 1];
+  }
+}
+
+/** The `?after=` a socket connected with; 0 when it asked for everything. */
+function afterOf(socket: ScriptedSocket): number {
+  const match = /\?after=(\d+)/.exec(socket.url);
+  return match ? Number(match[1]) : 0;
+}
+
+describe("thread running state stays in step with the turn", () => {
+  const stores: Array<ReturnType<typeof createAgentChatStore>> = [];
+  const make = (namespace: string) => {
+    const store = createAgentChatStore("agent", namespace);
+    stores.push(store);
+    return store;
+  };
+  beforeEach(() => {
+    window.localStorage.clear();
+    ScriptedSocket.all = [];
+    vi.stubGlobal("WebSocket", ScriptedSocket);
+  });
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.getState().disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** A store with the row's session open on a live socket whose snapshot held `events`. */
+  function openWith(store: ReturnType<typeof createAgentChatStore>, row: AgentChatSession, events: AgentChatEvent[]) {
+    store.setState({ sessions: [row] });
+    store.getState().openSession(row.session_id);
+    const ws = ScriptedSocket.last();
+    ws.open();
+    ws.frame({ type: "snapshot", session: row, events });
+    return ws;
+  }
+
+  const at = (seq: number, kind: string, payload: Record<string, unknown>, ts = Date.now()): AgentChatEvent => ({ seq, ts_ms: ts, kind, payload });
+
+  it("counts a message sent after the last turn as running until its turn starts, then trusts the report", () => {
+    const t0 = 1_000_000;
+    const turnDone: Timeline = {
+      ...EMPTY_TIMELINE,
+      items: [{ type: "turn", id: "t1", provider: "", model: "", effort: "", runner: "", status: "done", blocks: [], startedMs: t0 - 5000, durationMs: 1000, usage: null, liveUsage: null, costUsd: null, error: null }],
+    };
+    const asked: Timeline = { ...turnDone, items: [...turnDone.items, { type: "user", id: "u2", text: "next", attachments: [], tsMs: t0 }] };
+    expect(runningForTimeline(turnDone, true, { now: t0 })).toBe(false);
+    expect(runningForTimeline(asked, false, { now: t0 + 2000 })).toBe(true);
+    expect(runningForTimeline(asked, false, { now: t0 + TURN_START_GRACE_MS + 1 })).toBe(false);
+    expect(runningForTimeline(turnDone, false, { now: t0 + 10, sentAtMs: t0 })).toBe(true);
+    // A turn that started after the send answers it.
+    expect(runningForTimeline(turnDone, false, { now: t0 + 10, sentAtMs: t0 - 6000 })).toBe(false);
+    // A ritual's phrase is answered by the card under it: no turn is on the way.
+    const card = (data: Record<string, unknown>) => ({
+      type: "notice" as const, id: "n3", kind: "society_result", text: "", agentName: "", agentId: "",
+      status: "done", tsMs: t0 + 5, data, resolved: "",
+    });
+    const started: Timeline = { ...asked, items: [...asked.items, card({ source: "ritual" })] };
+    expect(runningForTimeline(started, false, { now: t0 + 2000 })).toBe(false);
+    // What a ritual gathered later, or any other notice, answers no message.
+    const late: Timeline = { ...asked, items: [...asked.items, card({ source: "ritual", late: true })] };
+    const routine: Timeline = { ...asked, items: [...asked.items, card({ source: "routine" })] };
+    expect(runningForTimeline(late, false, { now: t0 + 2000 })).toBe(true);
+    expect(runningForTimeline(routine, false, { now: t0 + 2000 })).toBe(true);
+    // A message typed after the ritual's card is a turn about to start again.
+    const next: Timeline = { ...started, items: [...started.items, { type: "user", id: "u4", text: "and now?", attachments: [], tsMs: t0 + 100 }] };
+    expect(runningForTimeline(next, false, { now: t0 + 2000 })).toBe(true);
+    // No turn and no message yet: the report decides.
+    expect(runningForTimeline(EMPTY_TIMELINE, true)).toBe(true);
+  });
+
+  it("keeps the stop control between a new message and its turn_started, even when the poll still says idle", async () => {
+    const row = { ...session("c-gap", "agent"), running: false };
+    stubFetch([row]);
+    const store = make("c-gap");
+    openWith(store, row, [at(1, "user_message", { text: "one" }), at(2, "turn_started", { turn_id: "t1" }), at(3, "turn_finished", { turn_id: "t1", status: "done" })]);
+    expect(store.getState().activeSession?.running).toBe(false);
+    store.getState().ingest(at(4, "user_message", { text: "two" }));
+    expect(store.getState().activeSession?.running).toBe(true);
+    expect(store.getState().sessions[0]?.running).toBe(true);
+    await store.getState().loadSessions();
+    expect(store.getState().activeSession?.running).toBe(true);
+    expect(store.getState().sessions[0]?.running).toBe(true);
+    store.getState().ingest(at(5, "turn_started", { turn_id: "t2" }));
+    store.getState().ingest(at(6, "turn_finished", { turn_id: "t2", status: "done" }));
+    expect(store.getState().activeSession?.running).toBe(false);
+  });
+
+  it("shows running as soon as a send is accepted, before its user_message arrives", async () => {
+    const row = { ...session("c-send", "agent"), running: false };
+    stubFetch([row]);
+    const store = make("c-send");
+    openWith(store, row, [at(1, "turn_started", { turn_id: "t1" }, Date.now() - 5000), at(2, "turn_finished", { turn_id: "t1", status: "done" }, Date.now() - 4000)]);
+    expect(store.getState().activeSession?.running).toBe(false);
+    await store.getState().send("again");
+    expect(store.getState().activeSession?.running).toBe(true);
+  });
+
+  it("marks the row idle on turn_finished without waiting for the list", () => {
+    const row = { ...session("e-row", "agent"), running: true };
+    // A list read that fails: only the local patch can clear the row.
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
+    const store = make("e-row");
+    openWith(store, row, [at(1, "turn_started", { turn_id: "t1" })]);
+    expect(store.getState().sessions[0]?.running).toBe(true);
+    store.getState().ingest(at(2, "turn_finished", { turn_id: "t1", status: "done" }));
+    expect(store.getState().sessions[0]?.running).toBe(false);
+    expect(store.getState().activeSession?.running).toBe(false);
+  });
+
+  it("reconnects from the last seq when the socket goes silent, and counts pings as life", () => {
+    vi.useFakeTimers();
+    const row = { ...session("a-silent", "agent"), running: true };
+    stubFetch([row]);
+    const store = make("a-silent");
+    const ws = openWith(store, row, [at(1, "user_message", { text: "go" }), at(2, "turn_started", { turn_id: "t1" })]);
+    vi.advanceTimersByTime(FRAME_IDLE_MS - 1000);
+    ws.frame({ type: "ping" });
+    vi.advanceTimersByTime(FRAME_IDLE_MS - 1000);
+    expect(ScriptedSocket.all).toHaveLength(1);
+    vi.advanceTimersByTime(2000);
+    expect(ScriptedSocket.all).toHaveLength(2);
+    expect(ws.closed).toBe(true);
+    expect(afterOf(ScriptedSocket.last())).toBe(2);
+    // The resumed snapshot folds onto the transcript and ends the turn.
+    ScriptedSocket.last().open();
+    ScriptedSocket.last().frame({ type: "snapshot", session: { ...row, running: false }, events: [at(3, "turn_finished", { turn_id: "t1", status: "done" })] });
+    expect(store.getState().timeline.items.filter((item) => item.type === "user")).toHaveLength(1);
+    expect(store.getState().activeSession?.running).toBe(false);
+  });
+
+  it("resyncs when the list says idle but the timeline still runs, then believes the list if nothing new came", async () => {
+    const row = { ...session("a-poll", "agent"), running: true };
+    stubFetch([{ ...row, running: false }]);
+    const store = make("a-poll");
+    openWith(store, row, [at(1, "user_message", { text: "go" }, 1), at(2, "turn_started", { turn_id: "t1" }, 2)]);
+    await store.getState().loadSessions();
+    expect(ScriptedSocket.all).toHaveLength(2);
+    expect(afterOf(ScriptedSocket.last())).toBe(2);
+    // Still marked running until the resync answers.
+    expect(store.getState().sessions[0]?.running).toBe(true);
+    ScriptedSocket.last().open();
+    ScriptedSocket.last().frame({ type: "snapshot", session: { ...row, running: false }, events: [] });
+    await store.getState().loadSessions();
+    // The resync brought nothing: the list is believed, and no reconnect loop starts.
+    expect(ScriptedSocket.all).toHaveLength(2);
+    expect(store.getState().sessions[0]?.running).toBe(false);
+    expect(store.getState().activeSession?.running).toBe(false);
+  });
+
+  it("resyncs at once when the window comes back, cutting a pending backoff short", () => {
+    vi.useFakeTimers();
+    const row = { ...session("a-focus", "agent"), running: true };
+    stubFetch([row]);
+    const store = make("a-focus");
+    // Stores of other tests that still hold a session wake too; count this one's sockets.
+    const mine = () => ScriptedSocket.all.filter((socket) => socket.url.includes("/a-focus/"));
+    const ws = openWith(store, row, [at(1, "user_message", { text: "go" }), at(2, "turn_started", { turn_id: "t1" })]);
+    ws.onclose?.();
+    expect(mine()).toHaveLength(1);
+    window.dispatchEvent(new Event("focus"));
+    expect(mine()).toHaveLength(2);
+    expect(afterOf(mine()[1])).toBe(2);
+    // The cancelled backoff never opens a third socket.
+    vi.advanceTimersByTime(40_000);
+    expect(mine()).toHaveLength(2);
+  });
+
+  it("reopens a cached thread from its last seq with the row aligned to the cached transcript", () => {
+    const stale = { ...session("d-open", "agent"), running: true };
+    stubFetch([stale]);
+    const store = make("d-open");
+    openWith(store, stale, [at(1, "turn_started", { turn_id: "t1" }), at(2, "turn_finished", { turn_id: "t1", status: "done" })]);
+    store.setState({ sessions: [stale, session("d-other", "agent")] });
+    store.getState().openSession("d-other");
+    store.getState().openSession("d-open");
+    expect(store.getState().activeSession?.running).toBe(false);
+    expect(afterOf(ScriptedSocket.last())).toBe(2);
+    // A snapshot that cannot be folded on (the transcript went missing) reads everything.
+    store.setState({ timeline: EMPTY_TIMELINE });
+    ScriptedSocket.last().frame({ type: "snapshot", session: stale, events: [] });
+    expect(afterOf(ScriptedSocket.last())).toBe(0);
+  });
+
+  it("tells the thread list when a side column's turn starts and ends", () => {
+    const row = { ...session("b-side", "agent"), running: false };
+    // Every list read fails: only the patch between stores can move the row.
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline"); }));
+    const main = make("b-main");
+    main.setState({ sessions: [row] });
+    void main.getState().loadSessions();
+    const side = make("b-side");
+    openWith(side, row, []);
+    side.getState().ingest(at(1, "turn_started", { turn_id: "t1" }));
+    expect(main.getState().sessions[0]?.running).toBe(true);
+    side.getState().ingest(at(2, "turn_finished", { turn_id: "t1", status: "done" }));
+    expect(main.getState().sessions[0]?.running).toBe(false);
+  });
+
+  it("asks for the list again shortly when every read was invalidated in flight", async () => {
+    vi.useFakeTimers();
+    const row = { ...session("b-retry", "agent"), running: false };
+    let calls = 0;
+    let churning = true;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      calls += 1;
+      await Promise.resolve();
+      if (churning) invalidateAgentChatSessions();
+      return new Response(JSON.stringify({ sessions: [row] }), { status: 200 });
+    }));
+    const store = make("b-retry");
+    await store.getState().loadSessions();
+    expect(calls).toBe(2);
+    expect(store.getState().sessions).toEqual([]);
+    churning = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls).toBe(3);
+    expect(store.getState().sessions[0]?.session_id).toBe("b-retry");
+  });
+});
+
+describe("a thread read ahead opens painted", () => {
+  const stores: Array<ReturnType<typeof createAgentChatStore>> = [];
+  const make = (namespace: string) => {
+    const store = createAgentChatStore("agent", namespace);
+    stores.push(store);
+    return store;
+  };
+  const at = (seq: number, kind: string, payload: Record<string, unknown>): AgentChatEvent => ({ seq, ts_ms: 1, kind, payload });
+  const transcript = [at(1, "user_message", { text: "one" }), at(2, "turn_started", { turn_id: "t1" }), at(3, "turn_finished", { turn_id: "t1", status: "done" })];
+
+  /** A fetch whose session read waits for `release`, and counts how often it was asked. */
+  function heldRead(row: AgentChatSession, events: AgentChatEvent[]) {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const reads: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === `/api/agent-chat/sessions/${row.session_id}`) {
+        reads.push(url);
+        await gate;
+        return new Response(JSON.stringify({ session: row, events }), { status: 200 });
+      }
+      if (url.startsWith("/api/agent-chat/catalog")) return new Response(JSON.stringify({ providers: [], default_cwd: "C:\\work", shell: "pwsh" }), { status: 200 });
+      return new Response(null, { status: 404 });
+    }));
+    return { reads, release };
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    ScriptedSocket.all = [];
+    vi.stubGlobal("WebSocket", ScriptedSocket);
+  });
+  afterEach(() => {
+    for (const store of stores.splice(0)) store.getState().disconnect();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps a thread read ahead, so opening it shows the transcript at once and streams only what came after", async () => {
+    const row = session("p-ahead", "agent");
+    const { reads, release } = heldRead(row, transcript);
+    const store = make("p-ahead");
+    store.setState({ sessions: [row] });
+    store.getState().preloadSession(row.session_id);
+    store.getState().preloadSession(row.session_id);
+    expect(reads).toHaveLength(1);
+    release();
+    // Let the read land in the store's cache.
+    for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    store.getState().openSession(row.session_id);
+    expect(store.getState().timeline.lastSeq).toBe(3);
+    expect(store.getState().timeline.items.length).toBeGreaterThan(0);
+    expect(afterOf(ScriptedSocket.last())).toBe(3);
+  });
+
+  it("shows a read still on its way when it lands before the socket's snapshot, then streams from its end", async () => {
+    const row = session("p-race", "agent");
+    const { release } = heldRead(row, transcript);
+    const store = make("p-race");
+    store.setState({ sessions: [row] });
+    store.getState().preloadSession(row.session_id);
+    store.getState().openSession(row.session_id);
+    const first = ScriptedSocket.last();
+    expect(afterOf(first)).toBe(0);
+    release();
+    await vi.waitFor(() => expect(store.getState().timeline.lastSeq).toBe(3));
+    expect(first.closed).toBe(true);
+    expect(afterOf(ScriptedSocket.last())).toBe(3);
+  });
+
+  it("drops a read that lands after the socket's snapshot", async () => {
+    const row = session("p-late", "agent");
+    const { release } = heldRead(row, transcript.slice(0, 1));
+    const store = make("p-late");
+    store.setState({ sessions: [row] });
+    store.getState().preloadSession(row.session_id);
+    store.getState().openSession(row.session_id);
+    const ws = ScriptedSocket.last();
+    ws.open();
+    ws.frame({ type: "snapshot", session: row, events: transcript });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.getState().timeline.lastSeq).toBe(3);
+    expect(ScriptedSocket.all).toHaveLength(1);
+    expect(ws.closed).toBe(false);
+  });
+});
+
+/**
+ * While Plan is on, the permission pill names the mode Build returns to. The
+ * thread itself has to know it: an approved plan is answered on the server,
+ * and it went on in the runner's default instead of the pill's mode.
+ */
+describe("the mode Build returns to", () => {
+  const draft = { provider: "claude-api", model: "", effort: "high", cwd: "C:\\work" };
+
+  /** A thread in the given mode, and a PATCH route that answers like the server. */
+  function openThread(row: AgentChatSession): { store: ReturnType<typeof createAgentChatStore>; patches: Array<Record<string, unknown>> } {
+    const patches: Array<Record<string, unknown>> = [];
+    let current = { ...row };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string, init?: RequestInit) => {
+        const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+        if (init?.method === "PATCH") {
+          patches.push(body);
+          current = { ...current, ...body } as AgentChatSession;
+        }
+        return new Response(JSON.stringify(current), { status: 200 });
+      }),
+    );
+    const store = createAgentChatStore("agent", `build-${row.session_id}`);
+    store.setState({ activeSessionId: row.session_id, activeSession: row, sessions: [row] });
+    return { store, patches };
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    vi.stubGlobal("WebSocket", FakeSocket);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("starts a thread in Plan with the pill's mode, and names none for a thread that does not plan", async () => {
+    const calls = stubFetch([]);
+    const planning = createAgentChatStore("agent", "build-new");
+    planning.setState({ draft: { ...draft, permissionMode: "plan", buildMode: "default" } });
+    await planning.getState().send("plan this");
+    const created = calls.find((c) => c.url === "/api/agent-chat/sessions" && c.method === "POST");
+    expect(created?.body).toMatchObject({ permission_mode: "plan", build_mode: "default" });
+
+    calls.length = 0;
+    const building = createAgentChatStore("agent", "build-new-2");
+    building.setState({ draft: { ...draft, permissionMode: "default", buildMode: "default" } });
+    await building.getState().send("build this");
+    const plain = calls.find((c) => c.url === "/api/agent-chat/sessions" && c.method === "POST");
+    expect(plain?.body).toMatchObject({ permission_mode: "default" });
+    expect(plain?.body).not.toHaveProperty("build_mode");
+  });
+
+  it("tells the thread a pick made on the pill while Plan is on", async () => {
+    const row = { ...session("p1", "agent"), permission_mode: "plan", build_mode: "bypassPermissions" };
+    const { store, patches } = openThread(row);
+    store.setState({ draft: { ...draft, permissionMode: "plan", buildMode: "bypassPermissions" } });
+
+    await store.getState().setDraft({ buildMode: "default" });
+
+    expect(patches).toEqual([{ build_mode: "default" }]);
+    expect(store.getState().draft).toMatchObject({ permissionMode: "plan", buildMode: "default" });
+    expect(store.getState().activeSession?.build_mode).toBe("default");
+  });
+
+  it("names the pill's mode when Plan is switched on, and nothing when Plan is off", async () => {
+    const row = { ...session("p2", "agent"), permission_mode: "bypassPermissions" };
+    const { store, patches } = openThread(row);
+    store.setState({ draft: { ...draft, permissionMode: "bypassPermissions", buildMode: "bypassPermissions" } });
+
+    // Outside Plan the pill is the thread's mode itself.
+    await store.getState().setDraft({ buildMode: "default" });
+    expect(patches).toEqual([]);
+    await store.getState().setDraft({ permissionMode: "auto" });
+    expect(patches).toEqual([{ permission_mode: "auto" }]);
+
+    await store.getState().setPlan(true);
+    expect(patches[1]).toEqual({ permission_mode: "plan", build_mode: "auto" });
+    expect(store.getState().draft).toMatchObject({ permissionMode: "plan", buildMode: "auto" });
+  });
+
+  it("shows the thread's own mode on the pill, not the one the composer showed last", () => {
+    const row = { ...session("p3", "agent"), permission_mode: "bypassPermissions" };
+    const { store } = openThread(row);
+    store.setState({ timeline: EMPTY_TIMELINE, draft: { ...draft, permissionMode: "bypassPermissions", buildMode: "bypassPermissions" } });
+
+    // Plan switched on elsewhere, with "Ask before edits" to return to.
+    store.getState().ingest(chatEvent(1, "session_updated", { permission_mode: "plan", build_mode: "default" }));
+    expect(store.getState().draft).toMatchObject({ permissionMode: "plan", buildMode: "default" });
+
+    // The plan is approved: the thread is in that mode, and so is the pill.
+    store.getState().ingest(chatEvent(2, "session_updated", { permission_mode: "default" }));
+    expect(store.getState().draft).toMatchObject({ permissionMode: "default", buildMode: "default" });
+  });
+});

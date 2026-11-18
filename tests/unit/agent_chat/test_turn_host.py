@@ -1,0 +1,1522 @@
+"""The turn host — thread CLIs that outlive the app, and carrying their turns on."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from dodaios.agent_chat import runner_api, turn_host, turn_host_client
+from dodaios.agent_chat.runner_cli import resume_hosted_cli_turn
+from dodaios.agent_chat.service import AgentChatService
+from dodaios.agent_chat.store import AgentChatStore
+from dodaios.agentic_ide import host_mode
+from dodaios.terminal.pty_host_client import _handshake
+
+TOKEN = "test-token"  # noqa: S105 - a fixture value
+
+# Prints what it got on stdin, then a second line, waits for "go", prints a
+# third line and exits 3 — enough to tell replayed, live and written lines apart.
+_CHILD = (
+    "import sys\n"
+    "print('got ' + sys.stdin.readline().strip(), flush=True)\n"
+    "print('two', flush=True)\n"
+    "sys.stdin.readline()\n"
+    "print('three', flush=True)\n"
+    "sys.exit(3)\n"
+)
+
+
+async def _start_host(
+    tmp_path: Path, *, idle_exit_s: float = 60.0, unwatched_stdin_s: float = 120.0
+) -> tuple[turn_host.TurnHost, asyncio.Task[None], int]:
+    host = turn_host.TurnHost(
+        TOKEN, tmp_path / "spool", idle_exit_s=idle_exit_s, unwatched_stdin_s=unwatched_stdin_s
+    )
+    state = tmp_path / "state.json"
+    task = asyncio.create_task(host.serve(state))
+    for _ in range(200):
+        if state.exists():
+            break
+        await asyncio.sleep(0.02)
+    return host, task, int(json.loads(state.read_text(encoding="utf-8"))["port"])
+
+
+async def _client(port: int) -> turn_host_client.TurnHostClient:
+    found = await _handshake(
+        port,
+        TOKEN,
+        3.0,
+        proto=turn_host.PROTOCOL_VERSION,
+        limit=turn_host.MAX_FRAME_BYTES,
+    )
+    assert found is not None
+    return turn_host_client._client_from(*found)
+
+
+async def _stop(host: turn_host.TurnHost, task: asyncio.Task[None]) -> None:
+    host._stop.set()
+    await asyncio.wait_for(task, timeout=10)
+
+
+async def test_a_cli_keeps_running_when_the_app_detaches_and_replays_to_the_next(
+    tmp_path: Path,
+) -> None:
+    host, task, port = await _start_host(tmp_path)
+    try:
+        first = await _client(port)
+        cli = await first.spawn(
+            [sys.executable, "-c", _CHILD],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="hello\n",
+            keep_stdin=True,
+            meta={"turn_id": "t1", "keep_stdin": True},
+        )
+        assert await cli.stdout.readline() == b"got hello\n"
+        assert await cli.stdout.readline() == b"two\n"  # acknowledges line 1
+        await asyncio.sleep(0.2)
+        # The app quits: nothing ends, the CLI waits for its "go".
+        first.detach()
+        await asyncio.sleep(0.2)
+
+        second = await _client(port)
+        assert [t["meta"]["turn_id"] for t in second.turns.values()] == ["t1"]
+        again = await second.attach(cli.host_id)
+        assert again is not None
+        assert await again.stdout.readline() == b"got hello\n"
+        assert again.stdout.replaying  # handled before the restart: state only
+        assert await again.stdout.readline() == b"two\n"
+        assert not again.stdout.replaying  # never acknowledged: handled again
+        assert again.stdin is not None
+        again.stdin.write(b"go\n")
+        await again.stdin.drain()
+        assert await again.stdout.readline() == b"three\n"
+        assert await again.stdout.readline() == b""
+        assert await asyncio.wait_for(again.wait(), timeout=10) == 3
+        again.release()
+        await asyncio.sleep(0.2)
+        assert host._turns == {}
+        second.detach()
+    finally:
+        await _stop(host, task)
+
+
+async def test_a_second_app_process_takes_the_turn_over_without_ending_it(
+    tmp_path: Path,
+) -> None:
+    host, task, port = await _start_host(tmp_path)
+    try:
+        first = await _client(port)
+        cli = await first.spawn(
+            [sys.executable, "-c", _CHILD],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="hi\n",
+            keep_stdin=True,
+            meta={"turn_id": "t4", "keep_stdin": True},
+        )
+        assert await cli.stdout.readline() == b"got hi\n"
+
+        second = await _client(port)
+        await asyncio.wait_for(cli.wait(), timeout=5)
+        assert cli.handed_over and cli.detached  # not an ending: no kill, no outcome
+        again = await second.attach(cli.host_id)
+        assert again is not None
+        assert again.stdin is not None
+        again.stdin.write(b"go\n")
+        lines = [await again.stdout.readline() for _ in range(4)]
+        assert lines == [b"got hi\n", b"two\n", b"three\n", b""]
+        assert await asyncio.wait_for(again.wait(), timeout=10) == 3
+        second.detach()
+    finally:
+        await _stop(host, task)
+
+
+async def test_a_turn_that_ends_with_no_app_attached_is_spooled_for_the_next_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(turn_host, "_IDLE_POLL_S", 0.05)
+    host, task, port = await _start_host(tmp_path, idle_exit_s=0.2)
+    client = await _client(port)
+    await client.spawn(
+        [sys.executable, "-c", "print('a', flush=True)"],
+        cwd=str(tmp_path),
+        env=None,
+        stdin=None,
+        keep_stdin=False,
+        meta={"turn_id": "t2"},
+    )
+    client.detach()
+    await asyncio.wait_for(task, timeout=15)  # idle: spools and exits on its own
+    del host
+
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    [record] = turn_host_client.read_spool()
+    assert record["meta"] == {"turn_id": "t2"}
+    cli = turn_host_client.spooled_cli(record)
+    assert await cli.stdout.readline() == b"a\n"
+    assert not cli.stdout.replaying
+    assert await cli.stdout.readline() == b""
+    assert await cli.wait() == 0
+    cli.release()
+    assert turn_host_client.read_spool() == []
+
+
+_CLAUDE_LINES: list[dict[str, Any]] = [
+    {"type": "system", "subtype": "init", "session_id": "sess-1"},
+    {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "hello"}]}},
+    {
+        "type": "assistant",
+        "message": {
+            "id": "m1",
+            "content": [
+                {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "ls"}}
+            ],
+        },
+    },
+    {
+        "type": "user",
+        "message": {
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tu1", "content": "a b", "is_error": False}
+            ]
+        },
+    },
+    {"type": "assistant", "message": {"id": "m2", "content": [{"type": "text", "text": "done"}]}},
+    {
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "total_cost_usd": 0.01,
+        "usage": {"output_tokens": 5},
+    },
+]
+
+
+def _spool_record(tmp_path: Path, *, session_id: str, turn_id: str, acked: int) -> dict[str, Any]:
+    path = tmp_path / "spool" / f"host-{turn_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "id": f"host-{turn_id}",
+        "pid": 1,
+        "meta": {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "runner": "claude-cli",
+            "shape": "claude",
+            "keep_stdin": True,
+            "control": True,
+            "vendor_session": "sess-1",
+            "discover": False,
+            "codex_home": "",
+            "cwd": str(tmp_path),
+            "started_at": time.time() - 5,
+        },
+        "alive": False,
+        "code": 0,
+        "acked": acked,
+        "stdout": [json.dumps(line) for line in _CLAUDE_LINES],
+        "stderr": [],
+        "truncated": False,
+    }
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return {**record, "spool_path": str(path)}
+
+
+async def test_a_carried_on_turn_emits_only_what_the_old_app_never_saw(tmp_path: Path) -> None:
+    store = AgentChatStore(":memory:")
+    try:
+        session = store.create_session(
+            provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+        )
+        events: list[dict[str, Any]] = []
+
+        async def emit(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        async def no_approval(*_args: Any) -> str:
+            pytest.fail("a replayed turn must not ask again")
+
+        handle = runner_api.TurnHandle(
+            session=session,
+            turn_id="t3",
+            emit=emit,
+            request_approval=no_approval,
+            cancel=asyncio.Event(),
+        )
+        # The old app handled the init line, "hello" and the tool call.
+        record = _spool_record(tmp_path, session_id=session.session_id, turn_id="t3", acked=3)
+        vendor = await resume_hosted_cli_turn(handle, turn_host_client.spooled_cli(record))
+
+        kinds = [e["kind"] for e in events]
+        texts = [e["payload"]["text"] for e in events if e["kind"] == "assistant_text"]
+        assert texts == ["done"]
+        assert "tool_call" not in kinds
+        assert "tool_result" in kinds
+        assert kinds[-1] == "turn_finished"
+        assert events[-1]["payload"]["status"] == "done"
+        assert events[-1]["payload"]["duration_ms"] >= 5000
+        assert vendor == "sess-1"
+        assert not await asyncio.to_thread(Path(record["spool_path"]).exists)
+    finally:
+        store.close()
+
+
+@pytest.fixture
+def app_host_mode() -> Any:
+    host_mode.enable()
+    yield
+    host_mode.reset()
+
+
+@pytest.mark.parametrize("built_in", ["event-loop", "route-worker-thread"])
+async def test_a_restarted_app_carries_on_the_thread_turn_the_host_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any, built_in: str
+) -> None:
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+
+    async def no_live_host(*, start: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(turn_host_client, "get_client", no_live_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    kept = store.create_session(
+        provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+    )
+    lost = store.create_session(
+        provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+    )
+    for sid in (kept.session_id, lost.session_id):
+        store.append_event(
+            sid, {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": f"t-{sid}"}}
+        )
+    _spool_record(tmp_path, session_id=kept.session_id, turn_id=f"t-{kept.session_id}", acked=0)
+
+    if built_in == "event-loop":
+        svc = AgentChatService(AgentChatStore(db))
+    else:
+        # The thread list is a plain ``def`` route: the framework builds the
+        # service in a worker thread, where no event loop is running.
+        import anyio.to_thread
+
+        svc = await anyio.to_thread.run_sync(lambda: AgentChatService(AgentChatStore(db)))
+    # Held as running until the host was asked: no second CLI on the conversation.
+    assert svc.is_running(kept.session_id) and svc.is_running(lost.session_id)
+    await svc.wait_reattached()
+    run = svc._running.get(kept.session_id)
+    if run is not None and run.task is not None:
+        await asyncio.wait_for(run.task, timeout=10)
+
+    finished = store.list_events(kept.session_id)[-1]
+    assert finished["kind"] == "turn_finished"
+    assert finished["payload"]["status"] == "done"
+    texts = [
+        e["payload"]["text"]
+        for e in store.list_events(kept.session_id)
+        if e["kind"] == "assistant_text"
+    ]
+    assert texts == ["hello", "done"]
+    assert store.get_session(kept.session_id).vendor_session == "sess-1"  # type: ignore[union-attr]
+
+    sealed = store.list_events(lost.session_id)[-1]
+    assert sealed["kind"] == "turn_finished"
+    assert sealed["payload"]["status"] == "error"
+    assert not svc.is_running(kept.session_id) and not svc.is_running(lost.session_id)
+    assert store.open_turns() == []
+
+
+async def test_a_restarted_app_asks_again_on_the_card_already_on_screen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """The replayed permission prompt reuses the open card instead of stacking a dead one.
+
+    2026-10-06: after a restart the thread showed "Approval needed (2)" — the
+    card from before the restart on top, whose buttons answered "no such
+    pending approval", and the live one hidden behind it.
+    """
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+
+    async def no_live_host(*, start: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(turn_host_client, "get_client", no_live_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    # "Ask": the default Claude Code pick, Bypass, answers a prompt without a card.
+    session = store.create_session(
+        provider="claude-api",
+        model="m",
+        effort="medium",
+        cwd=str(tmp_path),
+        surface="agent",
+        permission_mode="default",
+    )
+    sid = session.session_id
+
+    def card(approval_id: str, call_id: str) -> dict[str, Any]:
+        payload = {"turn_id": "t1", "approval_id": approval_id, "call_id": call_id, "name": "Bash"}
+        return {"kind": "approval_required", "ts_ms": 2_000, "payload": payload}
+
+    store.append_event(sid, {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": "t1"}})
+    # Two restarts already stacked two cards for the same call; one card has no call id.
+    for event in (card("first", "tu1"), card("second", "tu1"), card("loose", "")):
+        store.append_event(sid, event)
+    lines = [
+        _CLAUDE_LINES[0],
+        _CLAUDE_LINES[2],
+        {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "Bash",
+                "input": {"command": "ls"},
+                "tool_use_id": "tu1",
+            },
+        },
+        *_CLAUDE_LINES[3:],
+    ]
+    record = _spool_record(tmp_path, session_id=sid, turn_id="t1", acked=2)
+    record["stdout"] = [json.dumps(line) for line in lines]
+    Path(record["spool_path"]).write_text(json.dumps(record), encoding="utf-8")
+
+    svc = AgentChatService(AgentChatStore(db))
+    await svc.wait_reattached()
+    for _ in range(200):
+        if svc.pending_approvals(sid):
+            break
+        await asyncio.sleep(0.02)
+    assert svc.pending_approvals(sid) == ["second"]
+    closed = {
+        e["payload"]["approval_id"]: e["payload"]["decision"]
+        for e in store.list_events(sid)
+        if e["kind"] == "approval_resolved"
+    }
+    assert closed == {"first": "expired", "loose": "expired"}
+    asked = [e["payload"] for e in store.list_events(sid) if e["kind"] == "approval_required"]
+    assert asked[-1]["approval_id"] == "second"
+    assert asked[-1]["call_id"] == "tu1"
+
+    assert svc.resolve_approval(sid, "second", "allow")
+    run = svc._running.get(sid)
+    if run is not None and run.task is not None:
+        await asyncio.wait_for(run.task, timeout=10)
+    events = store.list_events(sid)
+    resolved = [e["payload"] for e in events if e["kind"] == "approval_resolved"]
+    assert resolved[-1] == {"turn_id": "t1", "approval_id": "second", "decision": "allow"}
+    assert events[-1]["kind"] == "turn_finished"
+    assert events[-1]["payload"]["status"] == "done"
+    assert svc._unanswered == {}
+
+
+def test_tests_and_scripts_never_reach_the_users_turn_host() -> None:
+    host_mode.reset()
+    assert not turn_host_client.host_available()
+    assert not turn_host_client.may_hold_turns()
+
+
+# Asks for a Bash approval on the control protocol, then reports the answer.
+_ASKING_CHILD = (
+    "import json, sys\n"
+    "ask = {'type': 'control_request', 'request_id': 'r1', 'request': {\n"
+    "    'subtype': 'can_use_tool', 'tool_name': 'Bash',\n"
+    "    'input': {'command': 'ls'}, 'tool_use_id': 'tu1'}}\n"
+    "print(json.dumps(ask), flush=True)\n"
+    "for raw in sys.stdin:\n"
+    "    obj = json.loads(raw) if raw.strip().startswith('{') else {}\n"
+    "    if obj.get('type') != 'control_response':\n"
+    "        continue\n"
+    "    said = obj['response']['response']['behavior']\n"
+    "    text = {'type': 'text', 'text': 'approval: ' + said}\n"
+    "    msg = {'type': 'assistant', 'message': {'id': 'm1', 'content': [text]}}\n"
+    "    print(json.dumps(msg), flush=True)\n"
+    "    end = {'type': 'result', 'subtype': 'success', 'is_error': False, 'usage': {}}\n"
+    "    print(json.dumps(end), flush=True)\n"
+    "    break\n"
+)
+
+
+async def test_an_approval_the_old_app_never_answered_opens_again_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    host, task, port = await _start_host(tmp_path)
+    store = AgentChatStore(":memory:")
+    try:
+        session = store.create_session(
+            provider="claude-api",
+            model="m",
+            effort="medium",
+            cwd=str(tmp_path),
+            surface="agent",
+            permission_mode="default",
+        )
+        meta = {
+            "session_id": session.session_id,
+            "turn_id": "t5",
+            "runner": "claude-cli",
+            "shape": "claude",
+            "keep_stdin": True,
+            "control": True,
+            "vendor_session": None,
+            "discover": False,
+            "codex_home": "",
+            "cwd": str(tmp_path),
+            "started_at": time.time(),
+        }
+        first = await _client(port)
+        cli = await first.spawn(
+            [sys.executable, "-c", _ASKING_CHILD],
+            cwd=str(tmp_path),
+            env=None,
+            stdin='{"type": "control_request", "request": {"subtype": "initialize"}}\n',
+            keep_stdin=True,
+            meta=meta,
+        )
+        # The old app saw the request and opened its card — then went away.
+        assert b"control_request" in await cli.stdout.readline()
+        first.detach()
+        await asyncio.sleep(0.2)
+
+        second = await _client(port)
+        again = await second.attach(cli.host_id)
+        assert again is not None
+        asked: list[tuple[str, str]] = []
+        events: list[dict[str, Any]] = []
+
+        async def emit(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        async def approve(call_id: str, name: str, _args: Any, _summary: str) -> str:
+            asked.append((call_id, name))
+            return "allow"
+
+        handle = runner_api.TurnHandle(
+            session=session,
+            turn_id="t5",
+            emit=emit,
+            request_approval=approve,
+            cancel=asyncio.Event(),
+        )
+        await asyncio.wait_for(resume_hosted_cli_turn(handle, again), timeout=30)
+
+        assert asked == [("tu1", "Bash")]
+        texts = [e["payload"]["text"] for e in events if e["kind"] == "assistant_text"]
+        assert texts == ["approval: allow"]
+        assert events[-1]["kind"] == "turn_finished"
+        assert events[-1]["payload"]["status"] == "done"
+        second.detach()
+    finally:
+        store.close()
+        await _stop(host, task)
+
+
+def test_a_frozen_build_starts_the_turn_host_from_its_own_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dodaios.core import frozen
+    from dodaios.terminal import pty_host_client
+    from dodaios.ui import relauncher
+
+    started: list[list[str]] = []
+    monkeypatch.setattr(frozen, "is_frozen", lambda: True)
+    monkeypatch.setattr(
+        pty_host_client,
+        "_start_host_windows",
+        lambda argv, *_rest: started.append(list(argv)) or True,
+    )
+    monkeypatch.setattr(
+        relauncher, "spawn_detached", lambda argv, **_kw: started.append(list(argv))
+    )
+    assert pty_host_client._start_host(
+        tmp_path / "state.json",
+        "tok",
+        module=turn_host_client.MODULE,
+        token_env=turn_host.TOKEN_ENV,
+        log_path=tmp_path / "host.log",
+        extra_args=("--spool", str(tmp_path / "spool")),
+        frozen_flag=turn_host.FROZEN_FLAG,
+    )
+    [argv] = started
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ["--turn-host", "--state"]
+    assert "-m" not in argv
+
+
+def test_the_app_executable_routes_the_turn_host_flag_without_booting_the_app(
+    tmp_path: Path,
+) -> None:
+    import subprocess
+
+    from dodaios.core.process_utils import NO_WINDOW_CREATIONFLAGS
+
+    env = {k: v for k, v in __import__("os").environ.items() if k != turn_host.TOKEN_ENV}
+    done = subprocess.run(  # noqa: S603 - our own interpreter, fixed arguments
+        [
+            sys.executable,
+            "-m",
+            "dodaios",
+            "--turn-host",
+            "--state",
+            str(tmp_path / "s.json"),
+            "--spool",
+            str(tmp_path / "spool"),
+        ],
+        capture_output=True,
+        env=env,
+        timeout=60,
+        check=False,
+        creationflags=NO_WINDOW_CREATIONFLAGS,
+    )
+    # The host's own refusal (no token) — the app itself never started.
+    assert done.returncode == 2
+    assert b"no token" in done.stderr
+
+
+async def test_the_app_start_builds_the_chat_service_only_when_the_host_holds_turns(
+    monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    from types import SimpleNamespace
+
+    from dodaios.ui.web import agent_chat_routes
+
+    monkeypatch.setattr(agent_chat_routes, "_REATTACH_DELAY_S", 0.0)
+    built: list[str] = []
+    holds = {"value": False}
+    monkeypatch.setattr(turn_host_client, "may_hold_turns", lambda: holds["value"])
+
+    def factory() -> str:
+        built.append("svc")
+        return "svc"
+
+    state = SimpleNamespace(agent_chat=None, agent_chat_factory=factory)
+    task = agent_chat_routes.schedule_turn_reattach(state)
+    assert task is not None
+    await task
+    assert built == []  # nothing to carry on: the chat stays unbuilt (AP-26)
+
+    holds["value"] = True
+    task = agent_chat_routes.schedule_turn_reattach(state)
+    assert task is not None
+    await task
+    assert built == ["svc"] and state.agent_chat == "svc"
+
+
+def test_the_app_start_does_nothing_outside_a_real_app_process() -> None:
+    from types import SimpleNamespace
+
+    from dodaios.ui.web import agent_chat_routes
+
+    host_mode.reset()
+    assert agent_chat_routes.schedule_turn_reattach(SimpleNamespace()) is None
+
+
+# Prints its result line, then keeps reading stdin until it is closed.
+_RESULT_THEN_WAIT = (
+    "import json, sys\n"
+    "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+async def test_the_host_closes_stdin_after_the_result_when_no_app_is_attached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(turn_host, "_IDLE_POLL_S", 0.05)
+    host, task, port = await _start_host(tmp_path, unwatched_stdin_s=0.2)
+    try:
+        client = await _client(port)
+        cli = await client.spawn(
+            [sys.executable, "-c", _RESULT_THEN_WAIT],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="prompt\n",
+            keep_stdin=True,
+            meta={"turn_id": "t6"},
+            close_stdin_on="result",
+        )
+        client.detach()  # the app is gone before the CLI even answered
+        for _ in range(200):
+            turn = host._turns.get(cli.host_id)
+            if turn is not None and turn.exit_code is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert host._turns[cli.host_id].exit_code == 0
+    finally:
+        await _stop(host, task)
+
+
+# Prints a few lines, then its result, then waits for stdin to close.
+_CHATTY_RESULT_THEN_WAIT = (
+    "import json, sys\n"
+    "for i in range(5):\n"
+    "    print('x' * 40, flush=True)\n"
+    "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n"
+    "sys.stdin.read()\n"
+)
+
+
+async def test_lines_past_the_replay_cap_still_stream_and_end_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Past the cap the result line used to be skipped outright: the app never
+    # saw the answer and stdin never closed, so the CLI waited for ever.
+    monkeypatch.setattr(turn_host, "MAX_KEPT_BYTES", 100)
+    host, task, port = await _start_host(tmp_path)
+    try:
+        client = await _client(port)
+        cli = await client.spawn(
+            [sys.executable, "-c", _CHATTY_RESULT_THEN_WAIT],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="prompt\n",
+            keep_stdin=True,
+            meta={"turn_id": "t7"},
+            close_stdin_on="result",
+        )
+        lines = []
+        while line := await asyncio.wait_for(cli.stdout.readline(), timeout=10):
+            lines.append(line.decode().strip())
+            if len(lines) == 6:
+                # The app read the answer: it ends the turn by closing stdin.
+                assert cli.stdin is not None
+                cli.stdin.close()
+        assert len(lines) == 6
+        assert json.loads(lines[-1])["type"] == "result"
+        assert await asyncio.wait_for(cli.wait(), timeout=10) == 0
+        turn = host._turns[cli.host_id]
+        assert turn.truncated
+        assert turn.seq == 6
+        assert len(turn.lines) == 2  # what fits under the cap: seq 1..2 for a replay
+        cli.release()
+        client.detach()
+    finally:
+        await _stop(host, task)
+
+
+# Answers, then echoes every further stdin line until stdin closes.
+_RESULT_THEN_ECHO = (
+    "import json, sys\n"
+    "sys.stdin.readline()\n"
+    "print(json.dumps({'type': 'result', 'subtype': 'success'}), flush=True)\n"
+    "for line in sys.stdin:\n"
+    "    print('heard ' + line.strip(), flush=True)\n"
+)
+
+
+async def test_stdin_stays_open_after_the_result_while_an_app_reads_the_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claude Code can wait for background tasks after its answer; a message
+    written then must still reach it, also after an app restart."""
+    monkeypatch.setattr(turn_host, "_IDLE_POLL_S", 0.05)
+    host, task, port = await _start_host(tmp_path, unwatched_stdin_s=30.0)
+    try:
+        first = await _client(port)
+        cli = await first.spawn(
+            [sys.executable, "-c", _RESULT_THEN_ECHO],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="prompt\n",
+            keep_stdin=True,
+            meta={"turn_id": "t10", "keep_stdin": True},
+            close_stdin_on="result",
+        )
+        assert cli.stdin_after_result
+        assert json.loads(await cli.stdout.readline())["type"] == "result"
+        await asyncio.sleep(0.3)  # several polls: a turn being read keeps its stdin
+        assert cli.stdin is not None
+        cli.stdin.write(b"one\n")
+        assert await asyncio.wait_for(cli.stdout.readline(), timeout=10) == b"heard one\n"
+
+        first.detach()  # an app restart, well inside the grace
+        second = await _client(port)
+        again = await second.attach(cli.host_id)
+        assert again is not None and again.stdin is not None
+        assert again.stdin_after_result and not again.stdin.is_closing()
+        again.stdin.write(b"two\n")
+        lines = [await asyncio.wait_for(again.stdout.readline(), timeout=10) for _ in range(3)]
+        assert lines[-1] == b"heard two\n"
+        again.stdin.close()  # the app decides the turn is over
+        assert await asyncio.wait_for(again.wait(), timeout=10) == 0
+        again.release()
+        second.detach()
+    finally:
+        await _stop(host, task)
+
+
+async def test_an_app_attaching_after_the_host_closed_stdin_is_told_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(turn_host, "_IDLE_POLL_S", 0.05)
+    host, task, port = await _start_host(tmp_path, unwatched_stdin_s=0.2)
+    try:
+        first = await _client(port)
+        cli = await first.spawn(
+            # Still busy after its stdin closed, as with a background task open.
+            [sys.executable, "-c", _RESULT_THEN_WAIT + "import time\ntime.sleep(30)\n"],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="prompt\n",
+            keep_stdin=True,
+            meta={"turn_id": "t11", "keep_stdin": True},
+            close_stdin_on="result",
+        )
+        first.detach()
+        for _ in range(200):
+            turn = host._turns.get(cli.host_id)
+            if turn is not None and not turn_host._stdin_open(turn):
+                break
+            await asyncio.sleep(0.05)
+        assert host._turns[cli.host_id].alive
+        second = await _client(port)
+        again = await second.attach(cli.host_id)
+        assert again is not None and again.stdin is not None
+        assert not again.stdin_after_result and again.stdin.is_closing()
+        assert again.returncode is None
+        again.kill()
+        await asyncio.wait_for(again.wait(), timeout=10)
+        second.detach()
+    finally:
+        await _stop(host, task)
+
+
+async def test_a_host_of_another_build_is_replaced_only_while_it_holds_no_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host outlives app updates. One running older code is swapped for a
+    new one at the next thread start, but never while it holds a turn."""
+    host, task, port = await _start_host(tmp_path)
+    try:
+        found = await _handshake(
+            port, TOKEN, 3.0, proto=turn_host.PROTOCOL_VERSION, limit=turn_host.MAX_FRAME_BYTES
+        )
+        assert found is not None
+        reader, writer, reply = found
+        assert reply["build"] == turn_host.BUILD
+        old = turn_host_client._client_from(reader, writer, {**reply, "build": "older"})
+        assert old.outdated and old.holds_nothing()
+        busy = await old.spawn(
+            [sys.executable, "-c", _WAIT_FOREVER],
+            cwd=str(tmp_path),
+            env=None,
+            stdin=None,
+            keep_stdin=False,
+            meta={"turn_id": "t12"},
+        )
+        assert not old.holds_nothing()
+
+        opened: list[bool] = []
+        fresh = object()
+
+        async def reopen(*, start: bool) -> Any:
+            opened.append(start)
+            return fresh
+
+        monkeypatch.setattr(turn_host_client, "_open", reopen)
+        monkeypatch.setattr(turn_host_client, "_client", old)
+        assert await turn_host_client._renew_outdated(old) is old  # a turn runs: it stays
+        assert opened == []
+
+        busy.kill()
+        await asyncio.wait_for(busy.wait(), timeout=10)
+        busy.release()
+        assert old.holds_nothing()
+        assert await turn_host_client._renew_outdated(old) is fresh
+        assert opened == [True] and not old.connected
+    finally:
+        await _stop(host, task)
+
+
+def test_retiring_a_host_never_touches_a_process_that_is_not_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+    # This test's own pid: were it terminated, the run would end here.
+    assert turn_host_client._retire_host({"pid": os.getpid()}) is True
+    assert turn_host_client._retire_host(None) is True
+
+
+def test_concurrent_first_requests_build_only_one_chat_service() -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from types import SimpleNamespace
+
+    from dodaios.ui.web.agent_chat_routes import _service_from_state
+
+    entrants = Barrier(3)
+    built = []
+
+    def factory():
+        service = object()
+        built.append(service)
+        time.sleep(0.1)  # SQLite initialization releases the GIL in production.
+        return service
+
+    state = SimpleNamespace(agent_chat=None, agent_chat_factory=factory)
+
+    def first_request():
+        entrants.wait(timeout=3)
+        return _service_from_state(state)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        services = list(pool.map(lambda _: first_request(), range(3)))
+    assert len(built) == 1
+    assert all(svc is state.agent_chat for svc in services)
+
+
+async def test_reattaching_twice_hands_over_the_old_reader_without_killing_the_cli(tmp_path, monkeypatch):
+    host, task, port = await _start_host(tmp_path)
+    client = await _client(port)
+    attach = host._attach
+    attachments = 0
+
+    async def interleaved(peer, rid, turn):
+        nonlocal attachments
+        attachments += 1
+        if attachments == 2:
+            # A live frame can reach the replacement before the host handles
+            # its attach request. Replay must still start at the first line.
+            await peer.send({"ev": "line", "id": turn.turn_id, "seq": 2, "d": "two"})
+        await attach(peer, rid, turn)
+
+    monkeypatch.setattr(host, "_attach", interleaved)
+    try:
+        spawned = await client.spawn(
+            [sys.executable, "-c", _CHILD],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="hi\n",
+            keep_stdin=True,
+            meta={"turn_id": "duplicate", "keep_stdin": True},
+        )
+        client.detach()
+        client = await _client(port)
+        first = await client.attach(spawned.host_id)
+        assert first is not None
+        assert await first.stdout.readline() == b"got hi\n"
+        second = await client.attach(first.host_id)
+        assert second is not None
+        assert first.handed_over and first.detached
+        assert await asyncio.wait_for(first.wait(), 1) == turn_host_client.HOST_LOST_CODE
+        first.kill()
+        first.release()  # a stale owner must not release the current reader
+        assert client.live() == [second]
+        assert second.stdin is not None
+        second.stdin.write(b"go\n")
+        assert [await second.stdout.readline() for _ in range(4)] == [
+            b"got hi\n",
+            b"two\n",
+            b"three\n",
+            b"",
+        ]
+        assert await asyncio.wait_for(second.wait(), 3) == 3
+        second.release()
+    finally:
+        client.detach()
+        await _stop(host, task)
+
+
+async def test_failed_attach_can_retry_without_leaving_a_dead_reader(tmp_path, monkeypatch):
+    host, task, port = await _start_host(tmp_path)
+    client = await _client(port)
+    try:
+        spawned = await client.spawn(
+            [sys.executable, "-c", _CHILD], cwd=str(tmp_path), env=None,
+            stdin="hi\n", keep_stdin=True, meta={"turn_id": "retry-attach", "keep_stdin": True},
+        )
+        request = client._request
+
+        async def refused(*_args, **_kwargs):
+            raise ConnectionError("attach reply unavailable")
+
+        monkeypatch.setattr(client, "_request", refused)
+        with pytest.raises(ConnectionError, match="attach reply unavailable"):
+            await client.attach(spawned.host_id)
+        assert client.live() == []
+        monkeypatch.setattr(client, "_request", request)
+        resumed = await client.attach(spawned.host_id)
+        assert resumed is not None
+        assert await resumed.stdout.readline() == b"got hi\n"
+        assert resumed.stdin is not None
+        resumed.stdin.write(b"go\n")
+        assert await asyncio.wait_for(resumed.wait(), 3) == 3
+        resumed.release()
+    finally:
+        client.detach()
+        await _stop(host, task)
+
+
+async def test_duplicate_recovery_publishes_one_success_and_no_late_timeout(tmp_path):
+    from dodaios.agent_chat.turn_host_client import TurnHandedOver
+
+    host, task, port = await _start_host(tmp_path)
+    client = await _client(port)
+    store = AgentChatStore(":memory:")
+    session = store.create_session(
+        provider="claude-api", model="fake", effort="", cwd=str(tmp_path)
+    )
+    events = []
+    readers = []
+
+    async def emit(event):
+        events.append(event)
+
+    async def approve(*_args):
+        pytest.fail("No approval expected")
+
+    try:
+        source = "import sys, json\nsys.stdin.readline()\nsys.stdin.readline()\n" + "\n".join(
+            f"print({json.dumps(line)!r}, flush=True)" for line in _CLAUDE_LINES
+        )
+        spawned = await client.spawn(
+            [sys.executable, "-u", "-c", source],
+            cwd=str(tmp_path),
+            env=None,
+            stdin="prompt\n",
+            keep_stdin=True,
+            meta={
+                "turn_id": "duplicate",
+                "runner": "claude-cli",
+                "shape": "claude",
+                "keep_stdin": True,
+                "started_at": time.time(),
+            },
+        )
+        client.detach()
+        client = await _client(port)
+        for _ in range(3):
+            proc = await client.attach(spawned.host_id)
+            assert proc is not None
+            handle = runner_api.TurnHandle(session, "duplicate", emit, approve, asyncio.Event())
+            readers.append(asyncio.create_task(resume_hosted_cli_turn(handle, proc)))
+            await asyncio.sleep(0)
+        for reader in readers[:-1]:
+            with pytest.raises(TurnHandedOver):
+                await asyncio.wait_for(reader, 2)
+        assert proc.stdin is not None
+        proc.stdin.write(b"go\n")
+        await asyncio.wait_for(readers[-1], 3)
+        finishes = [e["payload"] for e in events if e["kind"] == "turn_finished"]
+        assert len(finishes) == 1
+        assert finishes[0]["status"] == "done"
+        assert finishes[0]["usage"]["output_tokens"] == 5
+        assert proc.returncode == 0
+    finally:
+        for reader in readers:
+            if not reader.done():
+                reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+        client.detach()
+        await _stop(host, task)
+        store.close()
+
+
+async def test_the_exit_is_reported_while_a_grandchild_still_holds_the_pipes(
+    tmp_path: Path,
+) -> None:
+    """The CLI exited; a process it left behind keeps stdout open. The host
+    reports the exit after a short drain instead of waiting for that process."""
+    import os
+    import signal
+
+    pidfile = tmp_path / "grandchild.pid"
+    child = (
+        "import subprocess, sys\n"
+        "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],"
+        " stdout=sys.stdout, stderr=sys.stderr)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(c.pid))\n"
+        "print('answer', flush=True)\n"
+    )
+    host, task, port = await _start_host(tmp_path)
+    try:
+        client = await _client(port)
+        cli = await client.spawn(
+            [sys.executable, "-c", child],
+            cwd=str(tmp_path),
+            env=None,
+            stdin=None,
+            keep_stdin=False,
+            meta={"turn_id": "t-gc"},
+        )
+        t0 = time.monotonic()
+        assert await asyncio.wait_for(cli.stdout.readline(), 20) == b"answer\n"
+        assert await asyncio.wait_for(cli.wait(), 20) == 0
+        assert time.monotonic() - t0 < 15.0  # the grandchild holds the pipes for 30 s
+        assert await cli.stdout.readline() == b""  # EOF follows the exit
+        client.detach()
+    finally:
+        try:
+            os.kill(int(pidfile.read_text()), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+        await _stop(host, task)
+
+
+# Sleeps far past the test: only a kill ends it.
+_WAIT_FOREVER = "import time; time.sleep(120)"
+
+
+async def test_stop_without_a_runner_kills_only_that_threads_hosted_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host, task, port = await _start_host(tmp_path)
+    try:
+        client = await _client(port)
+
+        async def _no_start(*, start: bool = True) -> turn_host_client.TurnHostClient:
+            return client
+
+        monkeypatch.setattr(turn_host_client, "get_client", _no_start)
+        mine = await client.spawn(
+            [sys.executable, "-c", _WAIT_FOREVER],
+            cwd=str(tmp_path),
+            env=None,
+            stdin=None,
+            keep_stdin=True,
+            meta={"turn_id": "t8", "session_id": "s-mine"},
+        )
+        other = await client.spawn(
+            [sys.executable, "-c", _WAIT_FOREVER],
+            cwd=str(tmp_path),
+            env=None,
+            stdin=None,
+            keep_stdin=True,
+            meta={"turn_id": "t9", "session_id": "s-other"},
+        )
+
+        assert await turn_host_client.kill_session_turns("s-mine") == 1
+
+        assert await asyncio.wait_for(mine.wait(), timeout=10) != 0
+        await asyncio.sleep(0.3)
+        assert other.returncode is None
+        other.kill()
+        await asyncio.wait_for(other.wait(), timeout=10)
+        client.detach()
+    finally:
+        await _stop(host, task)
+
+
+def test_the_folder_fallback_of_stop_only_matches_coding_agent_clis() -> None:
+    from dodaios.agent_chat.service import _is_agent_cli
+
+    assert _is_agent_cli(["node", "C:/npm/node_modules/@openai/codex/bin/codex.js", "-C", "/r"])
+    assert _is_agent_cli(["C:/Users/me/.local/bin/claude.exe", "-p"])
+    assert not _is_agent_cli(["powershell.exe", "-NoExit", "-Command", "cd /r"])
+    assert not _is_agent_cli(["Code.exe", "/r"])
+    assert not _is_agent_cli(["node", "server.js", "/r"])
+
+
+async def test_the_boot_reattach_carries_on_turns_before_any_window_asked_for_the_chat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """The background service has no window: the boot reattach builds the chat first.
+
+    It builds it in a plain worker thread, where the app's loop cannot be found
+    by asking; every turn the host still held was closed as "The app restarted"
+    (2026-11-09).
+    """
+    from types import SimpleNamespace
+
+    from dodaios.agent_chat import service as service_mod
+    from dodaios.ui.web import agent_chat_routes
+
+    monkeypatch.setattr(service_mod, "_KNOWN_LOOP", None)
+    monkeypatch.setattr(agent_chat_routes, "_REATTACH_DELAY_S", 0.0)
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+
+    async def no_live_host(*, start: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(turn_host_client, "get_client", no_live_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    kept = store.create_session(
+        provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+    )
+    turn_id = f"t-{kept.session_id}"
+    store.append_event(
+        kept.session_id, {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": turn_id}}
+    )
+    _spool_record(tmp_path, session_id=kept.session_id, turn_id=turn_id, acked=0)
+
+    state = SimpleNamespace(
+        agent_chat=None, agent_chat_factory=lambda: AgentChatService(AgentChatStore(db))
+    )
+    task = agent_chat_routes.schedule_turn_reattach(state)
+    assert task is not None
+    await task
+    svc = state.agent_chat
+    assert svc is not None
+    await svc.wait_reattached()
+    run = svc._running.get(kept.session_id)
+    if run is not None and run.task is not None:
+        await asyncio.wait_for(run.task, timeout=10)
+
+    finished = store.list_events(kept.session_id)[-1]
+    assert finished["kind"] == "turn_finished"
+    assert finished["payload"]["status"] == "done"
+    store.close()
+
+
+def _a_turn_the_host_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+    """A thread whose turn was open when the app went away, its CLI's lines in the spool."""
+    from dodaios.agent_chat import service as service_mod
+
+    monkeypatch.setattr(service_mod, "_KNOWN_LOOP", None)
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+
+    async def no_live_host(*, start: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(turn_host_client, "get_client", no_live_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    kept = store.create_session(
+        provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+    )
+    turn_id = f"t-{kept.session_id}"
+    store.append_event(
+        kept.session_id, {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": turn_id}}
+    )
+    _spool_record(tmp_path, session_id=kept.session_id, turn_id=turn_id, acked=0)
+    store.close()
+    return db, kept.session_id
+
+
+async def _carried_on(svc: AgentChatService, session_id: str) -> dict[str, Any]:
+    await svc.wait_reattached()
+    run = svc._running.get(session_id)
+    if run is not None and run.task is not None:
+        await asyncio.wait_for(run.task, timeout=10)
+    return svc.store.list_events(session_id)[-1]
+
+
+async def test_a_message_reaches_a_turn_carried_on_across_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """A turn that outlived an app restart takes a message mid-turn ("Send now").
+
+    The carried-on turn had no way to take a message mid-turn, so "Send now"
+    stopped it and every sub-agent it waited for died with it (2026-11-16).
+    """
+    from types import SimpleNamespace
+
+    from dodaios.agent_chat import runner_cli
+    from dodaios.ui.web import agent_chat_routes
+
+    written: list[str] = []
+    steering = asyncio.Event()
+    done = asyncio.Event()
+
+    async def carried_on(handle: Any, proc: Any) -> str | None:
+        async def writer(text: str, images: tuple[str, ...] = ()) -> bool:
+            written.append(text)
+            done.set()
+            return True
+
+        assert handle.on_steer is not None
+        handle.on_steer(writer)
+        steering.set()
+        await done.wait()
+        handle.on_steer(None)
+        await handle.emit(
+            {"kind": "turn_finished", "payload": {"turn_id": handle.turn_id, "status": "done"}}
+        )
+        return None
+
+    monkeypatch.setattr(runner_cli, "resume_hosted_cli_turn", carried_on)
+    db, session_id = _a_turn_the_host_kept(tmp_path, monkeypatch)
+    state = SimpleNamespace(
+        agent_chat=None, agent_chat_factory=lambda: AgentChatService(AgentChatStore(db))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    svc = await agent_chat_routes._async_service(request)  # type: ignore[arg-type]
+    await svc.wait_reattached()
+    await asyncio.wait_for(steering.wait(), timeout=10)
+
+    assert svc.can_steer(session_id)
+    assert await svc.steer(session_id, "a link to localhost, please")
+    assert written == ["a link to localhost, please"]
+    await _carried_on(svc, session_id)
+    assert not svc.can_steer(session_id)
+    svc.store.close()
+
+
+async def test_the_first_request_after_a_restart_carries_on_the_turns_the_host_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """A window that stayed open across an app restart asks before the boot reattach ran.
+
+    Its async route builds the chat in a plain worker thread. That thread found
+    no loop, so the turn the host still ran was closed as "The app restarted"
+    and the thread's next message started a second CLI (2026-11-12).
+    """
+    from types import SimpleNamespace
+
+    from dodaios.ui.web import agent_chat_routes
+
+    db, session_id = _a_turn_the_host_kept(tmp_path, monkeypatch)
+    state = SimpleNamespace(
+        agent_chat=None, agent_chat_factory=lambda: AgentChatService(AgentChatStore(db))
+    )
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+
+    svc = await agent_chat_routes._async_service(request)  # type: ignore[arg-type]
+
+    finished = await _carried_on(svc, session_id)
+    assert finished["kind"] == "turn_finished"
+    assert finished["payload"]["status"] == "done"
+    svc.store.close()
+
+
+async def test_the_servers_factory_hands_the_app_loop_to_a_builder_in_any_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """The voice mirror, the channel bridge and the agents' MCP tools build the chat too.
+
+    They run in threads that cannot ask for the loop, while the server's init
+    chain is still under way. The server recorded its loop before that chain.
+    """
+    from types import SimpleNamespace
+
+    from dodaios.core.bus import EventBus
+    from dodaios.ui.web.server import WebServer
+
+    db, session_id = _a_turn_the_host_kept(tmp_path, monkeypatch)
+    server = WebServer.__new__(WebServer)
+    server.cfg = SimpleNamespace(memory=SimpleNamespace(data_dir=str(tmp_path)))
+    server.bus = EventBus()
+    server.app = SimpleNamespace(
+        state=SimpleNamespace(agent_chat=None, app_loop=asyncio.get_running_loop())
+    )
+
+    svc = await asyncio.to_thread(server._build_agent_chat_service)
+
+    finished = await _carried_on(svc, session_id)
+    assert finished["kind"] == "turn_finished"
+    assert finished["payload"]["status"] == "done"
+    svc.store.close()
+
+
+async def test_the_server_records_its_loop_before_its_init_chain() -> None:
+    """Requests are answered while the init chain runs; the loop must be known by then."""
+    from types import SimpleNamespace
+
+    from dodaios.core.bus import EventBus
+    from dodaios.ui.web.server import WebServer
+
+    class InitChainReached(Exception):
+        pass
+
+    async def prepare() -> None:
+        raise InitChainReached()
+
+    probe = SimpleNamespace(
+        bus=EventBus(), app=SimpleNamespace(state=SimpleNamespace()), prepare_app=prepare
+    )
+    with pytest.raises(InitChainReached):
+        await WebServer.start(probe, start_serving=False)  # type: ignore[arg-type]
+    assert probe.app.state.app_loop is asyncio.get_running_loop()
+
+
+async def test_a_shutdown_while_reattaching_leaves_the_turns_for_the_next_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """The background service hands the app back while it still asks the host."""
+    asked = asyncio.Event()
+
+    async def busy_host(*, start: bool = True) -> None:
+        asked.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(turn_host_client, "may_hold_turns", lambda: True)
+    monkeypatch.setattr(turn_host_client, "get_client", busy_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    session = store.create_session(
+        provider="claude-api", model="m", effort="medium", cwd=str(tmp_path), surface="agent"
+    )
+    turn_id = f"t-{session.session_id}"
+    store.append_event(
+        session.session_id,
+        {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": turn_id}},
+    )
+
+    svc = AgentChatService(AgentChatStore(db))
+    await asyncio.wait_for(asked.wait(), timeout=5)
+    assert svc.is_running(session.session_id)
+
+    await asyncio.wait_for(svc.cancel_all(), timeout=10)
+
+    assert not svc.is_running(session.session_id)
+    assert [kind for kind in (e["kind"] for e in store.list_events(session.session_id))] == [
+        "turn_started"
+    ]
+    assert [t[1] for t in store.open_turns()] == [turn_id]
+    store.close()
+
+
+def test_the_host_keeps_stdin_open_past_the_empty_answer_to_a_task_notice() -> None:
+    turn = turn_host.HostedTurn(
+        turn_id="t", proc=None, meta={}, started_at=0.0, close_stdin_on="result"  # type: ignore[arg-type]
+    )
+    notice = {"type": "system", "subtype": "task_notification", "task_id": "a", "status": "stopped"}
+    empty = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 0}
+    real = {"type": "result", "subtype": "success", "is_error": False, "num_turns": 3}
+    assert not turn_host._is_answer(turn, json.dumps(notice))
+    assert not turn_host._is_answer(turn, json.dumps(empty))
+    assert turn_host._is_answer(turn, json.dumps(real))
+    # Without a notice before it, even an empty result is the end.
+    fresh = turn_host.HostedTurn(
+        turn_id="u", proc=None, meta={}, started_at=0.0, close_stdin_on="result"  # type: ignore[arg-type]
+    )
+    assert turn_host._is_answer(fresh, json.dumps(empty))
+
+
+async def test_a_restarted_app_closes_the_question_cards_only_the_old_process_waited_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_host_mode: Any
+) -> None:
+    """The CLI asks again on a new card; the cards from before the restart close.
+
+    2026-11-13: three restarts in one turn stacked four copies of the same
+    ``AskUserQuestion`` card, and a click on an old one answered "no such open
+    question". What the person picked before the restart still counts.
+    """
+    monkeypatch.setattr(turn_host_client, "spool_dir", lambda: tmp_path / "spool")
+    monkeypatch.setattr(turn_host_client, "_host_alive", lambda state: False)
+
+    async def no_live_host(*, start: bool = True) -> None:
+        return None
+
+    monkeypatch.setattr(turn_host_client, "get_client", no_live_host)
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    session = store.create_session(
+        provider="claude-api",
+        model="m",
+        effort="medium",
+        cwd=str(tmp_path),
+        surface="agent",
+        permission_mode="bypassPermissions",
+    )
+    sid = session.session_id
+    rows = [
+        {
+            "question": "Reload the Dev app?",
+            "header": "Dev app",
+            "options": [{"label": "Yes", "description": ""}, {"label": "Wait", "description": ""}],
+            "multiSelect": False,
+        },
+        {
+            "question": "Merge after the check?",
+            "header": "Merge",
+            "options": [
+                {"label": "Merge", "description": ""},
+                {"label": "Hold", "description": ""},
+            ],
+            "multiSelect": False,
+        },
+    ]
+    asked = [
+        {
+            "question": row["question"],
+            "header": row["header"],
+            "options": [{"label": o["label"]} for o in row["options"]],
+        }
+        for row in rows
+    ]
+
+    def card(question_id: str, **extra: Any) -> dict[str, Any]:
+        payload = {"turn_id": "t1", "question_id": question_id, "questions": asked, **extra}
+        return {"kind": "question_required", "ts_ms": 2_000, "payload": payload}
+
+    picked = {"answer": "Yes", "option_index": 0, "source": "person"}
+    store.append_event(sid, {"kind": "turn_started", "ts_ms": 1_000, "payload": {"turn_id": "t1"}})
+    for event in (
+        card("first"),
+        card("second"),
+        {
+            "kind": "question_progress",
+            "ts_ms": 2_500,
+            "payload": {"turn_id": "t1", "question_id": "second", "answers": [picked, None]},
+        },
+        card("later", deferred=True),
+    ):
+        store.append_event(sid, event)
+    lines = [
+        _CLAUDE_LINES[0],
+        _CLAUDE_LINES[2],
+        {
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "AskUserQuestion",
+                "input": {"questions": rows},
+                "tool_use_id": "tu1",
+            },
+        },
+        *_CLAUDE_LINES[3:],
+    ]
+    record = _spool_record(tmp_path, session_id=sid, turn_id="t1", acked=2)
+    record["stdout"] = [json.dumps(line) for line in lines]
+    await asyncio.to_thread(
+        Path(record["spool_path"]).write_text, json.dumps(record), encoding="utf-8"
+    )
+
+    svc = AgentChatService(AgentChatStore(db))
+    await svc.wait_reattached()
+
+    def live_card() -> str:
+        ids = [
+            e["payload"]["question_id"]
+            for e in store.list_events(sid)
+            if e["kind"] == "question_required" and not e["payload"].get("deferred")
+        ]
+        return ids[-1]
+
+    for _ in range(200):
+        if live_card() not in ("first", "second"):
+            break
+        await asyncio.sleep(0.02)
+    fresh = live_card()
+    assert fresh not in ("first", "second")
+    closed = {
+        e["payload"]["question_id"]: [a["source"] for a in e["payload"]["answers"]]
+        for e in store.list_events(sid)
+        if e["kind"] == "question_resolved"
+    }
+    # The end-of-turn card lives in the event log and stays open.
+    assert closed == {"first": ["cancelled", "cancelled"], "second": ["person", "cancelled"]}
+    order = [
+        (e["kind"], e["payload"].get("question_id"))
+        for e in store.list_events(sid)
+        if e["kind"] in ("question_required", "question_resolved")
+    ]
+    assert order.index(("question_resolved", "first")) < order.index(("question_required", fresh))
+
+    # The answer from before the restart is recalled; the new card asks only the rest.
+    assert not svc.resolve_question(sid, "second", index=1, option_index=0)
+    assert svc.resolve_question(sid, fresh, index=1, option_index=1)
+    run = svc._running.get(sid)
+    if run is not None and run.task is not None:
+        await asyncio.wait_for(run.task, timeout=10)
+    events = store.list_events(sid)
+    final = [e["payload"] for e in events if e["kind"] == "question_resolved"][-1]
+    assert final["question_id"] == fresh
+    assert [a["answer"] for a in final["answers"]] == ["Yes", "Hold"]
+    assert events[-1]["kind"] == "turn_finished"
+    assert events[-1]["payload"]["status"] == "done"

@@ -1,0 +1,297 @@
+import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Mic, MicOff, Phone, PhoneOff, Settings2 } from "lucide-react";
+
+import { useVoiceCall } from "@/components/agentic/useVoiceCall";
+import { TranscriptLine } from "@/components/home/VoiceStage";
+import { VoiceGlow } from "@/components/home/VoiceGlow";
+import { LookSlot } from "@/components/looks/LookSlot";
+import { PetMark } from "@/components/pets/PetMark";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { useStickToBottom } from "@/hooks/useStickToBottom";
+import { fill, useT } from "@/i18n";
+import { resolveAgentChatApproval } from "@/lib/agentChatApi";
+import { cn } from "@/lib/utils";
+import { useEventStore, type VoiceState } from "@/store/events";
+import { useHomeStore } from "@/store/home";
+import { useCallMute } from "./useCallMute";
+import "./callWindow.css";
+
+const STATUS_KEY: Record<VoiceState, string> = {
+  idle: "agentic_grid.voice_bubble.ready",
+  connecting: "voice_state.connecting",
+  listening: "agentic_grid.voice_bubble.listening",
+  thinking: "agentic_grid.voice_bubble.thinking",
+  speaking: "agentic_grid.voice_bubble.speaking",
+  paused: "agentic_grid.voice_bubble.paused",
+  error: "agentic_grid.voice_bubble.error",
+};
+
+const WINDOW = "call-window pointer-events-auto absolute bottom-full z-20 mb-3 flex flex-col overflow-hidden rounded-[20px] bg-background shadow-float";
+
+/** How long the window stays after a call ends, for a reason that arrives a moment later. */
+const END_LINGER_MS = 900;
+/** How long a failed call's note stays when nobody closes it. */
+const PROBLEM_TTL_MS = 2 * 60_000;
+/** How long an urgent ring waits for an answer before the card goes by itself. */
+const RING_TTL_MS = 5 * 60_000;
+
+// The voice list behind the gear: not needed for first paint.
+const CallVoicePicker = lazy(() => import("@/components/home/CallVoicePicker"));
+
+/**
+ * The call, as a window over the foot of the conversation.
+ *
+ * A call does not leave the conversation: what is said lands in it as
+ * ordinary messages (agent_chat/voice_mirror.py). The window is the call
+ * itself, in the look the voice page had: the voice light rising from its
+ * lower edge, this call's words as they are said, the assistant's pet, and
+ * the microphone and hang-up controls.
+ *
+ * It opens the moment a call is asked for from this window (before the host
+ * answers), and for every call that runs, however it was started. When a
+ * call ends on its own (the provider refused it, the connection broke) the
+ * window stays and says why, until it is closed, the next call starts, or
+ * two minutes have passed: a call that fails must never look like nothing
+ * happened. Every call leaves with a short "Call ended", so the reason of a
+ * failed one arrives in the same window.
+ *
+ * Its parent positions it: the window stands on the top edge of the nearest
+ * positioned ancestor (`bottom: 100%`), so it is mounted inside the
+ * composer's own wrapper.
+ */
+export function CallWindow({ composerControls = false }: {
+  /**
+   * The composer under the window carries the call's microphone switch and
+   * its hang-up, so the window shows the call alone: no second set of
+   * buttons for the same two things.
+   */
+  composerControls?: boolean;
+} = {}) {
+  const t = useT();
+  const assistantName = useEventStore((s) => s.assistantName);
+  const voiceState = (useEventStore((s) => s.voiceState) ?? "idle") as VoiceState;
+  const setActiveSection = useEventStore((s) => s.setActiveSection);
+  const pushToast = useEventStore((s) => s.pushToast);
+  const transcription = useEventStore((s) => s.transcription);
+  const transcriptionFinal = useEventStore((s) => s.transcriptionFinal);
+  const transcript = useHomeStore((s) => s.transcript);
+  const liveReply = useHomeStore((s) => s.liveReply);
+  const pending = useHomeStore((s) => s.callPending);
+  const problem = useHomeStore((s) => s.callProblem);
+  const notice = useHomeStore((s) => s.callNotice);
+  const setCallProblem = useHomeStore((s) => s.setCallProblem);
+  const ringing = useHomeStore((s) => s.ringing);
+  const setRinging = useHomeStore((s) => s.setRinging);
+  const { active, busy, connecting, toggleCall } = useVoiceCall();
+  // The gear opens the voice list inside the window; a new call closes it.
+  const [voicePanel, setVoicePanel] = useState(false);
+  const live = active || connecting;
+  const { muted, toggleMute } = useCallMute(live);
+
+  // The moment the call stopped, noted while rendering so the window is
+  // still there on the very render that sees the call gone.
+  const wasLive = useRef(false);
+  const endedAt = useRef(0);
+  if (wasLive.current && !live) endedAt.current = Date.now();
+  wasLive.current = live;
+  const ending = !live && endedAt.current > 0 && Date.now() - endedAt.current < END_LINGER_MS;
+  const [, redraw] = useState(0);
+  useEffect(() => {
+    if (live || !endedAt.current) return;
+    const timer = window.setTimeout(() => redraw((n) => n + 1), END_LINGER_MS + 30);
+    return () => window.clearTimeout(timer);
+  }, [live]);
+
+  // A note nobody closed goes by itself.
+  const problemAt = problem?.at ?? 0;
+  useEffect(() => {
+    if (!problemAt || live) return;
+    const timer = window.setTimeout(() => setCallProblem(null), Math.max(0, problemAt + PROBLEM_TTL_MS - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [live, problemAt, setCallProblem]);
+
+  // An urgent ring nobody answered goes by itself.
+  useEffect(() => {
+    if (!ringing) return;
+    const timer = window.setTimeout(() => setRinging(null), RING_TTL_MS);
+    return () => window.clearTimeout(timer);
+  }, [ringing, setRinging]);
+
+  useEffect(() => {
+    if (live) setVoicePanel(false);
+  }, [live]);
+
+  // This call's words only: the work behind an answer is in the conversation.
+  const lines = useMemo(
+    () => transcript.filter((line) => line.who !== "steps" && line.text.trim()),
+    [transcript],
+  );
+  const liveLine = transcription && !transcriptionFinal ? transcription : "";
+  const lastLine = lines[lines.length - 1];
+  // The answer as it is produced, until its spoken line replaces it.
+  const liveAnswer = liveReply && !(lastLine?.who === "assistant" && lastLine.text.startsWith(liveReply)) ? liveReply : "";
+  const lastIsAnswer = !liveAnswer && lastLine?.who === "assistant";
+  const hasWords = lines.length > 0 || Boolean(liveLine) || Boolean(liveAnswer);
+
+  const { rootRef, contentRef, follow } = useStickToBottom();
+  useLayoutEffect(follow, [follow, lines, liveLine, liveAnswer]);
+
+  const name = assistantName || t("agentic_grid.voice_bubble.assistant_fallback");
+  const label = fill(t("home.call.label"), { name });
+  const openSettings = () => setActiveSection("voice-api-keys");
+
+  if (ringing && !live && !pending) {
+    // The owner's opt-in "call me for urgent decisions": silent until they act.
+    const answer = (decision: "allow" | "deny") => {
+      setRinging(null);
+      void resolveAgentChatApproval(ringing.sessionId, ringing.refId, decision).catch(
+        () => pushToast("error", t("notify.save_failed")),
+      );
+    };
+    return (
+      <section data-testid="call-window" data-state="ringing" role="alertdialog" aria-label={t("notify.urgent_ring_title")} className={WINDOW}>
+        <VoiceGlow active={false} className="h-[68%]" />
+        <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 py-6 text-center">
+          <Phone className="h-8 w-8 animate-pulse text-foreground-strong" aria-hidden />
+          <p className="text-[15px] font-semibold text-foreground-strong">
+            {ringing.agent ? `${ringing.agent}: ` : ""}{t("notify.urgent_ring_title")}
+          </p>
+          <p className="max-w-[26rem] text-sm text-foreground-secondary [overflow-wrap:anywhere]" data-testid="call-ring-summary">
+            {ringing.summary}
+          </p>
+        </div>
+        <footer className="relative flex items-center justify-center gap-3 pb-5 pt-2">
+          {ringing.kind === "approval" && (
+            <>
+              <button type="button" onClick={() => answer("allow")} data-testid="call-ring-allow"
+                className="inline-flex h-9 items-center rounded-full bg-foreground px-4 text-sm font-medium text-background transition-colors hover:bg-foreground/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                {t("notify.urgent_ring_allow")}
+              </button>
+              <button type="button" onClick={() => answer("deny")} data-testid="call-ring-deny"
+                className="inline-flex h-9 items-center rounded-full bg-secondary px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                {t("notify.urgent_ring_deny")}
+              </button>
+            </>
+          )}
+          <button type="button" onClick={() => { setRinging(null); setActiveSection("chats"); }} data-testid="call-ring-open"
+            className="inline-flex h-9 items-center rounded-full bg-secondary px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            {t("notify.urgent_ring_open")}
+          </button>
+          <button type="button" onClick={() => setRinging(null)} data-testid="call-ring-later"
+            className="inline-flex h-9 items-center rounded-full px-4 text-sm font-medium text-muted-foreground transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            {t("notify.urgent_ring_later")}
+          </button>
+        </footer>
+      </section>
+    );
+  }
+
+  if (!live && !pending && !problem && !ending) return null;
+  if (!live && !pending && problem) {
+    // The note has taken over from "Call ended": closing it closes the window.
+    endedAt.current = 0;
+    // The call is over and did not end by choice: say so, and say what helps.
+    return (
+      <section data-testid="call-window" data-state="failed" role="region" aria-label={label} className={WINDOW}>
+        <VoiceGlow active={false} className="h-[68%]" />
+        <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-8 text-center" role="alert">
+          <PetMark size={64} state="error" />
+          <p className="text-[15px] font-semibold text-foreground-strong">{t("home.call.failed")}</p>
+          <p className="max-w-[26rem] text-sm text-foreground-secondary [overflow-wrap:anywhere]" data-testid="call-problem">
+            {problem.message || t("home.call.failed_unknown")}
+          </p>
+        </div>
+        <footer className="relative flex items-center justify-center gap-3 pb-5 pt-2">
+          <button type="button" onClick={openSettings} data-testid="call-settings"
+            className="inline-flex h-9 items-center gap-2 rounded-full bg-foreground px-4 text-sm font-medium text-background transition-colors hover:bg-foreground/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            <Settings2 className="h-4 w-4" aria-hidden />{t("home.call.settings")}
+          </button>
+          <button type="button" onClick={() => setCallProblem(null)} data-testid="call-close"
+            className="inline-flex h-9 items-center rounded-full bg-secondary px-4 text-sm font-medium text-foreground transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+            {t("common.close")}
+          </button>
+        </footer>
+      </section>
+    );
+  }
+
+  // Asked for and not answered yet reads as connecting, whatever the state says.
+  const shown: VoiceState = live ? voiceState : pending ? "connecting" : "idle";
+  const ended = !live && !pending;
+  const status = ended ? t("home.call.ended") : muted && live ? t("home.call.muted") : t(STATUS_KEY[shown] ?? STATUS_KEY.idle);
+  return (
+    <section data-testid="call-window" data-state={ended ? "ended" : shown} role="region" aria-label={label} className={WINDOW}>
+      {/* The voice light fills the lower part of the window, behind everything. */}
+      <LookSlot state={shown} className="absolute inset-x-0 bottom-0 h-[68%] w-full">
+        <VoiceGlow active={active} thinking={shown === "thinking" || shown === "connecting"} className="h-[68%]" />
+      </LookSlot>
+
+      <header className="relative flex items-center gap-2.5 px-4 pt-3.5">
+        {hasWords && <PetMark size={32} reactive />}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-foreground-strong">{name}</p>
+          <p className="truncate text-xs text-muted-foreground" data-testid="call-status" aria-live="polite">{status}</p>
+          {notice?.message && (
+            // The chosen provider refused and the call went on another way:
+            // said in the backend's words, for the rest of this call.
+            <p className="mt-0.5 text-xs text-foreground-secondary [overflow-wrap:anywhere]" data-testid="call-notice" role="status">
+              {notice.message}
+            </p>
+          )}
+        </div>
+        <button type="button" onClick={() => setVoicePanel((open) => !open)} data-testid="call-settings"
+          aria-label={t("voice_call.voice_title")} title={t("voice_call.voice_title")} aria-pressed={voicePanel}
+          className={cn(
+            "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            voicePanel ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary hover:text-foreground",
+          )}>
+          <Settings2 className="h-4 w-4" aria-hidden />
+        </button>
+      </header>
+
+      {voicePanel ? (
+        <Suspense fallback={<div className="relative min-h-0 flex-1" />}>
+          <CallVoicePicker onClose={() => setVoicePanel(false)} />
+        </Suspense>
+      ) : hasWords ? (
+        <ScrollArea ref={rootRef} className="relative min-h-0 flex-1" data-testid="call-transcript">
+          <div ref={contentRef} className="flex flex-col gap-4 px-5 pb-3 pt-4" aria-live="polite">
+            {lines.map((line, i) => (
+              <TranscriptLine
+                key={line.id}
+                who={line.who === "user" ? t("home.transcript_you") : name}
+                text={line.text}
+                lineId={line.id}
+                user={line.who === "user"}
+                playbackEligible={active && lastIsAnswer && i === lines.length - 1}
+              />
+            ))}
+            {liveLine && <TranscriptLine who={t("home.transcript_you")} text={liveLine} user live />}
+            {liveAnswer && <TranscriptLine who={name} text={liveAnswer} user={false} live playbackEligible={active} />}
+          </div>
+        </ScrollArea>
+      ) : (
+        // Nothing said yet: the pet alone, doing what the call is doing.
+        <div className="relative flex min-h-0 flex-1 items-center justify-center pb-4" data-testid="call-waiting">
+          <PetMark size={72} state={live ? undefined : pending ? "thinking" : "idle"} reactive={live} />
+        </div>
+      )}
+
+      {!composerControls && <footer className="relative flex items-center justify-center gap-4 pb-4 pt-2">
+        <button type="button" onClick={toggleMute} disabled={!live} aria-pressed={muted} data-testid="call-mute"
+          aria-label={muted ? t("home.call.unmute") : t("home.call.mute")} title={muted ? t("home.call.unmute") : t("home.call.mute")}
+          className={cn(
+            "inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            muted ? "bg-foreground text-background" : "bg-secondary text-foreground hover:bg-muted",
+          )}>
+          {muted ? <MicOff className="h-[18px] w-[18px]" aria-hidden /> : <Mic className="h-[18px] w-[18px]" aria-hidden />}
+        </button>
+        <button type="button" onClick={() => void toggleCall()} disabled={busy || !active} data-testid="call-hang-up"
+          aria-label={t("agentic_grid.voice_bubble.hang_up_title")} title={t("agentic_grid.voice_bubble.hang_up_title")}
+          className="inline-flex h-11 w-16 items-center justify-center rounded-full bg-destructive text-destructive-foreground transition-colors hover:bg-destructive/85 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+          <PhoneOff className="h-[18px] w-[18px]" aria-hidden />
+        </button>
+      </footer>}
+    </section>
+  );
+}

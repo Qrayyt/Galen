@@ -1,0 +1,633 @@
+"""MCPClient — wraps an MCP server (stdio/sse/http) as an asyncio client.
+
+Handles lifecycle (start/stop), tool listing with a cache, and a
+circuit breaker: after 3 consecutive failures the client is marked
+"unhealthy" for 60 s and call_tool rejects further calls.
+
+MCP-SDK quirk: the official client transports (``stdio_client``,
+``sse_client``) are async context managers. We must set them up via
+``AsyncExitStack`` on one long-lived owner task. AnyIO cancel scopes are
+task-bound, so that same task must both enter and exit every transport context
+even when public ``start()`` and ``stop()`` calls come from different tasks.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import re
+import shutil
+import time
+from contextlib import AsyncExitStack
+from pathlib import Path
+from typing import Any
+
+from dodaios.core.config import DATA_DIR, PROJECT_ROOT, get_secret
+
+from .registry import MCPServerSpec
+
+log = logging.getLogger(__name__)
+
+# Circuit-breaker defaults
+_CB_THRESHOLD = 3
+_CB_COOLDOWN_NS = 60_000_000_000  # 60 seconds
+
+# What the MCP SDK's streamable-HTTP transport reports when the server answers
+# 404 to our session id: the server ended the session (idle timeout, restart).
+_SESSION_TERMINATED_CODE = 32600
+_SESSION_TERMINATED_MESSAGE = "Session terminated"
+
+
+def _is_session_terminated(exc: BaseException) -> bool:
+    """True when the server no longer knows our streamable-HTTP session."""
+    error = getattr(exc, "error", None)
+    return (
+        getattr(error, "code", None) == _SESSION_TERMINATED_CODE
+        and getattr(error, "message", None) == _SESSION_TERMINATED_MESSAGE
+    )
+
+# Launcher binaries covered by a concrete "install Node.js" hint — the vast
+# majority of stdio MCP servers are npm packages launched via ``npx``/``node``.
+_NODE_LAUNCHERS = frozenset({"node", "npx", "npm"})
+
+
+def _stdio_launcher_missing_message(spec_name: str, command: str) -> str:
+    """Actionable message for a stdio MCP server whose launcher binary is
+    absent from PATH (AP-23 wave-2 finding 10).
+
+    Without this, a missing ``npx``/``node`` surfaces as a raw
+    ``FileNotFoundError: [Errno 2] No such file or directory: 'npx'`` on the
+    plugin badge (caught generically at ``mcp/registry.py``'s
+    ``except Exception as e: error_msg = f"{type(e).__name__}: {e}"``). Mirrors
+    the honest launcher check already used at connect-time in
+    ``marketplace_routes._mcp_live`` (``shutil.which`` on the stdio
+    ``install`` command) so the badge and the live client agree on what
+    "missing" means and both name the actual missing binary.
+    """
+    if command in _NODE_LAUNCHERS:
+        return (
+            f"{spec_name}: install Node.js 18+ to use this plugin "
+            f"('{command}' not found on PATH)"
+        )
+    return (
+        f"{spec_name}: '{command}' not found on PATH — install it to use "
+        "this plugin"
+    )
+
+
+def _read_call_timeout_s() -> float:
+    """Per-call timeout (seconds), ENV-overridable with a safe fallback.
+
+    Default 20 s. Rationale: a hung MCP server must NOT block the whole voice
+    turn (~35 s hangs were observed), but the ceiling must not guillotine
+    legitimately slower tools — a remote http MCP doing real network I/O
+    (search, a DB query, a web fetch) can take well over 5-10 s. 20 s sits
+    comfortably above normal tool latency yet still trips long before a voice
+    turn feels dead, and a repeatedly-slow server tips into the circuit
+    breaker (3 strikes) and drops off the surface on its own. Tunable per host
+    via ``JARVIS_MCP_CALL_TIMEOUT_S`` (a headless VPS with a slow uvx cold
+    start can raise it) without code or config edits.
+    """
+    raw = os.environ.get("JARVIS_MCP_CALL_TIMEOUT_S")
+    if raw:
+        try:
+            val = float(raw)
+            if val > 0:
+                return val
+        except ValueError:
+            log.warning("JARVIS_MCP_CALL_TIMEOUT_S=%r is not a number; using 20s", raw)
+    return 20.0
+
+
+# Module-level so a test can monkeypatch it and call_tool re-reads it each call.
+_CALL_TIMEOUT_S = _read_call_timeout_s()
+
+# Hard ceiling for stop(): the transport's anyio task group can stall for ~20 s
+# on a cross-task cancel-scope exit (see stop()). Module-level so a test can
+# monkeypatch it; stop() re-reads it each call.
+_STOP_TIMEOUT_S = 5.0
+
+# How long a session renewal lets other calls on the ended session finish
+# before it closes that session. The server refuses each of them at once (404),
+# so they normally leave within one round trip; a call the server never answers
+# is not waited for beyond this.
+_RENEW_DRAIN_S = 2.0
+
+# Matches ``$NAME`` secret placeholders inside http header values, e.g.
+# ``"Bearer $ZAPIER_TOKEN"`` → the ``ZAPIER_TOKEN`` group.
+_SECRET_TOKEN_RE = re.compile(r"\$([A-Z_][A-Z0-9_]*)")
+
+
+class MCPClient:
+    """An active connection handle to an MCP server."""
+
+    def __init__(
+        self,
+        spec: MCPServerSpec,
+        env_overrides: dict[str, str] | None = None,
+    ) -> None:
+        self.spec = spec
+        self._env_overrides = env_overrides or {}
+        self._exit_stack: AsyncExitStack | None = None
+        self._session: Any | None = None  # mcp.ClientSession (typed locally)
+        self._owner_task: asyncio.Task[None] | None = None
+        self._owner_ready: asyncio.Future[None] | None = None
+        self._stop_requested: asyncio.Event | None = None
+        self._tools_cache: list[dict[str, Any]] = []
+        self._circuit_breaker_failures = 0
+        self._disabled_until_ns: int = 0
+        self._http_auth: Any | None = None
+        # Serialises session renewal so concurrent calls open one new session.
+        self._renew_lock = asyncio.Lock()
+        # Set while a renewal has not opened the new session yet, also after it
+        # failed or was cancelled; the next call then tries again instead of
+        # failing with "not started" until a restart.
+        self._renew_pending = False
+        # The session a renewal is replacing. No call starts on it any more.
+        self._stale_session: Any | None = None
+        # Calls waiting for an answer, counted per session, and a signal each
+        # time one of them leaves. A renewal waits on these before it closes.
+        self._calls_in_flight: dict[int, int] = {}
+        self._call_left = asyncio.Event()
+        # Renewals that failed. A call that queued behind a failed one shares
+        # that failure instead of making its own slow attempt.
+        self._renew_failures = 0
+
+    def set_http_auth(self, auth: Any) -> None:
+        """Install caller-owned request authentication before opening transport."""
+        self._http_auth = auth
+
+    @property
+    def uses_dynamic_http_auth(self) -> bool:
+        return self._http_auth is not None
+
+    # ---- Lifecycle ----------------------------------------------------
+
+    async def start(self) -> None:
+        """Set up the transport, initialise the session, and cache the tool list."""
+        if self._session is not None:
+            return  # idempotent
+
+        if self._owner_task is not None and self._owner_ready is not None:
+            await asyncio.shield(self._owner_ready)
+            return
+
+        loop = asyncio.get_running_loop()
+        ready = loop.create_future()
+        stop_requested = asyncio.Event()
+        owner = asyncio.create_task(
+            self._run_lifecycle(ready, stop_requested),
+            name=f"mcp-owner-{self.spec.name}",
+        )
+        self._owner_task = owner
+        self._owner_ready = ready
+        self._stop_requested = stop_requested
+        try:
+            await asyncio.shield(ready)
+        except BaseException:
+            if not ready.done():
+                ready.cancel()
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            if self._owner_task is owner:
+                self._clear_lifecycle_state()
+            raise
+
+    async def _run_lifecycle(
+        self,
+        ready: asyncio.Future[None],
+        stop_requested: asyncio.Event,
+    ) -> None:
+        """Own every task-bound MCP context from entry through final exit."""
+
+        stack = AsyncExitStack()
+        startup_failure: BaseException | None = None
+        try:
+            # Lazy imports — MCP lib is optional-but-expected (requirements.txt).
+            from mcp import ClientSession
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+
+            if self.spec.transport == "stdio":
+                command, args, env = self._resolve_install_command()
+                if shutil.which(command) is None:
+                    # Fail actionable, not raw: without this check
+                    # ``stdio_client`` spawns the launcher itself and a
+                    # missing binary surfaces as a bare FileNotFoundError.
+                    raise FileNotFoundError(
+                        _stdio_launcher_missing_message(self.spec.name, command)
+                    )
+                params = StdioServerParameters(
+                    command=command,
+                    args=args,
+                    env=env,
+                )
+                read, write = await stack.enter_async_context(stdio_client(params))
+            elif self.spec.transport == "sse":
+                from mcp.client.sse import sse_client
+
+                headers: dict[str, str] = {}
+                if self.spec.url:
+                    # Marketplace connectors name the stream and its auth
+                    # header the same way an http server does.
+                    url = self.spec.url
+                    headers = self._resolve_headers()
+                else:
+                    command, args, _env = self._resolve_install_command()
+                    # install_command for SSE transport = [url] (by convention)
+                    url = args[0] if args else command
+                read, write = await stack.enter_async_context(
+                    sse_client(url, headers=headers or None)
+                )
+            elif self.spec.transport == "http":
+                from mcp.client.streamable_http import streamablehttp_client
+
+                if not self.spec.url:
+                    raise ValueError(
+                        f"{self.spec.name}: http transport requires a 'url'"
+                    )
+                headers = self._resolve_headers()
+                # streamablehttp_client yields a 3-tuple
+                # (read, write, get_session_id) — unlike the 2-tuple stdio/sse
+                # transports. The session-id callback is unused here.
+                read, write, _ = await stack.enter_async_context(
+                    streamablehttp_client(
+                        self.spec.url,
+                        headers=headers or None,
+                        **({"auth": self._http_auth} if self._http_auth is not None else {}),
+                    )
+                )
+            else:
+                raise NotImplementedError(
+                    f"Transport {self.spec.transport!r} not (yet) supported"
+                )
+
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+
+            # Cache tools — saves round trips on every list_tools() call.
+            tools_result = await session.list_tools()
+            self._tools_cache = [_tool_to_dict(t) for t in tools_result.tools]
+
+            self._exit_stack = stack
+            self._session = session
+            log.info(
+                "MCPClient[%s] ready — %d tools",
+                self.spec.name,
+                len(self._tools_cache),
+            )
+            if not ready.done():
+                ready.set_result(None)
+            await stop_requested.wait()
+        except BaseException as exc:
+            if not ready.done():
+                startup_failure = exc
+            elif not isinstance(exc, asyncio.CancelledError):
+                log.warning("MCPClient[%s] lifecycle error: %s", self.spec.name, exc)
+        finally:
+            close_error = await self._close_exit_stack(stack)
+            if startup_failure is not None and not ready.done():
+                ready.set_exception(self._startup_error(startup_failure, close_error))
+            if self._exit_stack is stack:
+                self._exit_stack = None
+                self._session = None
+            if self._owner_task is asyncio.current_task():
+                self._clear_lifecycle_state()
+
+    async def stop(self) -> None:
+        """Close the session and transport cleanly.
+
+        The lifecycle owner task performs the bounded close because AnyIO
+        requires context entry and exit on the same task. The public caller only
+        signals that owner and joins it, so registry/bootstrap task boundaries
+        cannot break transport shutdown.
+        """
+        self._renew_pending = False
+        self._stale_session = None
+        await self._close_transport()
+
+    async def _close_transport(self) -> None:
+        """Close the session and transport; keeps what a renewal has noted."""
+        owner = self._owner_task
+        if owner is None:
+            stack = self._exit_stack
+            if stack is not None:
+                await self._close_exit_stack(stack)
+            self._clear_lifecycle_state()
+            return
+
+        if self._stop_requested is not None:
+            self._stop_requested.set()
+        await asyncio.shield(owner)
+        if self._owner_task is owner:
+            self._clear_lifecycle_state()
+
+    def _startup_error(
+        self, failure: BaseException, close_error: Exception | None
+    ) -> BaseException:
+        """Report why the connect failed as an exception callers can contain.
+
+        When the HTTP transport task fails (e.g. a 401), AnyIO cancels the connect
+        and the real error only surfaces as the stack closes. Passing that internal
+        cancellation on would escape every ``except Exception`` and end the caller's
+        task, so only a genuine cancellation of this owner stays a cancellation.
+        """
+        task = asyncio.current_task()
+        if not isinstance(failure, asyncio.CancelledError) or (task and task.cancelling()):
+            return failure
+        return close_error or ConnectionError(f"{self.spec.name}: transport closed during connect")
+
+    async def _close_exit_stack(self, stack: Any) -> Exception | None:
+        """Close one transport stack on its owner task with a hard ceiling."""
+        try:
+            async with asyncio.timeout(_STOP_TIMEOUT_S):
+                await stack.aclose()
+        except TimeoutError:
+            log.warning(
+                "MCPClient[%s] stop timed out after %.1fs — abandoning the "
+                "transport so teardown/shutdown cannot hang",
+                self.spec.name,
+                _STOP_TIMEOUT_S,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("MCPClient[%s] stop error: %s", self.spec.name, e)
+            return e
+        return None
+
+    def _clear_lifecycle_state(self) -> None:
+        self._exit_stack = None
+        self._session = None
+        self._owner_task = None
+        self._owner_ready = None
+        self._stop_requested = None
+
+    # ---- Interaction ----------------------------------------------------
+
+    async def list_tools(self) -> list[dict[str, Any]]:
+        """Return the cached tool list (list of dicts)."""
+        return list(self._tools_cache)
+
+    async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
+        """Invoke a tool on the server. Respects the circuit breaker.
+
+        A streamable-HTTP server forgets a session when it idles out or
+        restarts and then answers 404 to the old session id. The MCP spec says
+        the client must start a new session, so this opens one and repeats the
+        call once. The repeat is safe: the server refused the request before
+        running the tool.
+        """
+        now = time.time_ns()
+        if self._disabled_until_ns > now:
+            raise RuntimeError(
+                f"{self.spec.name} circuit-breaker open "
+                f"(cooldown {(self._disabled_until_ns - now) // 1_000_000_000}s)"
+            )
+        if self._session is None and not self._renew_pending:
+            raise RuntimeError(f"{self.spec.name}: MCPClient not started")
+
+        try:
+            session = self._session
+            if session is None or session is self._stale_session:
+                # A renewal is unfinished or running: wait for its session
+                # instead of sending into the one it is closing.
+                await self._renew_session(session)
+                session = self._session
+            try:
+                result = await self._call_once(session, name, args)
+            except Exception as exc:
+                if self.spec.transport != "http" or not _is_session_terminated(exc):
+                    raise
+                log.info(
+                    "MCPClient[%s] server ended the session; opening a new one",
+                    self.spec.name,
+                )
+                await self._renew_session(session)
+                result = await self._call_once(self._session, name, args)
+            self._circuit_breaker_failures = 0
+            return result
+        except Exception:
+            self._circuit_breaker_failures += 1
+            if self._circuit_breaker_failures >= _CB_THRESHOLD:
+                self._disabled_until_ns = time.time_ns() + _CB_COOLDOWN_NS
+                log.warning(
+                    "MCPClient[%s] circuit breaker OPEN (60s) after %d failures",
+                    self.spec.name,
+                    self._circuit_breaker_failures,
+                )
+            raise
+
+    async def _call_once(self, session: Any, name: str, args: dict[str, Any]) -> Any:
+        """One tool call on ``session`` with the per-call timeout."""
+        if session is None:
+            raise RuntimeError(f"{self.spec.name}: MCPClient not started")
+        # Per-call timeout: the MCP SDK has no built-in ceiling, so a server
+        # that hangs on a tool call would block the whole turn forever. We
+        # bound it here and RAISE on expiry; call_tool counts the failure — so a
+        # repeatedly-hung server trips the circuit breaker and drops from the
+        # surface instead of hanging every future turn. We re-read the module
+        # global each call so the ENV override / a test monkeypatch applies.
+        timeout_s = _CALL_TIMEOUT_S
+        key = id(session)
+        self._calls_in_flight[key] = self._calls_in_flight.get(key, 0) + 1
+        try:
+            result = await asyncio.wait_for(
+                session.call_tool(name, args),
+                timeout=timeout_s,
+            )
+        except TimeoutError as exc:
+            # Clean, honest message so the brain's tool loop surfaces it and
+            # the voice layer can speak its timeout phrase — not a bare crash.
+            raise RuntimeError(
+                f"{self.spec.name} tool {name!r} timed out after "
+                f"{timeout_s:.0f}s (server not responding)"
+            ) from exc
+        finally:
+            left = self._calls_in_flight[key] - 1
+            if left:
+                self._calls_in_flight[key] = left
+            else:
+                del self._calls_in_flight[key]
+            self._call_left.set()
+        # MCP-SDK quirk: server-side tool exceptions do NOT propagate as
+        # Python exceptions; instead they arrive as a CallToolResult with
+        # isError=True. Raise into call_tool's one shared failure counter;
+        # counting here as well would make one server error count twice.
+        if getattr(result, "isError", False):
+            raise RuntimeError(
+                _extract_error_text(result)
+                or f"MCP tool {name} returned isError=True"
+            )
+        return result
+
+    async def _renew_session(self, stale: Any) -> None:
+        """Replace the session the server forgot with a freshly initialised one.
+
+        Calls that failed on the same stale session wait here and reuse the
+        session the first of them opened. If that renewal failed, they fail
+        with it: one connect attempt per burst of calls, not one per call.
+        """
+        failures_seen = self._renew_failures
+        async with self._renew_lock:
+            if self._session is not None and self._session is not stale:
+                return
+            if self._renew_failures != failures_seen:
+                raise ConnectionError(
+                    f"{self.spec.name}: the server ended the session and a new one "
+                    "could not be opened"
+                )
+            # Noted before the first await: a call cancelled anywhere below
+            # leaves "try again on the next call", never a client without a
+            # session that nothing reopens.
+            self._renew_pending = True
+            self._stale_session = stale
+            try:
+                await self._let_refused_calls_leave(stale)
+                await self._close_transport()
+                await self._open_renewed_session()
+            except Exception:
+                self._renew_failures += 1
+                raise
+            if not self._renew_pending:
+                # stop() ran while the new session opened: stay stopped.
+                await self._close_transport()
+                raise RuntimeError(f"{self.spec.name}: MCPClient not started")
+            self._renew_pending = False
+            self._stale_session = None
+
+    async def _let_refused_calls_leave(self, stale: Any) -> None:
+        """Wait briefly for the other calls that are still on ``stale``.
+
+        Closing the session under them would leave each one without an answer
+        until its call timeout. The server refuses them like the first call,
+        and each then repeats on the new session.
+        """
+        key = id(stale)
+        if stale is None or not self._calls_in_flight.get(key):
+            return
+        try:
+            async with asyncio.timeout(_RENEW_DRAIN_S):
+                while self._calls_in_flight.get(key):
+                    self._call_left.clear()
+                    await self._call_left.wait()
+        except TimeoutError:
+            log.info(
+                "MCPClient[%s] %d call(s) got no answer on the ended session; closing it",
+                self.spec.name,
+                self._calls_in_flight.get(key, 0),
+            )
+
+    async def _open_renewed_session(self) -> None:
+        """``start()`` with the per-call ceiling.
+
+        The renewal runs inside a tool call and holds the renewal lock, so a
+        server that accepts the connection and then says nothing must not hold
+        this call, and every call queued behind it, without end.
+        """
+        timeout_s = _CALL_TIMEOUT_S
+        try:
+            async with asyncio.timeout(timeout_s) as limit:
+                await self.start()
+        except TimeoutError as exc:
+            if not limit.expired():
+                raise
+            raise ConnectionError(
+                f"{self.spec.name}: the server ended the session and did not open "
+                f"a new one within {timeout_s:.0f}s"
+            ) from exc
+
+    # ---- Health -------------------------------------------------------
+
+    @property
+    def is_healthy(self) -> bool:
+        """True if the session is alive and the circuit breaker is not open."""
+        return (
+            self._session is not None
+            and self._disabled_until_ns <= time.time_ns()
+        )
+
+    # ---- Helpers ------------------------------------------------------
+
+    def _resolve_headers(self) -> dict[str, str]:
+        """Resolve ``$SECRET`` placeholders inside http header values.
+
+        ``"Bearer $ZAPIER_TOKEN"`` → ``"Bearer <secret>"`` via ``get_secret``.
+        The literal placeholder is kept when the secret cannot be resolved, so
+        a misconfiguration surfaces (a 401 from the server) instead of silently
+        sending ``"Bearer "``.
+        """
+
+        def _sub(match: re.Match[str]) -> str:
+            key = match.group(1)
+            secret = get_secret(key, env_fallback=key)
+            return secret if secret else match.group(0)
+
+        resolved: dict[str, str] = {}
+        for key, value in (self.spec.headers or {}).items():
+            if not isinstance(value, str):
+                continue
+            resolved[key] = _SECRET_TOKEN_RE.sub(_sub, value)
+        return resolved
+
+    def _resolve_install_command(self) -> tuple[str, list[str], dict[str, str]]:
+        """Expand placeholders such as {PROJECT_ROOT} / {DATA_DIR} and
+        merge env_overrides with the system environment.
+        """
+        import os
+
+        raw = list(self.spec.install_command)
+        if not raw:
+            raise ValueError(f"{self.spec.name}: install_command is empty")
+
+        def _expand(s: str) -> str:
+            return (
+                s.replace("{PROJECT_ROOT}", str(PROJECT_ROOT))
+                 .replace("{DATA_DIR}", str(Path(DATA_DIR)))
+            )
+
+        expanded = [_expand(p) for p in raw]
+        command, *args = expanded
+
+        # env: system env as the base, overrides on top. String values only.
+        #
+        # Unless the server is untrusted — then the base is the smallest
+        # environment a process can start in, because "the system env" on the
+        # owner's machine is where their API keys live and a community plugin
+        # is a stranger's code running as our child (dodaios.mcp.env_isolation).
+        if self.spec.isolate_env:
+            from dodaios.mcp.env_isolation import isolated_environment
+
+            return command, args, isolated_environment(self._env_overrides)
+
+        env = dict(os.environ)
+        env.update({k: str(v) for k, v in self._env_overrides.items()})
+        return command, args, env
+
+
+# ----------------------------------------------------------------------
+# Utilities
+# ----------------------------------------------------------------------
+
+def _extract_error_text(result: Any) -> str:
+    """Extract the error text from a CallToolResult(isError=True)."""
+    content = getattr(result, "content", None) or []
+    parts: list[str] = []
+    for item in content:
+        text = getattr(item, "text", None)
+        if text:
+            parts.append(text)
+    return " | ".join(parts)
+
+
+def _tool_to_dict(tool: Any) -> dict[str, Any]:
+    """Normalise an MCP ``Tool`` object to a plain dict.
+
+    The MCP lib returns pydantic models (with ``.model_dump()``); we
+    deliberately map only the fields we use — this decouples us from
+    SDK changes.
+    """
+    if isinstance(tool, dict):
+        return dict(tool)
+    return {
+        "name": getattr(tool, "name", ""),
+        "description": getattr(tool, "description", "") or "",
+        "inputSchema": getattr(tool, "inputSchema", None) or {},
+    }

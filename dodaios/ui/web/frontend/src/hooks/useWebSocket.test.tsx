@@ -1,0 +1,876 @@
+/**
+ * The voice feature boots ~20s after the desktop window connects. The backend
+ * announces readiness over the existing WS envelope as a `VoiceBootStatus`
+ * event with `payload.ready: boolean`. This test drives the real
+ * useWebSocket → WSClient → store path (via a MockWebSocket) and asserts that a
+ * VoiceBootStatus frame flips `voiceReady` in the store.
+ */
+import { cleanup, render, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { useWebSocket } from "@/hooks/useWebSocket";
+import { useI18nStore } from "@/i18n";
+import {
+  setBrowserVoiceInputOwnership,
+  voiceInputLevelRef,
+} from "@/lib/voiceInputLevel";
+import { useEventStore } from "@/store/events";
+import { useHomeStore } from "@/store/home";
+import { useAgentChatStore } from "@/store/agentChat";
+import { useIdeThreadsStore } from "@/store/ideThreads";
+import { SPEAKER_MUTE_EVENT } from "@/lib/speakerMute";
+
+/** Minimal mock for WebSocket (mirrors __tests__/ws.test.ts). */
+class MockWebSocket {
+  static OPEN = 1;
+  static CLOSED = 3;
+  readyState = MockWebSocket.OPEN;
+  static last: MockWebSocket | null = null;
+  private listeners: Record<string, Array<(ev: unknown) => void>> = {};
+  url: string;
+
+  constructor(url: string) {
+    this.url = url;
+    MockWebSocket.last = this;
+    queueMicrotask(() => this.fire("open", {}));
+  }
+
+  addEventListener(type: string, fn: (ev: unknown) => void) {
+    (this.listeners[type] ??= []).push(fn);
+  }
+
+  send = vi.fn();
+
+  close = vi.fn(() => {
+    this.readyState = MockWebSocket.CLOSED;
+    this.fire("close", {});
+  });
+
+  fire(type: string, ev: unknown) {
+    (this.listeners[type] ?? []).forEach((fn) => fn(ev));
+  }
+
+  deliver(data: unknown) {
+    this.fire("message", {
+      data: typeof data === "string" ? data : JSON.stringify(data),
+    });
+  }
+}
+
+function envelope(eventName: string, payload: Record<string, unknown>) {
+  return {
+    type: "event",
+    event_name: eventName,
+    source_layer: "speech",
+    timestamp_ns: Date.now() * 1_000_000,
+    trace_id: "test-trace-id",
+    payload,
+  };
+}
+
+/**
+ * Make this document the visible, focused one (jsdom's is neither), the only
+ * kind that may act on a dictation no composer started. Returns the undo.
+ */
+function bringToForeground(): () => void {
+  const focus = vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  return () => {
+    focus.mockRestore();
+    visibility.mockRestore();
+  };
+}
+
+const queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+});
+
+function WebSocketHarness() {
+  useWebSocket();
+  return null;
+}
+
+function Harness() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <WebSocketHarness />
+    </QueryClientProvider>
+  );
+}
+
+describe("useWebSocket VoiceBootStatus handling", () => {
+  const OriginalWS = globalThis.WebSocket;
+
+  beforeEach(() => {
+    (globalThis as unknown as { WebSocket: typeof MockWebSocket }).WebSocket =
+      MockWebSocket;
+    (window as unknown as { location: unknown }).location = {
+      protocol: "http:",
+      host: "localhost:5173",
+    };
+    useEventStore.setState({ voiceReady: false, toasts: [] });
+    useEventStore.getState().resetDictation();
+    useEventStore.setState({ activeSection: "chats" });
+    useHomeStore.setState({ surface: "chat", agentChatId: null });
+    useI18nStore.getState().setUi("en", { push: false });
+    setBrowserVoiceInputOwnership(false);
+    queryClient.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      OriginalWS;
+    MockWebSocket.last = null;
+  });
+
+  it("flips voiceReady true on a VoiceBootStatus { ready: true } frame", async () => {
+    render(<Harness />);
+    await Promise.resolve(); // let the queued "open" microtask run
+
+    MockWebSocket.last!.deliver(envelope("VoiceBootStatus", { ready: true, detail: "warm" }));
+
+    expect(useEventStore.getState().voiceReady).toBe(true);
+  });
+
+  it("follows a session-start frame in the open chat without sending a call", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    const socket = MockWebSocket.last!;
+    const sentBeforeStart = socket.send.mock.calls.length;
+
+    socket.deliver(envelope("WakeWordDetected", { keyword: "jarvis" }));
+    expect(useHomeStore.getState().surface).toBe("chat");
+    socket.deliver(envelope("VoiceSessionStarted", { session_id: "wake-call", wake_keyword: "jarvis" }));
+    expect(useHomeStore.getState().surface).toBe("chat");
+    expect(useHomeStore.getState().liveSessionId).toBe("wake-call");
+    expect(socket.send.mock.calls.length).toBe(sentBeforeStart);
+  });
+
+  it.each(["settings", "agentic-ide", "dictation"] as const)(
+    "keeps the current view and chat mode when a call starts in %s",
+    async (activeSection) => {
+      useEventStore.setState({ activeSection });
+      render(<Harness />);
+      await Promise.resolve();
+
+      MockWebSocket.last!.deliver(envelope("VoiceSessionStarted", { session_id: "call" }));
+      expect(useEventStore.getState().activeSection).toBe(activeSection);
+      expect(useHomeStore.getState().surface).toBe("chat");
+    },
+  );
+
+  it("flips voiceReady back to false on a VoiceBootStatus { ready: false } frame", async () => {
+    useEventStore.setState({ voiceReady: true });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("VoiceBootStatus", { ready: false, detail: "restart" }));
+
+    expect(useEventStore.getState().voiceReady).toBe(false);
+  });
+
+  it("clears the live transcript at voice-session boundaries", async () => {
+    // Live incidents 2026-07-15/16: the sidebar transcript box has no other
+    // reset path, so the last utterance survived into READY/IDLE and the next
+    // session, masquerading as a frozen live transcript ("Was").
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("TranscriptionUpdate", { text: "Was", is_final: true }),
+    );
+    expect(useEventStore.getState().transcription).toBe("Was");
+
+    // Session ends → the stale utterance must not survive into IDLE.
+    MockWebSocket.last!.deliver(
+      envelope("SystemStateChanged", { new_state: "IDLE", previous: "LISTENING" }),
+    );
+    expect(useEventStore.getState().transcription).toBe("");
+
+    // Mid-session transitions must NOT clear the live transcript.
+    MockWebSocket.last!.deliver(
+      envelope("SystemStateChanged", { new_state: "LISTENING", previous: "IDLE" }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("TranscriptionUpdate", {
+        text: "Was ist morgen für ein Tag?", // i18n-allow: live-incident transcript under test
+        is_final: true,
+      }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("SystemStateChanged", {
+        new_state: "THINKING",
+        previous: "LISTENING",
+      }),
+    );
+    expect(useEventStore.getState().transcription).toBe(
+      "Was ist morgen für ein Tag?", // i18n-allow: live-incident transcript under test
+    );
+  });
+
+  it("surfaces a mission tool approval request globally without arguments", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("ActionApprovalRequired", {
+        mission_id: "mission-42",
+        tool_name: "gmail/send_message",
+        args_preview: "private content must not enter the toast",
+      }),
+    );
+
+    const [toast] = useEventStore.getState().toasts;
+    expect(toast.kind).toBe("warning");
+    expect(toast.message).toContain("gmail/send_message");
+    expect(toast.message).toContain("mission-42");
+    expect(toast.message).not.toContain("private content");
+  });
+
+  it("tells the three states of a prompt typed into a pane apart", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    const deliver = (submitted: boolean | null) =>
+      MockWebSocket.last!.deliver(
+        envelope("AgenticIdePromptSent", { terminal: "T11", submitted }),
+      );
+
+    deliver(true);
+    deliver(false);
+    deliver(null);
+
+    const toasts = useEventStore.getState().toasts;
+    expect(toasts.map((toast) => toast.kind)).toEqual(["success", "warning", "info"]);
+    expect(toasts[0].message).toContain("T11");
+    expect(toasts[1].message).toContain("input box");
+    // Unconfirmed is NOT "not sent": the agent may well be answering already
+    // (T11, 2026-08-27 — the pane had taken the prompt, the toast said no).
+    expect(toasts[2].message).not.toContain("not sent");
+    expect(toasts[2].message).toContain("never showed it arriving");
+  });
+
+  it("hands a pane's activity change to the window, payload intact and without a toast", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    const seen: unknown[] = [];
+    const onActivity = (event: Event) => seen.push((event as CustomEvent).detail);
+    window.addEventListener("jarvis:agentic-ide-activity", onActivity);
+    try {
+      MockWebSocket.last!.deliver(
+        envelope("AgenticIdePaneActivity", {
+          session_id: "ide_1",
+          key: "t3",
+          name: "T3",
+          status: "live",
+          activity: "waiting",
+          activity_since: 1787823736,
+          worked: true,
+        }),
+      );
+    } finally {
+      window.removeEventListener("jarvis:agentic-ide-activity", onActivity);
+    }
+
+    expect(seen).toEqual([
+      {
+        session_id: "ide_1",
+        key: "t3",
+        name: "T3",
+        status: "live",
+        activity: "waiting",
+        activity_since: 1787823736,
+        worked: true,
+      },
+    ]);
+    // The bell is the surface for "it finished"; the badge just keeps up.
+    expect(useEventStore.getState().toasts).toEqual([]);
+  });
+
+  it("routes native microphone levels outside React state and clears them after listening", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver({ type: "audio.level", input: 0.72 });
+    expect(voiceInputLevelRef.current).toBe(0.72);
+
+    MockWebSocket.last!.deliver(
+      envelope("SystemStateChanged", {
+        new_state: "THINKING",
+        previous: "LISTENING",
+      }),
+    );
+    expect(voiceInputLevelRef.current).toBe(0);
+  });
+
+  it("hands a composer's own dictation back to that composer", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    // jsdom's document is not focused: without an owner this window only watches.
+    useEventStore.getState().beginDictation("composer-1");
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.deliver(envelope("DictationStarted", { target: "chat" }));
+    expect(useEventStore.getState().dictationPhase).toBe("recording");
+    MockWebSocket.last!.deliver(envelope("DictationTranscribing", {}));
+    expect(useEventStore.getState().dictationPhase).toBe("transcribing");
+    expect(useEventStore.getState().dictationOwner).toBe("composer-1");
+
+    MockWebSocket.last!.deliver(
+      envelope("DictationTranscript", { text: "Ship it today.", is_final: true, target: "chat" }),
+    );
+
+    const after = useEventStore.getState();
+    expect(after.dictationResult).toEqual({
+      seq: before + 1,
+      owner: "composer-1",
+      text: "Ship it today.",
+      outcome: "text",
+    });
+    expect(after.dictationPhase).toBe("idle");
+    expect(after.dictationOwner).toBeNull();
+
+    // The closing event has nothing left to end.
+    MockWebSocket.last!.deliver(
+      envelope("DictationCompleted", { outcome: "chat", detail: "", error: null, text: "Ship it today." }),
+    );
+    expect(useEventStore.getState().dictationResult.seq).toBe(before + 1);
+  });
+
+  it("ignores a transcript that is not final", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.getState().beginDictation("composer-1");
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.deliver(
+      envelope("DictationTranscript", { text: "ship it to", is_final: false, target: "chat" }),
+    );
+    MockWebSocket.last!.deliver(envelope("DictationTranscript", { text: "ship it to", target: "chat" }));
+
+    expect(useEventStore.getState().dictationResult.seq).toBe(before);
+    expect(useEventStore.getState().dictationPhase).toBe("recording");
+    expect(useEventStore.getState().dictationOwner).toBe("composer-1");
+  });
+
+  it.each([
+    ["empty", "empty"],
+    ["cancelled", "cancelled"],
+    ["failed", "failed"],
+    ["unavailable", "failed"],
+    ["partial", "failed"],
+  ] as const)(
+    "leaves an empty transcript to DictationCompleted: %s ends the composer's dictation as %s",
+    async (outcome, expected) => {
+      render(<Harness />);
+      await Promise.resolve();
+      useEventStore.getState().beginDictation("composer-1");
+      useEventStore.getState().markDictationTranscribing();
+      const before = useEventStore.getState().dictationResult.seq;
+
+      MockWebSocket.last!.deliver(
+        envelope("DictationTranscript", { text: "", is_final: true, target: "chat" }),
+      );
+      // The reason there is no text is not known yet.
+      expect(useEventStore.getState().dictationResult.seq).toBe(before);
+      expect(useEventStore.getState().dictationPhase).toBe("transcribing");
+
+      MockWebSocket.last!.deliver(
+        envelope("DictationCompleted", { outcome, detail: "A sentence.", error: null, text: "" }),
+      );
+
+      const after = useEventStore.getState();
+      expect(after.dictationResult).toEqual({
+        seq: before + 1,
+        owner: "composer-1",
+        text: "",
+        outcome: expected,
+      });
+      expect(after.dictationPhase).toBe("idle");
+      expect(after.dictationOwner).toBeNull();
+    },
+  );
+
+  it.each([
+    ["empty", null, "info", "Nothing was heard"],
+    ["failed", "bad_key", "error", "key was rejected"],
+    ["failed", "a_reason_from_the_future", "error", "Speech recognition failed."],
+  ] as const)(
+    "says why no text arrived: %s (%s)",
+    async (outcome, error, kind, words) => {
+      render(<Harness />);
+      await Promise.resolve();
+      useEventStore.setState({ toasts: [] });
+      useEventStore.getState().beginDictation("composer-1");
+      useEventStore.getState().markDictationTranscribing();
+
+      MockWebSocket.last!.deliver(
+        envelope("DictationCompleted", { outcome, detail: "A sentence.", error, text: "" }),
+      );
+
+      const toasts = useEventStore.getState().toasts;
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]!.kind).toBe(kind);
+      expect(toasts[0]!.message).toContain(words);
+    },
+  );
+
+  it("a cancelled dictation needs no explanation", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.setState({ toasts: [] });
+    useEventStore.getState().beginDictation("composer-1");
+
+    MockWebSocket.last!.deliver(
+      envelope("DictationCompleted", { outcome: "cancelled", detail: "", error: null, text: "" }),
+    );
+
+    expect(useEventStore.getState().toasts).toEqual([]);
+  });
+
+  it("a cancelled recording ends without ever being transcribed", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.getState().beginDictation("composer-1");
+
+    MockWebSocket.last!.deliver(
+      envelope("DictationTranscript", { text: "", is_final: true, target: "chat" }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("DictationCompleted", { outcome: "cancelled", detail: "", error: null, text: "" }),
+    );
+
+    expect(useEventStore.getState().dictationResult.outcome).toBe("cancelled");
+    expect(useEventStore.getState().dictationPhase).toBe("idle");
+  });
+
+  it("only watches a dictation no composer of this window started while it is in the background", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.deliver(envelope("DictationTranscribing", {}));
+    MockWebSocket.last!.deliver(
+      envelope("DictationTranscript", { text: "For another window.", is_final: true, target: "chat" }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("DictationCompleted", { outcome: "chat", detail: "", error: null, text: "For another window." }),
+    );
+
+    expect(useEventStore.getState().dictationPhase).toBe("idle");
+    expect(useEventStore.getState().dictationResult.seq).toBe(before);
+    expect(useEventStore.getState().toasts).toEqual([]);
+  });
+
+  it("hands a dictation of the focused window to the chat composers when no field takes it", async () => {
+    const background = bringToForeground();
+    const marker = document.createElement("textarea");
+    marker.setAttribute("data-jarvis-chat-input", "");
+    document.body.append(marker);
+    try {
+      render(<Harness />);
+      await Promise.resolve();
+      const before = useEventStore.getState().dictationResult.seq;
+
+      // The backend pastes this one into another application itself.
+      MockWebSocket.last!.deliver(
+        envelope("DictationTranscript", { text: "Not for this app.", is_final: true, target: "insert" }),
+      );
+      expect(useEventStore.getState().dictationResult.seq).toBe(before);
+
+      MockWebSocket.last!.deliver(
+        envelope("DictationTranscript", { text: "Ship it today.", is_final: true, target: "chat" }),
+      );
+      expect(useEventStore.getState().dictationResult).toEqual({
+        seq: before + 1,
+        owner: null,
+        text: "Ship it today.",
+        outcome: "text",
+      });
+      // A composer is on screen to take it: nothing to report.
+      expect(useEventStore.getState().toasts).toEqual([]);
+    } finally {
+      marker.remove();
+      background();
+    }
+  });
+
+  it("says so when a dictation of the focused window has nowhere to go", async () => {
+    const background = bringToForeground();
+    try {
+      render(<Harness />);
+      await Promise.resolve();
+
+      MockWebSocket.last!.deliver(
+        envelope("DictationTranscript", { text: "Ship it today.", is_final: true, target: "chat" }),
+      );
+
+      expect(useEventStore.getState().toasts.map((toast) => toast.message)).toEqual([
+        "No text field had focus, so the dictation was not inserted. It is in the dictation history.",
+      ]);
+    } finally {
+      background();
+    }
+  });
+
+  it("shows one appshot receipt per capture and no window title", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+
+    // The capture events themselves stay silent: the desktop overlay flashes
+    // at the shutter, and AppshotTaken is the single in-app receipt.
+    MockWebSocket.last!.deliver(
+      envelope("ScreenCaptureAnnounced", {
+        target_kind: "window",
+        target_label: "private title must not enter the toast",
+      }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("ScreenCaptureCompleted", {
+        width: 1600,
+        height: 900,
+        redaction_count: 3,
+        target_label: "private title must not enter the toast",
+      }),
+    );
+    MockWebSocket.last!.deliver(
+      envelope("AppshotTaken", {
+        appshot_id: "a1",
+        trigger: "hotkey",
+        delivered_to: "message",
+        target_label: "active window",
+      }),
+    );
+
+    const toasts = useEventStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].kind).toBe("success");
+    expect(toasts[0].message).toContain("Appshot");
+    expect(toasts[0].message).not.toContain("private title");
+  });
+
+  it("says why a shortcut appshot was refused", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("AppshotTaken", {
+        trigger: "hotkey",
+        delivered_to: "refused",
+        target_label: "Appshots are switched off.",
+      }),
+    );
+
+    const toasts = useEventStore.getState().toasts;
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].kind).toBe("warning");
+    expect(toasts[0].message).toContain("Appshots are switched off.");
+  });
+
+  it("stages the newest picture when the brain opens the Visualization section", async () => {
+    // The visualize tool publishes NavigateSidebar right after archiving a
+    // picture the user asked for. Merely landing on the gallery would make
+    // them hunt for the tile they just requested, so the stage is pulled to
+    // the newest visual — the "latest" target of requestVisual.
+    useEventStore.setState({ solo: false, visualStage: null, toasts: [] });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("NavigateSidebar", { section: "visualization" }));
+
+    expect(useEventStore.getState().activeSection).toBe("visualization");
+    expect(useEventStore.getState().visualStage?.target).toBe("latest");
+  });
+
+  it("stages into a detached Visualization window without switching its section", async () => {
+    // A solo window is pinned to the section it was split off for. The request
+    // still has to land — that window is exactly the one showing the picture.
+    useEventStore.setState({
+      solo: true,
+      activeSection: "visualization",
+      visualStage: null,
+      toasts: [],
+    });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("NavigateSidebar", { section: "visualization" }));
+
+    expect(useEventStore.getState().visualStage?.target).toBe("latest");
+    expect(useEventStore.getState().activeSection).toBe("visualization");
+    // A solo window announces nothing: it did not navigate anywhere.
+    expect(useEventStore.getState().toasts).toHaveLength(0);
+  });
+
+  it("leaves every other section on the plain navigation path", async () => {
+    useEventStore.setState({ solo: false, visualStage: null, toasts: [] });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("NavigateSidebar", { section: "settings" }));
+
+    expect(useEventStore.getState().activeSection).toBe("settings");
+    expect(useEventStore.getState().visualStage).toBeNull();
+  });
+
+  it("opens a named agent's chat on the front page", async () => {
+    useEventStore.setState({ solo: false, activeSection: "settings", toasts: [] });
+    useHomeStore.setState({ agentChatId: null });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("NavigateSidebar", { section: "chats", target: "agent", target_id: "agent-7" }),
+    );
+
+    expect(useEventStore.getState().activeSection).toBe("chats");
+    expect(useHomeStore.getState().agentChatId).toBe("agent-7");
+  });
+
+  it("opens one conversation and leaves an agent's chat for it", async () => {
+    const openSession = vi.fn();
+    const original = useAgentChatStore.getState().openSession;
+    useAgentChatStore.setState({ openSession });
+    useEventStore.setState({ solo: false, activeSection: "settings", toasts: [] });
+    useHomeStore.setState({ agentChatId: "agent-7", jarvisCardMode: "voice" });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("NavigateSidebar", { section: "chats", target: "chat", target_id: "s-1" }),
+    );
+
+    expect(openSession).toHaveBeenCalledWith("s-1");
+    expect(useHomeStore.getState().agentChatId).toBeNull();
+    expect(useHomeStore.getState().jarvisCardMode).toBe("chat");
+    expect(useEventStore.getState().activeSection).toBe("chats");
+    useAgentChatStore.setState({ openSession: original });
+  });
+
+  it("opens a coding thread Dodaios started in the IDE's Chat layout", async () => {
+    useEventStore.setState({ solo: false, activeSection: "chats", toasts: [] });
+    useIdeThreadsStore.setState({ layout: "grid", selection: { projectId: "", sessionId: null } });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("NavigateSidebar", { section: "agentic-ide", target: "thread", target_id: "t-9" }),
+    );
+
+    expect(useEventStore.getState().activeSection).toBe("agentic-ide");
+    expect(useIdeThreadsStore.getState().layout).toBe("threads");
+    expect(useIdeThreadsStore.getState().selection.sessionId).toBe("t-9");
+  });
+
+  it("a detached window keeps its view when a target is opened elsewhere", async () => {
+    useEventStore.setState({ solo: true, activeSection: "settings", toasts: [] });
+    useHomeStore.setState({ agentChatId: null });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("NavigateSidebar", { section: "chats", target: "agent", target_id: "agent-7" }),
+    );
+
+    expect(useEventStore.getState().activeSection).toBe("settings");
+    expect(useHomeStore.getState().agentChatId).toBeNull();
+  });
+
+  it("invalidates every documentation query after a registry reload", async () => {
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("DocIndexReloaded", { total: 42, by_diataxis: {}, errors: 0 }),
+    );
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["docs"] });
+  });
+
+  it.each(["MarketplaceItemInstalled", "SkillRegistryReloaded", "BrainToolsChanged"])(
+    "refreshes open capability pickers after %s", async (eventName) => {
+      const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+      render(<Harness />);
+      await Promise.resolve();
+      MockWebSocket.last!.deliver(envelope(eventName, { kind: "skill" }));
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ["society", "capabilities"] });
+      invalidate.mockRestore();
+    },
+  );
+
+  it("opens an empty typed chat when a new chat is requested from outside the window", async () => {
+    useEventStore.setState({
+      solo: false,
+      activeSection: "settings",
+      activeKind: "text",
+      activeThreadId: "old-thread",
+    });
+    useHomeStore.setState({ surface: "voice" });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("ComposeRequested", { source: "pet" }));
+
+    expect(useEventStore.getState().activeSection).toBe("chats");
+    expect(useEventStore.getState().activeThreadId).toBeNull();
+    expect(useHomeStore.getState().surface).toBe("chat");
+  });
+
+  it("keeps a detached window on its section when the pen asks for a chat", async () => {
+    useEventStore.setState({ solo: true, activeSection: "visualization" });
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("ComposeRequested", { source: "pet" }));
+
+    expect(useEventStore.getState().activeSection).toBe("visualization");
+  });
+
+  it("relays a speaker mute from anywhere to the window", async () => {
+    const seen: unknown[] = [];
+    const listener = (event: Event) => seen.push((event as CustomEvent).detail);
+    window.addEventListener(SPEAKER_MUTE_EVENT, listener);
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(envelope("VoiceSpeakerMuteChanged", { muted: true, source: "pet" }));
+    MockWebSocket.last!.deliver(envelope("VoiceSpeakerMuteChanged", { source: "garbled" }));
+
+    window.removeEventListener(SPEAKER_MUTE_EVENT, listener);
+    expect(seen).toEqual([{ muted: true }]);
+  });
+
+  it("re-reads the pets after a PetChanged event", async () => {
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    render(<Harness />);
+    await Promise.resolve();
+
+    MockWebSocket.last!.deliver(
+      envelope("PetChanged", { pet_id: "miso", source: "api" }),
+    );
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["pets"] });
+    invalidate.mockRestore();
+  });
+});
+
+describe("useWebSocket connection state (welcome-gated + warming)", () => {
+  const OriginalWS = globalThis.WebSocket;
+
+  beforeEach(() => {
+    (globalThis as unknown as { WebSocket: typeof MockWebSocket }).WebSocket =
+      MockWebSocket;
+    (window as unknown as { location: unknown }).location = {
+      protocol: "http:",
+      host: "localhost:5173",
+    };
+    (window as unknown as { __JARVIS_TOKEN?: string }).__JARVIS_TOKEN = undefined;
+    useEventStore.setState({ connected: false, wsWarming: true });
+  });
+
+  afterEach(() => {
+    cleanup();
+    (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+      OriginalWS;
+    MockWebSocket.last = null;
+  });
+
+  it("marks connected only when the welcome frame arrives", async () => {
+    render(<Harness />);
+    await Promise.resolve(); // run the queued "open"
+    // Raw socket open alone must NOT mark connected (the bootstrap also opens).
+    expect(useEventStore.getState().connected).toBe(false);
+    MockWebSocket.last!.deliver({
+      type: "welcome",
+      session_id: "s",
+      version: "0.1.0",
+      token: "t",
+    });
+    expect(useEventStore.getState().connected).toBe(true);
+    expect(useEventStore.getState().wsWarming).toBe(false);
+  });
+
+  it("sets wsWarming on a 1013 close and clears it on a non-1013 close", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    MockWebSocket.last!.fire("close", { code: 1013 });
+    expect(useEventStore.getState().wsWarming).toBe(true);
+    expect(useEventStore.getState().connected).toBe(false);
+    MockWebSocket.last!.fire("close", { code: 1006 });
+    expect(useEventStore.getState().wsWarming).toBe(false);
+  });
+
+  it("ends a composer's dictation as failed when the connection closes", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.getState().resetDictation();
+    useEventStore.getState().beginDictation("composer-1");
+    useEventStore.getState().markDictationTranscribing();
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.fire("close", { code: 1006 });
+
+    const after = useEventStore.getState();
+    expect(after.dictationResult).toEqual({ seq: before + 1, owner: "composer-1", text: "", outcome: "failed" });
+    expect(after.dictationPhase).toBe("idle");
+    expect(after.dictationOwner).toBeNull();
+  });
+
+  it("ends a dictation left open when a new connection is welcomed", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.getState().resetDictation();
+    useEventStore.getState().beginDictation("composer-1");
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.deliver({ type: "welcome", session_id: "s", version: "0.1.0" });
+
+    const after = useEventStore.getState();
+    expect(after.dictationResult.seq).toBe(before + 1);
+    expect(after.dictationResult.outcome).toBe("failed");
+    expect(after.dictationPhase).toBe("idle");
+  });
+
+  it("a close with no dictation under way publishes no result", async () => {
+    render(<Harness />);
+    await Promise.resolve();
+    useEventStore.getState().resetDictation();
+    const before = useEventStore.getState().dictationResult.seq;
+
+    MockWebSocket.last!.fire("close", { code: 1006 });
+
+    expect(useEventStore.getState().dictationResult.seq).toBe(before);
+  });
+
+  // 4401 = credential rejected at the handshake. On WebKit engines this is
+  // the normal cookie-less handshake (BUG-065): while the client re-proves
+  // its session via the one-time ticket, the UI must keep the "starting"
+  // state instead of flashing OFFLINE; a failed mint (dead session) must
+  // still surface the honest offline state.
+  it("keeps warming through a 4401 ticket retry, drops it when the mint fails", async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      (globalThis as unknown as { fetch: unknown }).fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ ticket: "one-time-abc", expires_in: 60 }),
+      });
+      render(<Harness />);
+      await Promise.resolve();
+
+      useEventStore.setState({ wsWarming: false });
+      MockWebSocket.last!.fire("close", { code: 4401 });
+      await waitFor(() => expect(useEventStore.getState().wsWarming).toBe(true));
+      expect(useEventStore.getState().connected).toBe(false);
+
+      (globalThis as unknown as { fetch: unknown }).fetch = vi
+        .fn()
+        .mockResolvedValue({ ok: false });
+      MockWebSocket.last!.fire("close", { code: 4401 });
+      await waitFor(() => expect(useEventStore.getState().wsWarming).toBe(false));
+    } finally {
+      (globalThis as unknown as { fetch: unknown }).fetch = originalFetch;
+    }
+  });
+});

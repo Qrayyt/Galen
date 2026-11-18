@@ -1,0 +1,818 @@
+"""Moving a folder to a "server" and back, with real git and a real shell.
+
+The server here is this machine: a pool double runs the remote commands in a
+local POSIX shell inside a temp "home", and file transfer is a copy. That keeps
+the part that can actually go wrong — the snapshot commit, the bundle, the
+checkout on the other side, the way back — fully real, on every OS that has
+git and a POSIX shell (Git Bash on Windows).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import shutil
+import subprocess
+import sys
+import types
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from dodaios.agentic_ide import remote
+from dodaios.computers import remote_os
+
+
+def _posix_shell() -> str | None:
+    if sys.platform == "win32":
+        git = shutil.which("git")
+        if git is None:
+            return None
+        roots = Path(git).resolve().parents
+        for candidate in (
+            *(root / "bin" / "bash.exe" for root in list(roots)[:3]),
+            *(root / "usr" / "bin" / "bash.exe" for root in list(roots)[:3]),
+        ):
+            if candidate.is_file():
+                return str(candidate)
+        return None
+    return shutil.which("bash") or shutil.which("sh")
+
+
+SHELL = _posix_shell()
+pytestmark = pytest.mark.skipif(
+    SHELL is None or shutil.which("git") is None, reason="needs git and a POSIX shell"
+)
+
+
+class LocalPool:
+    """Stands in for ``SshPtyPool``: the 'server' is a folder on this machine."""
+
+    def __init__(self, home: Path) -> None:
+        self._home = home
+
+    async def home(self) -> str:
+        return self._home.as_posix()
+
+    async def host(self) -> remote_os.RemoteHost:
+        return remote_os.RemoteHost()
+
+    async def run(self, command: str, *, timeout_s: float = 60.0) -> tuple[int, str, str]:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [str(SHELL), "-c", command],
+            capture_output=True,
+            timeout=timeout_s,
+            check=False,
+            cwd=str(self._home),
+        )
+        return (
+            result.returncode,
+            result.stdout.decode("utf-8", "replace"),
+            result.stderr.decode("utf-8", "replace"),
+        )
+
+
+@pytest.fixture
+def copies(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def upload(_pool: object, local: Path, remote_path: str) -> None:
+        target = Path(remote_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(local, target)
+
+    async def download(_pool: object, remote_path: str, local: Path) -> None:
+        shutil.copyfile(Path(remote_path), local)
+
+    monkeypatch.setattr(remote, "_upload", upload)
+    monkeypatch.setattr(remote, "_download", download)
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(  # noqa: S603
+        ["git", *args],  # noqa: S607
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**__import__("os").environ, **remote._IDENTITY_ENV},
+    ).stdout.strip()
+
+
+@pytest.fixture
+def project(tmp_path: Path) -> Path:
+    repo = tmp_path / "My App"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    (repo / "app.py").write_text("print('v1')\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("secret.env\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "first")
+    return repo
+
+
+async def test_offload_carries_uncommitted_and_new_files_but_not_ignored_ones(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    (project / "app.py").write_text("print('v2 draft')\n", encoding="utf-8")
+    (project / "notes.md").write_text("new file\n", encoding="utf-8")
+    (project / "secret.env").write_text("TOKEN=x\n", encoding="utf-8")
+    index_before = (project / ".git" / "index").read_bytes()
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), project)
+
+    there = Path(placement.remote_folder)
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('v2 draft')\n"
+    assert (there / "notes.md").is_file()
+    assert not (there / "secret.env").exists(), ".gitignore is honoured"
+    assert _git(there, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+    assert "app.py" in _git(there, "status", "--porcelain"), "edits arrive uncommitted"
+    assert (project / ".git" / "index").read_bytes() == index_before, "local index untouched"
+    assert placement.offload_snapshot
+
+
+async def test_bring_back_applies_the_servers_work_when_nothing_changed_here(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    there = Path(placement.remote_folder)
+    (there / "app.py").write_text("print('done on the vps')\n", encoding="utf-8")
+    (there / "vps.txt").write_text("made there\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "My VPS"
+    )
+
+    assert outcome.applied, outcome.message
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('done on the vps')\n"
+    assert (project / "vps.txt").is_file()
+    assert outcome.branch and outcome.branch.startswith("jarvis/my-vps/")
+    assert _git(project, "rev-parse", "--verify", outcome.branch)
+
+
+async def test_bring_back_never_overwrites_local_changes(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("server\n", encoding="utf-8")
+    (project / "app.py").write_text("local meanwhile\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps"
+    )
+
+    assert not outcome.applied
+    assert (project / "app.py").read_text(encoding="utf-8") == "local meanwhile\n"
+    assert outcome.branch and outcome.branch in outcome.message
+
+
+async def test_second_offload_backs_up_the_servers_unsaved_state(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("unsaved on server\n", encoding="utf-8")
+
+    await remote.push_code(pool, project)
+
+    backups = _git(Path(placement.remote_folder), "for-each-ref", "refs/jarvis/backup")
+    assert backups, "the server's own edits were kept before being replaced"
+
+
+async def test_folder_without_git_travels_as_a_tarball(tmp_path: Path, copies: None) -> None:
+    plain = tmp_path / "plain"
+    (plain / "node_modules" / "x").mkdir(parents=True)
+    (plain / "node_modules" / "x" / "big.js").write_text("x", encoding="utf-8")
+    (plain / "main.txt").write_text("hello\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), plain)
+
+    there = Path(placement.remote_folder)
+    assert (there / "main.txt").read_text(encoding="utf-8") == "hello\n"
+    assert not (there / "node_modules").exists()
+    assert placement.offload_snapshot is None
+
+
+def test_claude_project_dir_matches_the_cli_convention() -> None:
+    assert remote.claude_project_dir("/root/jarvis-workspaces/app-1a2b3c") == (
+        "-root-jarvis-workspaces-app-1a2b3c"
+    )
+
+
+async def test_secrets_and_huge_new_files_stay_on_this_machine(
+    project: Path, tmp_path: Path, copies: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote, "MAX_FILE_BYTES", 1000)
+    (project / "deploy.pem").write_text("committed on purpose\n", encoding="utf-8")
+    _git(project, "add", "deploy.pem")
+    _git(project, "commit", "-q", "-m", "tracked key")
+    (project / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+    (project / ".env.example").write_text("API_KEY=\n", encoding="utf-8")
+    (project / "keys").mkdir()
+    (project / "keys" / "id_ed25519").write_text("-----BEGIN OPENSSH\n", encoding="utf-8")
+    (project / "big.bin").write_bytes(b"0" * 2000)
+    (project / "notes.md").write_text("fine\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), project)
+
+    there = Path(placement.remote_folder)
+    assert (there / "notes.md").is_file()
+    assert (there / ".env.example").is_file(), "a template holds no secret"
+    assert (there / "deploy.pem").is_file(), "what is committed already travels"
+    for held in (".env", "keys/id_ed25519", "big.bin"):
+        assert not (there / held).exists(), held
+    assert set(placement.left_behind) == {".env", "keys/id_ed25519", "big.bin"}
+    assert ".env" in remote.left_behind_note(placement.left_behind)
+
+
+async def test_bring_back_still_applies_when_secrets_stayed_here(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    (project / ".env").write_text("API_KEY=secret\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("print('server')\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps"
+    )
+
+    assert outcome.applied, outcome.message
+    assert (project / ".env").read_text(encoding="utf-8") == "API_KEY=secret\n"
+
+
+async def test_bring_back_is_byte_exact_for_blank_line_hunks_and_other_encodings(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    (project / "text.txt").write_text("one\ntwo\n\n", encoding="utf-8")
+    _git(project, "add", "text.txt")
+    _git(project, "commit", "-q", "-m", "ends on a blank line")
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    there = Path(placement.remote_folder)
+    (there / "text.txt").write_text("ONE\ntwo\n\n", encoding="utf-8")
+    (there / "latin.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps"
+    )
+
+    assert outcome.applied, outcome.message
+    assert (project / "text.txt").read_bytes().replace(b"\r\n", b"\n") == b"ONE\ntwo\n\n"
+    assert (project / "latin.txt").read_bytes().replace(b"\r\n", b"\n") == b"caf\xe9\n"
+
+
+def test_a_branch_name_taken_in_the_same_second_gets_a_counter(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(remote, "time", types.SimpleNamespace(strftime=lambda _f: "20260930-1200"))
+    first = remote._free_branch(project, "jarvis/vps")
+    _git(project, "branch", first)
+
+    assert first == "jarvis/vps/20260930-1200"
+    assert remote._free_branch(project, "jarvis/vps") == "jarvis/vps/20260930-1200-2"
+
+
+async def test_preflight_names_every_missing_command(tmp_path: Path) -> None:
+    pool = LocalPool(tmp_path)
+
+    with pytest.raises(remote.MoveError, match="Nope CLI is not installed on vps"):
+        await remote.preflight(pool, {"git": "git", "Nope CLI": "no-such-cli-4711"}, "vps")
+    await remote.preflight(pool, {"git": "git"}, "vps")
+
+
+async def test_folder_without_git_leaves_secrets_here(tmp_path: Path, copies: None) -> None:
+    plain = tmp_path / "plain"
+    (plain / "sub").mkdir(parents=True)
+    (plain / "main.txt").write_text("hello\n", encoding="utf-8")
+    (plain / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+    (plain / "sub" / "id_rsa").write_text("key\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), plain)
+
+    there = Path(placement.remote_folder)
+    assert (there / "main.txt").is_file()
+    assert not (there / ".env").exists()
+    assert not (there / "sub" / "id_rsa").exists()
+    assert set(placement.left_behind) == {".env", "sub/id_rsa"}
+
+
+async def test_a_committed_file_renamed_to_env_stays_here(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    (project / "sample.cfg").write_text("KEY=placeholder\n", encoding="utf-8")
+    _git(project, "add", "sample.cfg")
+    _git(project, "commit", "-q", "-m", "template")
+    (project / "sample.cfg").rename(project / ".env")  # git would call this a rename
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), project)
+
+    assert not (Path(placement.remote_folder) / ".env").exists()
+    assert ".env" in placement.left_behind
+
+
+async def test_an_assume_unchanged_edit_still_travels(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    _git(project, "update-index", "--assume-unchanged", "app.py")
+    (project / "app.py").write_text("print('edited anyway')\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), project)
+
+    there = Path(placement.remote_folder) / "app.py"
+    assert there.read_text(encoding="utf-8") == "print('edited anyway')\n"
+    assert "h app.py" in _git(project, "ls-files", "-v", "app.py"), "the user's own mark stays"
+
+
+def test_joined_folder_maps_a_subfolder_into_the_same_copy(tmp_path: Path) -> None:
+    top = tmp_path / "repo"
+    (top / "pkg" / "sub").mkdir(parents=True)
+
+    from_root = remote.joined_folder("/h/jw/repo-1", top, top / "pkg", top)
+    from_sub = remote.joined_folder("/h/jw/repo-1/pkg/sub", top / "pkg" / "sub", top, top)
+
+    assert from_root == "/h/jw/repo-1/pkg"
+    assert from_sub == "/h/jw/repo-1"
+
+
+async def test_a_repo_without_commits_comes_back_too(tmp_path: Path, copies: None) -> None:
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    _git(fresh, "init", "-q", "-b", "main")
+    (fresh / "draft.py").write_text("print('draft')\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, fresh)
+    (Path(placement.remote_folder) / "draft.py").write_text("print('finished')\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, fresh, placement.remote_folder, placement.offload_snapshot, "vps"
+    )
+
+    assert outcome.applied, outcome.message
+    assert (fresh / "draft.py").read_text(encoding="utf-8") == "print('finished')\n"
+
+
+# ---------------------------------------------------------------------------
+# a thread's turns: the work comes back after every turn
+# ---------------------------------------------------------------------------
+
+
+def _refs(repo: Path, prefix: str) -> list[str]:
+    return _git(repo, "for-each-ref", "--format=%(refname)", prefix).split()
+
+
+async def test_a_turns_work_comes_back_without_a_branch(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    there = Path(placement.remote_folder)
+    (there / "app.py").write_text("print('turn one')\n", encoding="utf-8")
+    (there / "new.txt").write_text("made there\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "My VPS", per_turn=True
+    )
+
+    assert outcome.applied and outcome.changed, outcome.message
+    assert "My VPS" in outcome.message
+    assert outcome.branch is None
+    assert not _refs(project, "refs/heads/jarvis"), "a turn that fits leaves no branch behind"
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('turn one')\n"
+    assert (project / "new.txt").read_text(encoding="utf-8") == "made there\n"
+
+
+async def test_a_turn_that_changed_nothing_brings_nothing_back(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    (project / "app.py").write_text("print('draft')\n", encoding="utf-8")
+    placement = await remote.push_code(pool, project)
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps", per_turn=True
+    )
+
+    assert not outcome.changed and not outcome.applied
+    assert outcome.message == "", "nothing to tell the reader"
+    assert not _refs(project, "refs/jarvis/return"), "nothing was packed or fetched"
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('draft')\n"
+
+
+async def test_the_next_turn_starts_from_the_previous_turns_work(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    """The reported loss: the second turn's copy replaced the first turn's work."""
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    first = await remote.push_code(pool, project)
+    there = Path(first.remote_folder)
+    (there / "app.py").write_text("print('turn one')\n", encoding="utf-8")
+    (there / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    await remote.pull_code(
+        pool, project, first.remote_folder, first.offload_snapshot, "vps", per_turn=True
+    )
+
+    second = await remote.push_code(pool, project)
+
+    assert Path(second.remote_folder) == there
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('turn one')\n"
+    assert (there / "feature.py").read_text(encoding="utf-8") == "x = 1\n"
+    assert not _refs(there, "refs/jarvis/backup"), "nothing on the server had to be set aside"
+
+
+async def test_a_turns_work_fits_beside_an_edit_made_here_meanwhile(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("print('server')\n", encoding="utf-8")
+    (project / "notes.md").write_text("written here during the turn\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps", per_turn=True
+    )
+
+    assert outcome.applied, outcome.message
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('server')\n"
+    assert (project / "notes.md").read_text(encoding="utf-8") == "written here during the turn\n"
+
+
+async def test_a_turns_work_that_collides_goes_to_a_branch_and_overwrites_nothing(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    there = Path(placement.remote_folder)
+    (there / "app.py").write_text("print('server')\n", encoding="utf-8")
+    (there / "other.txt").write_text("also from the server\n", encoding="utf-8")
+    (project / "app.py").write_text("print('local meanwhile')\n", encoding="utf-8")
+
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps", per_turn=True
+    )
+
+    assert not outcome.applied and outcome.changed
+    assert outcome.branch and outcome.branch in outcome.message
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('local meanwhile')\n"
+    assert not (project / "other.txt").exists(), "all of the patch or none of it"
+    assert _git(project, "show", f"{outcome.branch}:app.py") == "print('server')"
+
+
+async def test_work_left_by_an_interrupted_turn_comes_back_before_the_next_copy(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    there = Path(placement.remote_folder)
+    # The turn wrote this and then the app went away: nothing brought it back.
+    (there / "app.py").write_text("print('half a turn')\n", encoding="utf-8")
+
+    outcome = await remote.pull_unreturned(pool, project, "vps")
+
+    assert outcome is not None and outcome.applied, outcome
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('half a turn')\n"
+    await remote.push_code(pool, project)
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('half a turn')\n"
+
+
+async def test_returned_work_is_not_brought_back_twice(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("print('done')\n", encoding="utf-8")
+    await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps", per_turn=True
+    )
+
+    again = await remote.pull_unreturned(pool, project, "vps")
+
+    assert again is not None and not again.changed
+    assert not _refs(project, "refs/heads/jarvis")
+
+
+async def test_a_panes_return_also_counts_as_handed_back(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    placement = await remote.push_code(pool, project)
+    (Path(placement.remote_folder) / "app.py").write_text("print('pane')\n", encoding="utf-8")
+    await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps"
+    )
+
+    again = await remote.pull_unreturned(pool, project, "vps")
+
+    assert again is not None and not again.changed
+
+
+async def test_no_copy_on_the_server_means_nothing_to_bring_back(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    assert await remote.pull_unreturned(LocalPool(server), project, "vps") is None
+
+
+# --- the thread runner's two steps (``agent_chat.remote_thread_sync``) ------
+
+
+class _Turn:
+    """What the two steps use of a turn handle."""
+
+    turn_id = "turn-1"
+
+    def __init__(self) -> None:
+        self.notices: list[str] = []
+        self.steps: list[dict[str, Any]] = []
+
+    async def emit(self, event: dict[str, Any]) -> None:
+        if event["kind"] == "setup_step":
+            self.steps.append(dict(event["payload"]))
+            return
+        assert event["kind"] == "notice"
+        self.notices.append(str(event["payload"]["text"]))
+
+
+@pytest.fixture
+def thread_sync(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, copies: None) -> Any:
+    from dodaios.agent_chat import remote_thread_sync
+    from dodaios.computers import remote_terminal
+
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    monkeypatch.setattr(remote_terminal, "pool_for", lambda _computer_id: pool)
+    monkeypatch.setattr(remote_thread_sync, "_computer_name", lambda _computer_id: "My VPS")
+    return remote_thread_sync
+
+
+async def test_a_thread_turn_sends_the_folder_and_says_when_work_came_back(
+    project: Path, thread_sync: Any
+) -> None:
+    turn = _Turn()
+    placement = await thread_sync.send_folder(turn, "vps-1", project)
+    assert turn.notices == [], "a first copy has nothing to report"
+    (Path(placement.remote_folder) / "app.py").write_text("print('turn')\n", encoding="utf-8")
+
+    await thread_sync.return_work(turn, "vps-1", project, placement)
+
+    assert turn.notices == ["The changes made on My VPS are back in this folder."]
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('turn')\n"
+
+
+async def test_a_thread_turn_that_changed_nothing_says_nothing(
+    project: Path, thread_sync: Any
+) -> None:
+    turn = _Turn()
+    placement = await thread_sync.send_folder(turn, "vps-1", project)
+
+    await thread_sync.return_work(turn, "vps-1", project, placement)
+
+    assert turn.notices == []
+
+
+async def test_the_next_thread_turn_first_fetches_what_an_interrupted_one_left(
+    project: Path, thread_sync: Any
+) -> None:
+    first = _Turn()
+    placement = await thread_sync.send_folder(first, "vps-1", project)
+    there = Path(placement.remote_folder)
+    (there / "app.py").write_text("print('interrupted')\n", encoding="utf-8")
+
+    second = _Turn()
+    await thread_sync.send_folder(second, "vps-1", project)
+
+    assert second.notices == ["The changes made on My VPS are back in this folder."]
+    assert (project / "app.py").read_text(encoding="utf-8") == "print('interrupted')\n"
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('interrupted')\n"
+
+
+async def test_a_failed_way_back_is_told_and_does_not_fail_the_turn(
+    project: Path, thread_sync: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    turn = _Turn()
+    placement = await thread_sync.send_folder(turn, "vps-1", project)
+
+    async def broken(*_args: object, **_kwargs: object) -> object:
+        raise OSError("connection lost")
+
+    monkeypatch.setattr(remote, "pull_code", broken)
+
+    await thread_sync.return_work(turn, "vps-1", project, placement)
+
+    assert len(turn.notices) == 1
+    assert "could not be brought back from My VPS" in turn.notices[0]
+    assert "connection lost" in turn.notices[0]
+
+
+async def test_a_thread_folder_without_git_says_its_work_stays_behind(
+    tmp_path: Path, thread_sync: Any
+) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "main.txt").write_text("hello\n", encoding="utf-8")
+    turn = _Turn()
+    placement = await thread_sync.send_folder(turn, "vps-1", plain)
+
+    await thread_sync.return_work(turn, "vps-1", plain, placement)
+
+    assert len(turn.notices) == 1 and "no git history" in turn.notices[0]
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://github.com/Owner/Repo.git", "https://github.com/Owner/Repo.git"),
+        ("git@github.com:Owner/Repo.git", "https://github.com/Owner/Repo.git"),
+        ("ssh://git@gitlab.com:2222/group/repo.git", "https://gitlab.com/group/repo.git"),
+        ("https://user:ghp_secret@github.com/Owner/Repo.git", "https://github.com/Owner/Repo.git"),
+        ("C:/Users/me/repos/origin.git", None),
+        ("/srv/git/origin.git", None),
+        ("../origin.git", None),
+    ],
+)
+def test_the_server_gets_a_fetchable_address_without_this_computers_secrets(
+    url: str, expected: str | None
+) -> None:
+    assert remote.public_fetch_url(url) == expected
+
+
+def _published(project: Path, tmp_path: Path) -> Path:
+    """Give ``project`` an upstream holding its first commit; one more stays local."""
+    origin = tmp_path / "origin.git"
+    _git(tmp_path, "init", "-q", "--bare", str(origin))
+    _git(origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+    _git(project, "remote", "add", "origin", origin.as_uri())
+    _git(project, "push", "-q", "-u", "origin", "main")
+    (project / "local_only.py").write_text("x = 'not pushed'\n", encoding="utf-8")
+    _git(project, "add", "-A")
+    _git(project, "commit", "-q", "-m", "local only")
+    return origin
+
+
+async def test_a_first_copy_fetches_the_pushed_part_on_the_server_and_sends_only_the_rest(
+    project: Path, tmp_path: Path, copies: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A whole-history bundle made a first copy of a big repository take minutes."""
+    _published(project, tmp_path)
+    # A file:// address stands in for the hosting service here.
+    monkeypatch.setattr(remote, "public_fetch_url", lambda url: url)
+    pushed = _git(project, "rev-parse", "HEAD~1")
+    (project / "app.py").write_text("print('draft')\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+
+    placement = await remote.push_code(pool, project)
+
+    there = Path(placement.remote_folder)
+    assert _git(there, "rev-parse", "--is-shallow-repository") == "true", "no history was sent"
+    assert _git(there, "rev-parse", remote.SEED_REF) == pushed
+    assert _git(there, "rev-parse", "HEAD") == _git(project, "rev-parse", "HEAD")
+    assert (there / "local_only.py").read_text(encoding="utf-8") == "x = 'not pushed'\n"
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('draft')\n"
+
+    (there / "made_there.py").write_text("y = 2\n", encoding="utf-8")
+    outcome = await remote.pull_code(
+        pool, project, placement.remote_folder, placement.offload_snapshot, "vps", per_turn=True
+    )
+    assert outcome.applied, outcome.message
+    assert (project / "made_there.py").read_text(encoding="utf-8") == "y = 2\n"
+
+    second = await remote.push_code(pool, project)
+    assert Path(second.remote_folder) == there
+    assert (there / "made_there.py").read_text(encoding="utf-8") == "y = 2\n"
+
+
+async def test_a_first_copy_still_works_when_the_server_cannot_fetch(
+    project: Path, tmp_path: Path, copies: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _published(project, tmp_path)
+    monkeypatch.setattr(remote, "public_fetch_url", lambda _url: (tmp_path / "gone.git").as_uri())
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    placement = await remote.push_code(LocalPool(server), project)
+
+    there = Path(placement.remote_folder)
+    assert _git(there, "rev-parse", "--is-shallow-repository") == "false", "history was sent"
+    assert (there / "local_only.py").is_file()
+    assert _git(there, "rev-parse", "HEAD") == _git(project, "rev-parse", "HEAD")
+
+
+async def test_a_next_turn_with_nothing_new_leaves_the_servers_checkout_alone(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    """Checkout, reset and refresh walk every file; for nothing new they are skipped."""
+    (project / "app.py").write_text("print('draft')\n", encoding="utf-8")
+    server = tmp_path / "server-home"
+    server.mkdir()
+    pool = LocalPool(server)
+    first = await remote.push_code(pool, project)
+    there = Path(first.remote_folder)
+    index = there / ".git" / "index"
+    stamp = index.stat().st_mtime_ns
+
+    second = await remote.push_code(pool, project)
+
+    assert index.stat().st_mtime_ns == stamp, "the server's checkout was not redone"
+    assert _git(there, "rev-parse", remote.SYNCED_REF) == second.offload_snapshot
+    assert not _refs(there, "refs/jarvis/backup")
+
+    (project / "app.py").write_text("print('edited here')\n", encoding="utf-8")
+    await remote.push_code(pool, project)
+
+    assert (there / "app.py").read_text(encoding="utf-8") == "print('edited here')\n"
+    assert not _refs(there, "refs/jarvis/backup"), "the server held nothing of its own"
+
+
+async def test_a_thread_turn_names_each_setup_step_as_it_begins(
+    project: Path, thread_sync: Any
+) -> None:
+    """The thread shows these instead of a bare "Getting ready" for minutes."""
+    turn = _Turn()
+
+    await thread_sync.send_folder(turn, "vps-1", project)
+
+    assert [step["step"] for step in turn.steps] == ["connect", "send", "unpack"]
+    assert turn.steps[0] == {"turn_id": "turn-1", "step": "connect", "where": "My VPS"}
+
+
+async def test_a_first_copy_from_an_upstream_names_the_host_it_fetches_from(
+    project: Path, tmp_path: Path, copies: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _published(project, tmp_path)
+    monkeypatch.setattr(remote, "public_fetch_url", lambda url: url)
+    server = tmp_path / "server-home"
+    server.mkdir()
+    told: list[tuple[str, dict[str, str]]] = []
+
+    async def progress(step: str, details: dict[str, str]) -> None:
+        told.append((step, details))
+
+    await remote.push_code(LocalPool(server), project, progress=progress)
+
+    assert [step for step, _ in told] == ["fetch", "send", "unpack"]
+    assert told[0][1] == {"host": remote._url_host((tmp_path / "origin.git").as_uri())}
+
+
+def test_the_fetch_step_names_only_the_host() -> None:
+    assert remote._url_host("https://github.com/Owner/Repo.git") == "github.com"
+    assert remote._url_host("https://gitlab.example.org:8443/a/b") == "gitlab.example.org:8443"
+
+
+async def test_a_failing_progress_listener_never_fails_the_copy(
+    project: Path, tmp_path: Path, copies: None
+) -> None:
+    server = tmp_path / "server-home"
+    server.mkdir()
+
+    async def broken(_step: str, _details: dict[str, str]) -> None:
+        raise RuntimeError("the socket closed")
+
+    placement = await remote.push_code(LocalPool(server), project, progress=broken)
+
+    assert (Path(placement.remote_folder) / "app.py").is_file()

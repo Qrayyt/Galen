@@ -1,0 +1,689 @@
+"""Run each scheduled execution in its own persisted, unattended owner chat."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+from uuid import uuid4
+
+from dodaios.core.protocols import CapacityDeferred, RoutineDeferred
+from dodaios.safety.reversibility import autonomy_origin
+
+from .chat_binding import SURFACE, _workspace, pair_for
+from .display_name import display_name
+from .routines import agent_id_from_tags, routine_seat
+
+log = logging.getLogger(__name__)
+
+#: Marks a per-execution routine chat: ``society:<agent>:routine:<task>:<run>``.
+ROUTINE_SESSION_MARKER = ":routine:"
+
+
+def is_routine_session(session_id: str) -> bool:
+    """Whether ``session_id`` is an unattended routine execution's own chat."""
+    return ROUTINE_SESSION_MARKER in (session_id or "")
+
+
+async def guard_owned_routine(runtime: Any, tags: tuple[str, ...]) -> Any:
+    """Check live owner availability for both chat and native workflow actions."""
+    agent_id = agent_id_from_tags(tags)
+    if agent_id is None:
+        return None
+    if await runtime.store.kill_switch():
+        raise RuntimeError("The society is halted")
+    agent = await runtime.roster.get(agent_id)
+    if agent is None or str(agent.state) != "active":
+        raise RuntimeError("The routine owner is unavailable or paused")
+    return agent
+
+
+def _billed_via_api(provider: str, account_id: str = "") -> bool:
+    """Whether ``provider`` answers through an API key on the society surface.
+
+    CLI seats (subscriptions) and keyless local providers never touch an API
+    key; ``brain``/``api`` runners do. Decided by asking the runner and the
+    row, never by matching a provider name (AP-21).
+    """
+    try:
+        from dodaios.agent_chat.catalog import provider_row
+        from dodaios.agent_chat.service import resolve_runner
+    except Exception:  # noqa: BLE001 — without the catalog every seat counts as billed
+        return True
+    row = provider_row(provider)
+    if row is not None and bool(getattr(row, "keyless", False)):
+        return False
+    return resolve_runner(provider, surface=SURFACE, account_id=account_id) in (
+        "brain", "api", "unknown",
+    )
+
+
+async def _subscription_seat(cfg: Any) -> tuple[str, str, str] | None:
+    """The Jarvis chat's current subscription seat, if it has one.
+
+    Mirrors what a typed turn on the front page resolves to
+    (``AgentChatService.send``): the global worker pick mapped through the
+    subscription aliases. ``None`` when the front page itself runs on an API
+    key or is unconfigured.
+    """
+    try:
+        from dodaios.core.model_selection import worker_selection
+        from dodaios.core.task_agent import subscription_seat_off_loop
+    except Exception:  # noqa: BLE001 — no selection layer: no subscription seat
+        return None
+    try:
+        selection = worker_selection(cfg)
+    except Exception:  # noqa: BLE001 — unreadable config reads as no seat
+        return None
+    if selection is None or not selection.provider:
+        return None
+    mapped = await subscription_seat_off_loop(selection.provider)
+    if mapped is not None:
+        return mapped[0], selection.model or "", selection.reasoning_effort or ""
+    if not _billed_via_api(selection.provider):
+        return selection.provider, selection.model or "", selection.reasoning_effort or ""
+    return None
+
+
+async def conversation_seat(runtime: Any) -> dict[str, str]:
+    """The seat of the lead's own conversation, when it bills no API key; else ``{}``.
+
+    An install without a global model pick (``brain.worker``) has no
+    subscription seat to read from the config, yet the person talks to the
+    assistant every day on a signed-in subscription. That conversation's seat
+    is the one an owner without its own provider answers on.
+    """
+    try:
+        from dodaios.agent_chat.lead import lead_session
+        from dodaios.core.task_agent import subscription_seat_off_loop
+
+        service = runtime.chat_service()
+        session = lead_session(service, create=False) if service is not None else None
+        provider = str(getattr(session, "provider", "") or "")
+        if not provider:
+            return {}
+        account_id = str(getattr(session, "account_id", "") or "")
+        mapped = await subscription_seat_off_loop(provider)
+        if mapped is None and _billed_via_api(provider, account_id):
+            return {}
+        seat = {
+            "provider": mapped[0] if mapped is not None else provider,
+            "model": str(getattr(session, "model", "") or ""),
+            "effort": str(getattr(session, "effort", "") or ""),
+        }
+        if account_id:
+            seat["account_id"] = account_id
+        return seat
+    except Exception:  # noqa: BLE001 — no readable conversation: no seat from it
+        log.debug("routine seat: lead conversation seat unreadable", exc_info=True)
+        return {}
+
+
+async def _seat_for_run(runtime: Any, agent: Any, task_id: str) -> tuple[str, str, str, str]:
+    """The ``(provider, model, effort, account_id)`` this run answers on.
+
+    A pinned routine seat wins (the model the owner ran on when the routine
+    was created, or what the person later picked for it — an explicit choice,
+    billed as chosen). Unpinned legacy rows follow the owner's live seat, but
+    never slide silently onto an API-key chain: an owner without an explicit
+    provider takes the Jarvis chat's subscription seat, and when there is no
+    usable subscription seat the run fails honestly instead of billing a key.
+    Without a global model pick that subscription seat is the one the lead's
+    own conversation answers on (:func:`conversation_seat`).
+    """
+    cfg = runtime.config()
+    pinned = {"provider": "", "model": "", "effort": "", "account_id": ""}
+    try:
+        task_store, _ = runtime.task_services()
+        if task_store is not None:
+            spec = await task_store.get_spec(task_id)
+            if spec is not None:
+                pinned = routine_seat(spec)
+    except Exception:  # noqa: BLE001 — an unreadable spec falls back to the live seat
+        pinned = {"provider": "", "model": "", "effort": "", "account_id": ""}
+    if pinned["provider"]:
+        return pinned["provider"], pinned["model"], pinned["effort"], pinned["account_id"]
+    account_id = str(getattr(agent, "account_id", "") or "")
+    if getattr(agent, "provider", ""):
+        _provider, _model, _effort = pair_for(cfg, agent)
+        return _provider, _model, _effort, account_id
+    subscription = await _subscription_seat(cfg)
+    if subscription is not None:
+        provider, model, effort = subscription
+        return provider, model, effort, account_id
+    conversation = await conversation_seat(runtime)
+    if conversation.get("provider"):
+        return (
+            conversation["provider"],
+            conversation.get("model", ""),
+            conversation.get("effort", ""),
+            conversation.get("account_id") or account_id,
+        )
+    try:
+        provider, model, effort = pair_for(cfg, agent)
+    except PermissionError as exc:
+        raise RuntimeError(
+            "The routine has no model seat: the owner names no provider and no "
+            f"subscription seat is available ({exc}). Pick a model for the agent "
+            "or for this routine."
+        ) from exc
+    if _billed_via_api(provider):
+        raise RuntimeError(
+            "The routine stays on its owner's model and was not rerouted: the owner "
+            "names no provider and the only fallback would bill an API key. Pick a "
+            "subscription model for the agent or for this routine."
+        )
+    return provider, model, effort, account_id
+
+
+async def _hold_unattended_run_off_keys(
+    provider: str, account_id: str, tags: tuple[str, ...] = ()
+) -> None:
+    """Apply the background billing rule to a run nobody started by hand.
+
+    Once a subscription is connected (``brain.background_policy``), unattended
+    work never bills a per-token API key: a scheduled, triggered or webhook run
+    whose seat answers through a key is skipped with a readable reason
+    (:class:`~dodaios.brain.background_policy.BackgroundDeferred`; the task
+    runner records it and a recurring routine fires again at its next
+    occurrence). The seat is not swapped for another one: the routine stays
+    on its model. A "Run now" click is the person's own start and runs on the
+    seat as chosen; so is a check-in the person asked for in so many words
+    (``lead-checkin`` tag), which they requested for exactly this moment, and
+    the comments they sent on a node (``node-comments:<id>``, sent with a
+    click); an install that never connected a subscription keeps billing the
+    seat it picked, so a single-key download still works.
+    """
+    from dodaios.agent_chat.checkins import CHECKIN_TAG
+    from dodaios.core.protocols import current_started_by_user
+    from dodaios.nodes.comments import is_comments_tag
+
+    if (
+        current_started_by_user.get()
+        or CHECKIN_TAG in tags
+        or any(is_comments_tag(tag) for tag in tags)
+        or not _billed_via_api(provider, account_id)
+    ):
+        return
+    from dodaios.brain.background_policy import BackgroundDeferred, subscription_mode
+
+    if not await asyncio.to_thread(subscription_mode, (provider,)):
+        return
+    log.info("routine: skipping an unattended run on the per-token seat %s", provider)
+    raise BackgroundDeferred(
+        f"A subscription is connected, so this scheduled run did not bill the routine's "
+        f"API-key seat ({provider}). Pick a subscription or local model for the routine, "
+        "or start it with Run now.",
+        code="api_key_seat",
+        provider=provider,
+    )
+
+
+class SeatCooling(CapacityDeferred):
+    """The run's seat is in a usage-limit cooldown or needs a login; it waits."""
+
+
+async def _gate_on_seat_health(
+    provider: str, model: str, account_id: str, *, autonomous: bool
+) -> None:
+    """Fail fast on a seat that cannot run; make unattended work WAIT, not burn attempts.
+
+    A seat real calls found limited or signed out (see ``brain.seat_health``)
+    defers an unattended run with the reset time in its reason: a recurring
+    routine fires again at its next occurrence, an autonomous one pauses and
+    resumes. A person's own start ("Run now") fails at once with the readable
+    cause instead of a doomed turn. The seat is never swapped.
+    """
+    from dodaios.core.protocols import current_started_by_user
+
+    from .seat_preflight import preflight_seat
+
+    problem = await preflight_seat(provider, model, account_id)
+    if problem is None:
+        return
+    unattended = not current_started_by_user.get()
+    waits = problem.cls in ("quota", "rate_limit", "auth")
+    if unattended and waits:
+        log.info("routine: waiting on seat %s (%s)", provider, problem.cls)
+        if autonomous:
+            raise RoutineDeferred(f"Background work is waiting: {problem.text}")
+        raise SeatCooling(
+            f"This scheduled run waited: {problem.text}",
+            code="seat_cooldown",
+            provider=provider,
+        )
+    raise RuntimeError(problem.text)
+
+
+def _run_runtime(agent: Any, provider: str) -> str:
+    """Which runtime a routine run uses.
+
+    The run keeps its owner's Hermes / OpenClaw runtime on the owner's own
+    model — the seat the person chose for that agent. A run pinned to another
+    seat keeps the runtime only when that seat is an API key or local server:
+    a subscription seat (Claude Code's dual row included) runs on Jarvis' own
+    runtime, so a scheduled run never quietly moves onto an API key.
+    """
+    runtime = str(getattr(agent, "runtime", "") or "jarvis")
+    if runtime == "jarvis":
+        return ""
+    from dodaios.agent_chat.service import resolve_runner
+    from dodaios.agent_runtimes.model_map import supports
+
+    if not supports(provider):
+        return ""
+    if provider == str(getattr(agent, "provider", "") or ""):
+        return runtime
+    return "" if resolve_runner(provider, surface=SURFACE).endswith("-cli") else runtime
+
+
+def _left_runtime(agent: Any, run_runtime: str) -> str:
+    """The owner's Hermes / OpenClaw runtime this run does NOT use, or ""."""
+    owner = str(getattr(agent, "runtime", "") or "jarvis")
+    return owner if owner != "jarvis" and not run_runtime else ""
+
+
+async def _routine_title(task_store: Any, task_id: str) -> str:
+    """The routine's name without its ``[agent:<name>]`` prefix, or ""."""
+    if task_store is None:
+        return ""
+    try:
+        row = await task_store.get(task_id)
+    except Exception:  # noqa: BLE001 — the run goes on without a name
+        return ""
+    raw = str((row or {}).get("title") or "").strip()
+    if raw.startswith("[agent:") and "]" in raw:
+        raw = raw.split("]", 1)[1].strip()
+    return raw
+
+
+async def run_owned_routine(
+    runtime: Any,
+    task_id: str,
+    tags: tuple[str, ...],
+    prompt: str,
+    cancel_token: Any = None,
+) -> str | None:
+    agent = await guard_owned_routine(runtime, tags)
+    if agent is None:
+        return None
+    service = runtime.chat_service()
+    if service is None:
+        raise RuntimeError("The canonical chat service is unavailable")
+    from dodaios.agent_chat.effort import default_effort
+    from dodaios.agent_chat.proactive_checks import NOTHING, precheck_skip
+
+    skipped = await precheck_skip(runtime, service, tags)
+    if skipped:
+        # Nothing a model could find: no seat, no chat, no tokens.
+        log.info("society: routine %s needs no model call (%s)", task_id, skipped)
+        return NOTHING
+    cfg = runtime.config()
+    from dodaios.rituals import prepare as rituals
+    from dodaios.standing_tasks import service as standing
+
+    try:
+        provider, model, effort, account_id = await _seat_for_run(runtime, agent, task_id)
+        autonomous = "autonomous" in tags
+        if autonomous and _billed_via_api(provider, account_id):
+            raise RoutineDeferred(
+                "Background work is waiting for a subscription or local model on its owner's seat"
+            )
+        await _hold_unattended_run_off_keys(provider, account_id, tags)
+        await _gate_on_seat_health(provider, model, account_id, autonomous=autonomous)
+        # A standing task's level decides its chat's mode ("" for any other routine).
+        standing_mode = await standing.permission_mode(
+            tags, provider=provider, account_id=account_id
+        )
+        # A ritual gathers ahead with a run that may only look ("" for any other routine).
+        ritual_mode = await rituals.permission_mode(
+            tags, provider=provider, account_id=account_id
+        )
+    except Exception as exc:
+        # A standing task's run log says why a run never started (held back or broken).
+        await standing.run_not_started(tags, exc)
+        await rituals.run_not_started(tags, exc)
+        raise
+    # Results nobody opens for days: pause instead of producing another one.
+    from .routine_parking import maybe_park
+
+    await maybe_park(runtime, agent, task_id)
+    permission_mode = standing_mode or ritual_mode or "bypass"
+    if autonomous:
+        from .autonomous_routines import ORIGIN_PERMISSION_TAG, ORIGIN_SESSION_TAG
+
+        origin_id = next((t[len(ORIGIN_SESSION_TAG):] for t in tags
+                          if t.startswith(ORIGIN_SESSION_TAG)), "")
+        origin = service.store.get_session(origin_id)
+        saved_mode = next((t[len(ORIGIN_PERMISSION_TAG):] for t in tags
+                           if t.startswith(ORIGIN_PERMISSION_TAG)), "ask")
+        if origin is None or origin.permission_mode in {"plan", "read-only"}:
+            raise RoutineDeferred("Background work is waiting for its originating chat permissions")
+        # Society chats share ask / accept-edits / bypass. Unknown modes are
+        # conservative; later permission expansion never widens the saved grant.
+        order = {"ask": 0, "accept-edits": 1, "bypass": 2}
+        permission_mode = min((saved_mode, origin.permission_mode), key=lambda m: order.get(m, -1))
+    run_runtime = _run_runtime(agent, provider)
+    session = service.store.create_session(
+        session_id=f"{agent.session_id}{ROUTINE_SESSION_MARKER}{task_id}:{uuid4().hex}",
+        surface=SURFACE,
+        provider=provider,
+        model=model,
+        effort=effort or default_effort(provider),
+        account_id=account_id,
+        cwd=_workspace(cfg, agent),
+        permission_mode=permission_mode,
+        title=f"{agent.name} · Routine {task_id}",
+        runtime=run_runtime,
+    )
+    # Persist the link before starting work, including runs that fail or are cancelled.
+    task_store, _ = runtime.task_services()
+    if task_store is not None:
+        await task_store.append_step(
+            task_id, "log", {"event": "routine_chat", "session_id": session.session_id}
+        )
+    left = _left_runtime(agent, run_runtime)
+    if left:
+        # A run pinned to a seat its owner's runtime cannot drive runs on
+        # Jarvis' own loop; the run log and its chat say so instead of silently.
+        note = (
+            f"This run uses Dodaios' own runtime, not {left}: its model "
+            f"({provider}) is a seat {left} cannot drive."
+        )
+        if task_store is not None:
+            await task_store.append_step(
+                task_id,
+                "log",
+                {"event": "routine_runtime_fallback", "runtime": left, "provider": provider,
+                 "text": note},
+            )
+        try:
+            await service.post_notice(
+                session.session_id,
+                {"kind": "routine_runtime_fallback", "runtime": left, "text": note},
+            )
+        except Exception:  # noqa: BLE001 — the run log above already holds the note
+            log.warning("society: runtime note not posted for %s", task_id, exc_info=True)
+    # Legacy tasks contain an identity snapshot. The live briefing owns identity now.
+    _, separator, original = prompt.partition("\nRoutine:\n")
+    task = original if separator else prompt
+    # The run keeps its own seat and chat; the agent's one chat shows a card
+    # that opens it (MASTERPLAN §2.10), and the run's answer comes back there
+    # as a message of its own when it finishes (``_report_result``).
+    title = next((line.strip() for line in task.splitlines() if line.strip()), task_id)
+    routine_title = await _routine_title(task_store, task_id)
+    from dodaios.agent_chat.proactive_checks import quiet_routine, run_context
+
+    # A quiet lead routine (the "needs you" check, a check-in, a living page's
+    # refresh) shows no start card: the person hears from it only when it has
+    # something to say, or sees the update where it lands.
+    if not quiet_routine(tags):
+        try:
+            await runtime.post_chat_notice(
+                agent,
+                {
+                    "kind": "routine_run",
+                    "task_id": task_id,
+                    "session_id": session.session_id,
+                    "agent_id": agent.agent_id,
+                    "agent_name": display_name(agent),
+                    "text": title[:200],
+                    # The routine's own name: the run's opening line in its chat.
+                    "title": routine_title[:200],
+                },
+            )
+        except Exception:  # noqa: BLE001 — the card is a projection; the run itself goes on
+            log.warning("society: routine card not posted for %s", agent.agent_id, exc_info=True)
+    task = (
+        f"Scheduled routine {task_id}. Follow your CURRENT standing instructions.\n"
+        "This execution has its own background chat and must honor its permission limits.\n"
+        "Use your memory and conversation archive for prior results. For information watches, "
+        "check sources and dates, remember last-seen items, "
+        "and report only meaningful new findings.\n\n" + task
+    )
+    # Adaptive lead routines see their previous result; the check sees the open loops.
+    extra = await run_context(task_store, task_id, tags)
+    if extra:
+        task = f"{task}\n\n{extra}"
+    queue = service.subscribe(session.session_id)
+    answer = ""
+    read_failures = 0
+    failure = ""
+    try:
+        # Everything this turn does runs without the owner: its tool calls are
+        # judged by reversibility and honour the owner's stop holds.
+        origin = "trigger" if "lead-trigger" in tags else "routine"
+        with autonomy_origin(origin, task_id=task_id, agent_id=agent.agent_id):
+            turn_id = await service.send(
+                session.session_id, task, direct_user=False, routine_run=True
+            )
+        while True:
+            if cancel_token is not None and cancel_token.is_cancelled():
+                raise asyncio.CancelledError
+            if standing_mode:
+                # Nobody watches this chat: a card is refused with the reason, never left open.
+                standing.refuse_open_cards(service, session.session_id, tags)
+            elif ritual_mode:
+                # A ritual's gathering only looks: reads pass, anything else is refused.
+                rituals.answer_open_cards(service, session.session_id)
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=0.25)
+            except TimeoutError:
+                # A subscriber queue is a projection; the durable terminal
+                # remains authoritative after a dropped notification.
+                reader = getattr(service.store, "turn_terminal", None)
+                if reader is None:
+                    continue
+                try:
+                    event = reader(session.session_id, turn_id)
+                    if event is None:
+                        read_failures = 0
+                        continue
+                    texts = [
+                        str(e["payload"].get("text") or "")
+                        for e in service.store.list_events(session.session_id)
+                        if e["kind"] == "assistant_text"
+                        and e["payload"].get("turn_id") == turn_id
+                    ]
+                    answer = "\n\n".join(texts) or answer
+                    read_failures = 0
+                except Exception:
+                    log.warning("routine: durable completion read failed", exc_info=True)
+                    read_failures += 1
+                    if read_failures < 3:
+                        continue
+                    await service.cancel(session.session_id)
+                    raise RuntimeError("The routine completion store is unavailable") from None
+            payload = event.get("payload") or {}
+            if payload.get("turn_id") not in (None, turn_id):
+                continue
+            if event.get("kind") == "assistant_text":
+                answer = str(payload.get("text") or answer)
+            if event.get("kind") == "turn_finished":
+                await _record_run_summary(
+                    task_store, task_id, session.session_id, turn_id, payload,
+                    provider=provider, model=model, account_id=account_id,
+                )
+                if payload.get("status") == "cancelled":
+                    raise asyncio.CancelledError
+                if payload.get("status") not in {"done", "ok", "completed"}:
+                    raise RuntimeError(str(payload.get("error") or "The routine failed"))
+                if autonomous:
+                    await _report_autonomous_result(
+                        runtime, agent, tags, task_id, answer,
+                        session_id=session.session_id, title=routine_title,
+                    )
+                else:
+                    await _report_result(
+                        runtime, agent, tags, task_id, answer,
+                        session_id=session.session_id, title=routine_title,
+                    )
+                return answer
+    except asyncio.CancelledError:
+        failure = standing.CANCELLED
+        await service.cancel(session.session_id)
+        raise
+    except Exception as exc:
+        failure = str(exc) or type(exc).__name__
+        # A started execution must not silently move to another agent/context.
+        raise RuntimeError(f"The routine chat failed: {exc}") from exc
+    finally:
+        service.unsubscribe(session.session_id, queue)
+        # A standing task keeps its own run log, pace and notes; a no-op for other routines.
+        await standing.after_run(
+            tags, answer=answer, session_id=session.session_id, error=failure
+        )
+        # A ritual keeps what was gathered back until it is started; a no-op otherwise.
+        await rituals.after_run(
+            tags, answer=answer, session_id=session.session_id, error=failure
+        )
+
+
+async def _record_run_summary(
+    task_store: Any,
+    task_id: str,
+    session_id: str,
+    turn_id: str,
+    finished: dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+    account_id: str,
+) -> None:
+    """One ``routine_summary`` step per run: seat, duration and cost of its turn.
+
+    The run history reads it instead of opening every run's chat. Written
+    once, best effort: a failed write leaves the history to the chat fallback.
+    """
+    if task_store is None:
+        return
+    cost = finished.get("cost_usd")
+    try:
+        await task_store.append_step(
+            task_id,
+            "log",
+            {
+                "event": "routine_summary",
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "status": str(finished.get("status") or ""),
+                "duration_ms": int(finished.get("duration_ms") or 0),
+                "cost_usd": float(cost) if isinstance(cost, int | float) else None,
+                "provider": provider,
+                "model": model,
+                "billed_via_key": _billed_via_api(provider, account_id),
+            },
+        )
+    except Exception:  # noqa: BLE001 — the summary is a projection of the run's own chat
+        log.warning("routine: run summary not recorded for %s", task_id, exc_info=True)
+
+
+#: A trigger's preparation job (``lead_triggers/wiring.py::_agent_json``): its
+#: JSON answer is read back by the code that started it, never shown.
+_PREPARE_TAG = "lead-prepare"
+
+
+def _posts_result(tags: tuple[str, ...]) -> bool:
+    """Whether the runner posts a finished run's answer into its owner's chat.
+
+    Not for a standing task: its own ``after_run`` posts the answer, labelled
+    with the task. Not for a ritual's preparation: what it gathered is kept
+    back until the person starts the ritual (``rituals.prepare.after_run``).
+    Not for a routine whose update lands elsewhere: a living
+    page's refresh and a kept-current node's show it on the page, a team
+    check-in's work shows in the team's reports (its "nothing is needed"
+    every interval would only be noise), and a trigger's preparation hands
+    its answer back to the code that asked for it. Every other routine posts,
+    a scheduled skill (``skill-cron:``) and a quiet lead routine included:
+    quiet only means no start card. Comments worked into a node post too:
+    their run answers the "nothing to report" sentinel when every comment is
+    in, and one sentence only when a comment could not be carried out.
+    """
+    from dodaios.artifacts.living_refresh import TAG_PREFIX as PAGE_PREFIX
+    from dodaios.nodes.refresh import TAG_PREFIX as NODE_PREFIX
+    from dodaios.rituals.prepare import ritual_id_of
+    from dodaios.standing_tasks.service import standing_id_of
+
+    from .team_lead import CHECKIN_TAG
+
+    if standing_id_of(tags) or ritual_id_of(tags):
+        return False
+    elsewhere = (PAGE_PREFIX, NODE_PREFIX, CHECKIN_TAG)
+    return not any(
+        str(tag) == _PREPARE_TAG or str(tag).startswith(elsewhere) for tag in tags
+    )
+
+
+async def _report_result(
+    runtime: Any,
+    agent: Any,
+    tags: tuple[str, ...],
+    task_id: str,
+    answer: str,
+    *,
+    session_id: str,
+    title: str,
+) -> None:
+    """Post a finished run's answer into its owner's chat as a message of its own.
+
+    For the lead that is the person's one conversation (``runtime._notify_chat``).
+    An empty answer or the "nothing to report" sentinel posts nothing, for any
+    owner. A failed delivery is logged and never changes how the run ends.
+    """
+    try:
+        if not _posts_result(tags):
+            return
+        from dodaios.agent_chat.proactive_checks import quiet_result
+
+        payload = {
+            "kind": "society_result",
+            "status": "done",
+            "source": "routine",
+            "text": str(answer or "")[:4000],
+            "agent_id": agent.agent_id,
+            "agent_name": display_name(agent),
+            "task_id": task_id,
+            # The run's own chat, which the message opens.
+            "session_id": session_id,
+            # The routine's own name, as on the run's start card.
+            "title": title[:200],
+        }
+        if quiet_result(payload):
+            log.info("society: routine %s had nothing to report", task_id)
+            return
+        await runtime.post_chat_notice(agent, payload)
+    except Exception:  # noqa: BLE001 — the task runner keeps the answer; delivery is a projection
+        log.warning("routine: result not posted for %s", task_id, exc_info=True)
+
+
+async def _report_autonomous_result(
+    runtime: Any,
+    agent: Any,
+    tags: tuple[str, ...],
+    task_id: str,
+    answer: str,
+    *,
+    session_id: str = "",
+    title: str = "",
+) -> None:
+    """Deliver the result to the originating chat without another model turn."""
+    from .autonomous_routines import ORIGIN_SESSION_TAG
+    from .surface import agent_id_of
+
+    origin = next((tag[len(ORIGIN_SESSION_TAG):] for tag in tags
+                   if tag.startswith(ORIGIN_SESSION_TAG)), agent.session_id)
+    payload = {
+        "kind": "society_result", "status": "done", "text": answer,
+        "agent_id": agent.agent_id, "agent_name": display_name(agent),
+        "source": "routine", "task_id": task_id,
+        "session_id": session_id, "title": title[:200],
+    }
+    try:
+        service = runtime.chat_service()
+        if agent_id_of(origin) == agent.agent_id and service.store.get_session(origin):
+            await service.post_notice(origin, payload)
+        else:
+            await runtime.post_chat_notice(agent, payload)
+    except Exception:
+        # The task runner persists the answer independently of this projection.
+        log.warning("routine: result delivery failed for %s", task_id, exc_info=True)

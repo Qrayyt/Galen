@@ -1,0 +1,1153 @@
+// Thin client for the agent-chat REST + WebSocket API
+// (dodaios/ui/web/agent_chat_routes.py). Shapes mirror dodaios/agent_chat/*
+// one-to-one; nothing here decides behaviour.
+import { createHistoryRequests } from "@/lib/historyRequests";
+
+/** One speed tier of a coding CLI's model ("" is always the standard speed). */
+export interface ModelSpeed {
+  id: string;
+  label: string;
+  note?: string;
+}
+
+export interface CuratedModel {
+  id: string;
+  label: string;
+  /**
+   * The effort levels this model takes when narrower than the provider's
+   * ladder (agy's Pro: low/high; its Claude models: none). Absent = the
+   * provider ladder applies; [] = no effort pick for this model.
+   */
+  efforts?: string[];
+  /** A short note for the picker's hint ("retires 2026-08-31"). */
+  note?: string;
+  /**
+   * The speed tiers this model offers on the signed-in account (Claude
+   * Code's fast mode, Codex's Fast / Ultrafast). Absent = no speed pick.
+   */
+  speeds?: ModelSpeed[];
+  /** Catalog capabilities; absent/null means unknown, not unsupported. */
+  tools?: boolean | null;
+  vision?: boolean | null;
+}
+
+export interface PermissionModeOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface AgentChatProvider {
+  id: string;
+  label: string;
+  /** Brand family for ProviderLogo. */
+  family: string;
+  /**
+   * Which runner answers on this machine: "api" / "brain", or a vendor CLI —
+   * "claude-cli" | "codex-cli" | "agy-cli" | "grok-cli" | "opencode-cli" |
+   * "kimi-cli" | "glm-cli" | "dsh-cli" | "cursor-cli"
+   * (dodaios/agent_chat/runner_cli.py).
+   */
+  runner: string;
+  models_source: "live" | "curated";
+  curated_models: CuratedModel[];
+  /** "" = the runner's own default. */
+  default_model: string;
+  keyless: boolean;
+  /** Credential presence for an API seat without an Agents status row. */
+  api_key_set?: boolean;
+  native_resume: boolean;
+  /** Ascending ladder; "" means "provider default". */
+  effort_levels: string[];
+  default_effort: string;
+  /** The ladder this provider's runner offers; a "plan" entry powers the Build | Plan switch. */
+  permission_modes: PermissionModeOption[];
+  default_permission_mode: string;
+  /** null for the API runner; else whether the vendor binary is on PATH. */
+  cli_installed: boolean | null;
+  /**
+   * The Agentic IDE's registry key for the CLI this row runs ("claude",
+   * "opencode", "glm", …) — "" on an API row, absent on an older backend.
+   * The mark the row wears is that entry's (`AgentMark`), so the chat's
+   * picker and the IDE's pane picker draw one CLI the same way.
+   */
+  agent?: string;
+  /**
+   * The characters that open the composer's typeahead on this seat — a
+   * subset of "/", "@", "$" decided by the runner (dodaios/agent_chat/typeahead.py).
+   * Absent on an older backend: then nothing opens.
+   */
+  typeahead?: string[];
+  /**
+   * The agents' surface only (`surface=society`): whether the API Keys page
+   * has this provider on for the agents. Absent elsewhere and on an older
+   * backend: on.
+   */
+  enabled?: boolean;
+  /**
+   * The models the API Keys page hid for this provider, on every surface;
+   * every model picker leaves them out (`offeredModels`). Absent on an older
+   * backend: nothing hidden.
+   */
+  hidden_models?: string[];
+}
+
+export interface AgentChatCatalog {
+  providers: AgentChatProvider[];
+  default_cwd: string;
+  shell: string;
+  selection?: ChatSelection | null;
+}
+
+export interface ChatSelection {
+  provider: string;
+  model: string;
+  effort: string;
+  account_id?: string;
+}
+
+export async function saveChatSelection(selection: ChatSelection): Promise<ChatSelection> {
+  return json(await fetch("/api/agent-chat/selection", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(selection),
+  }), "selection-save-failed");
+}
+
+/** The Jarvis chat voice calls continue (`/api/agent-chat/voice-chat`). */
+export interface VoiceChatBinding {
+  /** Null while a blank page is open or nothing was bound yet. */
+  session_id: string | null;
+  /** A blank page is open: the next call opens a new chat. */
+  fresh: boolean;
+  /** An archived voice chat calls are recorded into; absent on an older backend. */
+  voice_session_id?: string | null;
+}
+
+/**
+ * Make `sessionId` the chat voice calls continue — its turns are filed into
+ * it and a call starts with its history. `null` = a blank page: the next
+ * call opens a new chat. `voiceSessionId` (with `sessionId` null) puts an
+ * archived voice chat on stage instead: calls are recorded into it.
+ */
+export async function bindVoiceChat(
+  sessionId: string | null,
+  voiceSessionId: string | null = null,
+): Promise<VoiceChatBinding> {
+  return json(await fetch("/api/agent-chat/voice-chat", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, voice_session_id: voiceSessionId }),
+  }), "voice-chat-bind-failed");
+}
+
+export async function fetchVoiceChat(): Promise<VoiceChatBinding> {
+  return json(await fetch("/api/agent-chat/voice-chat", { cache: "no-store" }), "voice-chat-failed");
+}
+
+/**
+ * Where a session lives: the front page's typed chat (`jarvis` — the same
+ * assistant as the microphone, on a keyboard) or a coding session listed by
+ * the Agentic IDE (`agent`). Each surface asks the backend for its own list
+ * and catalog, so they never mix in a sidebar. Mirrors `SURFACES` in
+ * `dodaios/agent_chat/store.py` (a parity test reads this union).
+ */
+/**
+ * Where a person is typing. Each surface is its own session list, socket
+ * and draft, and the backend keeps one turn recipe per name
+ * (``dodaios/agent_chat/surface_kits.py``): the front page, the coding
+ * agents, and the Local models section's setup assistant.
+ */
+export type AgentChatSurface = "jarvis" | "agent" | "local-models" | "society" | "side";
+
+export interface AgentChatSession {
+  session_id: string;
+  title: string;
+  provider: string;
+  model: string;
+  effort: string;
+  cwd: string;
+  permission_mode: string;
+  /**
+   * While the session is in Plan: the mode its permission pill names, which an
+   * approved plan goes on in. Empty or absent = the provider's default mode.
+   */
+  build_mode?: string;
+  /** The coding CLI's speed tier; empty or absent = standard. */
+  speed?: string;
+  /** Absent on a backend older than the surface split; the store keeps such rows. */
+  surface?: AgentChatSurface;
+  account_id?: string;
+  /** A coding thread's placement: the computer its turns run on; empty = this one. */
+  computer_id?: string;
+  vendor_session: string | null;
+  created_ms: number;
+  updated_ms: number;
+  /**
+   * When a message last reached the thread (the person's or another agent's);
+   * the creation time before the first. Absent on an older backend.
+   */
+  last_message_ms?: number;
+  message_count: number;
+  preview: string;
+  running?: boolean;
+  pending_approvals?: string[];
+  /** Open question cards the coding agent waits on an answer for. Absent on an older backend. */
+  pending_questions?: string[];
+  /**
+   * The name the coding CLI gave this conversation itself (Claude Code's
+   * session title, Codex's thread name) — set on the IDE's own sessions while
+   * the stored title is still the first message's; absent otherwise.
+   */
+  cli_title?: string;
+  /**
+   * The thread's code: what the person gives Dodaios to name this coding
+   * agent ("look at #3f9a2c"). Set on the IDE's own sessions.
+   */
+  code?: string;
+  /** The team thread this session is a member of ("" or absent: an ordinary thread). */
+  team_id?: string;
+  /**
+   * The agent that opened the thread ("jarvis" = Dodaios itself, else a
+   * society agent's id); empty or absent = the person started it.
+   */
+  started_by?: string;
+}
+
+export const INTERNAL_DELIVERY_STATUSES = ["queued", "delivered", "failed"] as const;
+export interface InternalMessage {
+  message_id: string;
+  sender_id: string;
+  sender_name: string;
+  sender_kind: "jarvis" | "agent" | "user";
+  text: string;
+  prompt: string;
+  trace_id: string;
+  status: (typeof INTERNAL_DELIVERY_STATUSES)[number];
+  turn_id: string;
+  error: string;
+}
+
+export interface AgentChatEvent {
+  seq: number;
+  ts_ms: number;
+  kind: string;
+  payload: Record<string, unknown>;
+}
+
+/** One row of `GET /api/jarvis-agent/status` — the Agents tab's truth about credentials. */
+/**
+ * Runners that call a provider's own HTTP endpoint: the coding-agent tool
+ * loop (`api`) and Jarvis' own harness (`brain`). Both need an API key for
+ * that provider; the vendor CLIs are the other case, where a subscription
+ * login is the credential and no key exists at all.
+ */
+export function isApiRunner(runner: string): boolean {
+  return runner === "api" || runner === "brain";
+}
+
+/**
+ * One provider row's LIVE state, from `GET /api/agent-chat/provider-health`.
+ * `status` mirrors dodaios/brain/section_health.py — the same vocabulary the
+ * API-Keys tab dots use, so the two screens cannot disagree.
+ */
+export type ProviderHealthStatus = "ok" | "needs_setup" | "error" | "unknown";
+
+export interface ProviderHealth {
+  provider: string;
+  status: ProviderHealthStatus;
+  /** "bad_key" | "no_credits" | "timeout" | … — turned into a sentence by the UI. */
+  reason: string;
+  /** The provider's own words, for the tooltip. */
+  detail: string;
+}
+
+export interface AgentConnectionRow {
+  jarvis: string;
+  label?: string;
+  key_set: boolean;
+  api_key_set?: boolean;
+  oauth_connected?: boolean;
+  is_active_brain: boolean;
+  keyless?: boolean;
+}
+
+export class AgentChatApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string = "",
+  ) {
+    super(message);
+    this.name = "AgentChatApiError";
+  }
+}
+
+export async function json<T>(res: Response, what: string): Promise<T> {
+  if (!res.ok) {
+    let detail = what;
+    let code = "";
+    try {
+      const body = (await res.json()) as { detail?: unknown };
+      if (typeof body.detail === "string") detail = body.detail;
+      else if (body.detail && typeof body.detail === "object") {
+        const structured = body.detail as { code?: unknown; message?: unknown };
+        if (typeof structured.code === "string") code = structured.code;
+        if (typeof structured.message === "string") detail = structured.message;
+      }
+    } catch {
+      /* no JSON body — keep the generic label */
+    }
+    throw new AgentChatApiError(detail, res.status, code);
+  }
+  return (await res.json()) as T;
+}
+
+// A chat and its picker mount together. Share their in-flight reads without
+// caching completed requests: explicit refreshes must still reach the server.
+const catalogRequests = new Map<string, Promise<AgentChatCatalog>>();
+
+export function fetchAgentChatCatalog(
+  surface?: AgentChatSurface,
+  scope: { accountId?: string; sessionId?: string; cwd?: string } = {},
+): Promise<AgentChatCatalog> {
+  const params = new URLSearchParams();
+  if (surface) params.set("surface", surface);
+  if (scope.accountId) params.set("account_id", scope.accountId);
+  if (scope.sessionId) params.set("session_id", scope.sessionId);
+  if (scope.cwd) params.set("cwd", scope.cwd);
+  const query = params.size ? `?${params}` : "";
+  const pending = catalogRequests.get(query);
+  if (pending) return pending;
+  const request = fetch(`/api/agent-chat/catalog${query}`)
+    .then((response) => json<AgentChatCatalog>(response, "catalog-failed"))
+    .finally(() => catalogRequests.delete(query));
+  catalogRequests.set(query, request);
+  return request;
+}
+
+export interface TypeaheadRow {
+  value: string;
+  label: string;
+  hint: string;
+  kind: string;
+  group: string;
+  argument_hint?: string;
+  aliases?: string[];
+}
+
+/**
+ * What the composer lists after a trigger character on one seat: the commands
+ * the seat's CLI reports, or what its runner reads from disk
+ * (`GET /api/agent-chat/typeahead`).
+ */
+export async function fetchTypeahead(
+  input: {
+    surface: AgentChatSurface;
+    provider: string;
+    cwd: string;
+    trigger: string;
+    q: string;
+    limit?: number;
+  },
+  signal?: AbortSignal,
+): Promise<{ trigger: string; items: TypeaheadRow[]; truncated: boolean }> {
+  const params = new URLSearchParams({
+    surface: input.surface,
+    provider: input.provider,
+    trigger: input.trigger,
+    q: input.q,
+    limit: String(input.limit ?? 40),
+  });
+  if (input.cwd) params.set("cwd", input.cwd);
+  return json(
+    await fetch(`/api/agent-chat/typeahead?${params.toString()}`, { signal }),
+    "typeahead-failed",
+  );
+}
+
+/**
+ * Which seats actually answer, from the outcome of each seat's last real call
+ * (the backend never probes a provider for this). It still reads CLI logins,
+ * so callers fire it beside the catalog and never await it before painting.
+ * The backend reuses a sweep until a new outcome is recorded.
+ */
+export async function fetchProviderHealth(
+  surface: AgentChatSurface,
+  refresh = false,
+): Promise<ProviderHealth[]> {
+  const q = `surface=${encodeURIComponent(surface)}${refresh ? "&refresh=true" : ""}`;
+  const data = await json<{ providers?: ProviderHealth[] }>(
+    await fetch(`/api/agent-chat/provider-health?${q}`),
+    "provider-health-failed",
+  );
+  return Array.isArray(data.providers) ? data.providers : [];
+}
+
+let connectionRequest: Promise<AgentConnectionRow[]> | null = null;
+
+export function fetchAgentConnections(): Promise<AgentConnectionRow[]> {
+  if (connectionRequest) return connectionRequest;
+  connectionRequest = fetch("/api/jarvis-agent/status")
+    .then((response) => json<{ mapping?: AgentConnectionRow[] }>(response, "status-failed"))
+    .then((data) => Array.isArray(data.mapping) ? data.mapping : [])
+    .finally(() => { connectionRequest = null; });
+  return connectionRequest;
+}
+
+export interface LiveModel {
+  id: string;
+  label?: string;
+  name?: string;
+  tools?: boolean | null;
+  vision?: boolean | null;
+}
+
+/** The provider's live model list (brain catalog route); [] when the route has none. */
+export async function fetchProviderModels(providerId: string, { strict = false }: { strict?: boolean } = {}): Promise<LiveModel[]> {
+  const res = await fetch(`/api/providers/${encodeURIComponent(providerId)}/models`);
+  if (!res.ok && strict) throw new Error(`Model catalog request failed: HTTP ${res.status}`);
+  if (!res.ok) return [];
+  const data = (await res.json()) as { models?: unknown } | unknown[];
+  const raw = Array.isArray(data) ? data : Array.isArray(data.models) ? data.models : [];
+  return raw
+    .map((m) => {
+      if (typeof m === "string") return { id: m };
+      if (m && typeof m === "object" && typeof (m as LiveModel).id === "string") {
+        return m as LiveModel;
+      }
+      return null;
+    })
+    .filter((m): m is LiveModel => m !== null);
+}
+
+const sessionRequests = createHistoryRequests<AgentChatSession[]>();
+export const invalidateAgentChatSessions = () => sessionRequests.invalidate();
+
+export function fetchAgentChatSessions(
+  limit = 200,
+  surface?: AgentChatSurface,
+): Promise<AgentChatSession[]> {
+  const query = surface ? `&surface=${encodeURIComponent(surface)}` : "";
+  const url = `/api/agent-chat/sessions?limit=${limit}${query}`;
+  return sessionRequests.read(url, async (signal) => {
+    const data = await json<{ sessions: AgentChatSession[] }>(
+      await fetch(url, { signal }), "sessions-failed",
+    );
+    return data.sessions;
+  });
+}
+
+/** One chat the thread search found: why it came up, and enough to open it. */
+export interface ChatSearchHit {
+  session_id: string;
+  /** The latest matching message, cut around the match; "" for a title-only hit. */
+  snippet: string;
+  /** That message's place in the conversation (0 for a title-only hit). */
+  seq: number;
+  kind: string;
+  ts_ms: number;
+  /** How many messages matched. */
+  matches: number;
+  title_match: boolean;
+  title: string;
+  cwd: string;
+  updated_ms: number;
+}
+
+/** The chats of `surface` whose title or messages contain `query`, newest first. */
+export async function searchAgentChatSessions(
+  query: string,
+  { surface = "agent", limit = 50, signal }: { surface?: AgentChatSurface; limit?: number; signal?: AbortSignal } = {},
+): Promise<ChatSearchHit[]> {
+  const params = new URLSearchParams({ q: query, surface, limit: String(limit) });
+  const data = await json<{ hits: ChatSearchHit[] }>(
+    await fetch(`/api/agent-chat/sessions/search?${params}`, { signal }), "search-failed",
+  );
+  return data.hits;
+}
+
+/** The lead's one endless conversation; the server creates it on first use. */
+export async function fetchLeadSession(): Promise<AgentChatSession> {
+  return json<AgentChatSession>(await fetch("/api/agent-chat/lead"), "lead-failed");
+}
+
+/** One Agentic IDE thread the assistant wrote a task into (`GET /lead/threads`). */
+export interface LeadThread {
+  session_id: string;
+  title: string;
+  /** The name the coding CLI gave the conversation itself, or "". */
+  cli_title: string;
+  provider: string;
+  /** The coding CLI's registry id (`claude`, `codex`, `kimi`, …); "" when it has none. */
+  agent?: string;
+  /** The coding agent's own name ("Claude Code"). */
+  agent_label?: string;
+  cwd: string;
+  /** When the assistant last wrote into it. */
+  briefed_ms: number;
+  updated_ms: number;
+  running: boolean;
+  /** An approval in the thread waits for the person. */
+  waiting: boolean;
+}
+
+/** The coding thread a chat link names (`GET /thread-links/{ref}`). */
+export interface ThreadLinkInfo {
+  /** False when no thread answers to the reference (any more). */
+  found: boolean;
+  session_id?: string;
+  code?: string;
+  /** The thread's name as the IDE's sidebar shows it. */
+  title?: string;
+  /** The coding CLI's registry id (`claude`, `codex`, …); "" when it has none. */
+  agent?: string;
+  /** The coding agent's own name ("Claude Code"). */
+  agent_label?: string;
+  /** The thread's provider id: names the logo of a thread that runs on an API model. */
+  provider?: string;
+  running?: boolean;
+}
+
+/** Title and coding agent of the thread a session id or a thread code names. */
+export async function fetchThreadLink(ref: string): Promise<ThreadLinkInfo> {
+  return json<ThreadLinkInfo>(
+    await fetch(`/api/agent-chat/thread-links/${encodeURIComponent(ref)}`), "thread-link-failed",
+  );
+}
+
+/** The IDE threads the assistant sent a task to, the newest task first. */
+export async function fetchLeadThreads(limit = 12): Promise<LeadThread[]> {
+  const data = await json<{ threads?: LeadThread[] }>(
+    await fetch(`/api/agent-chat/lead/threads?limit=${limit}`), "lead-threads-failed",
+  );
+  return data.threads ?? [];
+}
+
+/** A file the assistant linked in its conversation (`GET /lead/files`). */
+export interface LeadFile {
+  /** The file's full path on this computer. */
+  path: string;
+  name: string;
+  size: number;
+  /** Last change, in seconds. */
+  mtime: number;
+  /** When the newest message that links it was written. */
+  linked_ms: number;
+}
+
+/** The files the assistant handed over in its conversation, the newest file first. */
+export async function fetchLeadFiles(limit = 30): Promise<LeadFile[]> {
+  const data = await json<{ files?: LeadFile[] }>(
+    await fetch(`/api/agent-chat/lead/files?limit=${limit}`), "lead-files-failed",
+  );
+  return data.files ?? [];
+}
+
+/**
+ * A place outside the app where the person meets the assistant (`GET
+ * /lead/channels`). `chat` is a conversation with it (Telegram, and Slack once
+ * the person connected their own Slack app); `tool` is a workspace it works in
+ * for the person (Slack without that app), where nobody can write to it.
+ */
+export interface LeadChannel {
+  id: "slack" | "telegram";
+  kind: "chat" | "tool";
+  connected: boolean;
+  /** The bot's `@name` or the workspace's name; "" when unknown. */
+  handle: string;
+  /** The https address a click opens; "" when there is none. */
+  url: string;
+}
+
+export async function fetchLeadChannels(): Promise<LeadChannel[]> {
+  const data = await json<{ channels?: LeadChannel[] }>(
+    await fetch("/api/agent-chat/lead/channels"), "lead-channels-failed",
+  );
+  return data.channels ?? [];
+}
+
+/** Start the lead's model fresh; the conversation and memory stay. */
+export async function freshStartLead(): Promise<void> {
+  await json<unknown>(await fetch("/api/agent-chat/lead/fresh-start", { method: "POST" }), "fresh-start-failed");
+}
+
+export interface CreateSessionInput {
+  provider: string;
+  account_id?: string;
+  model?: string;
+  effort?: string | null;
+  /** The coding CLI's speed tier; empty or absent = standard. */
+  speed?: string;
+  cwd?: string | null;
+  permission_mode?: string;
+  /** With permission_mode "plan": the mode the permission pill shows. */
+  build_mode?: string;
+  title?: string;
+  surface?: AgentChatSurface;
+  /** A coding thread's placement; empty or absent = this computer. */
+  computer_id?: string;
+  /** Continue an existing Claude Code / Codex session (a uuid). */
+  vendor_session?: string;
+}
+
+export async function createAgentChatSession(input: CreateSessionInput): Promise<AgentChatSession> {
+  const session = await json<AgentChatSession>(
+    await fetch("/api/agent-chat/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+    "create-failed",
+  );
+  invalidateAgentChatSessions();
+  return session;
+}
+
+export type PatchSessionInput = Partial<
+  Pick<AgentChatSession, "title" | "provider" | "model" | "effort" | "speed" | "cwd" | "permission_mode" | "build_mode" | "computer_id">
+>;
+
+export async function patchAgentChatSession(
+  sessionId: string,
+  input: PatchSessionInput,
+): Promise<AgentChatSession> {
+  const session = await json<AgentChatSession>(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    }),
+    "patch-failed",
+  );
+  invalidateAgentChatSessions();
+  return session;
+}
+
+export async function deleteAgentChatSession(sessionId: string): Promise<void> {
+  await json(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }),
+    "delete-failed",
+  );
+  invalidateAgentChatSessions();
+}
+
+export async function fetchAgentChatSession(
+  sessionId: string,
+  options: { tail?: number; signal?: AbortSignal } = {},
+): Promise<{ session: AgentChatSession; events: AgentChatEvent[] }> {
+  const query = options.tail ? `?tail=${Math.max(1, Math.round(options.tail))}` : "";
+  const url = `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}${query}`;
+  return json(
+    // A caller that schedules its own reads (the office's desk monitors) can give them a deadline.
+    options.signal ? await fetch(url, { signal: options.signal }) : await fetch(url),
+    "session-failed",
+  );
+}
+
+/**
+ * Get a Hermes or OpenClaw agent ready before its next message: the backend
+ * starts the agent's runtime and opens its conversation in the background
+ * (no model call), so the reply starts without a start-up wait. Any other
+ * chat answers with a no-op. Fire and forget: a failed warm-up only means the
+ * next message pays the start-up itself.
+ */
+export function warmAgentChatSession(sessionId: string): void {
+  // Once a minute per chat at most: a remount or a second panel on the same
+  // chat finds the runtime warm already.
+  const now = Date.now();
+  if (now - (lastWarm.get(sessionId) ?? 0) < WARM_COOLDOWN_MS) return;
+  lastWarm.set(sessionId, now);
+  void fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/warm`, {
+    method: "POST",
+  }).catch(() => undefined);
+}
+
+const WARM_COOLDOWN_MS = 60_000;
+const lastWarm = new Map<string, number>();
+
+/**
+ * Load a local model (Ollama) while the person types or dictates, so the
+ * first answer does not wait for the model to load. The backend does nothing
+ * for hosted providers. Fire and forget, at most every 30 s per model.
+ */
+export function preloadLocalModel(provider: string, model: string): void {
+  if (!provider) return;
+  const key = `${provider}/${model}`;
+  const now = Date.now();
+  if (now - (lastPreload.get(key) ?? 0) < PRELOAD_COOLDOWN_MS) return;
+  lastPreload.set(key, now);
+  void fetch("/api/agent-chat/preload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ provider, model }),
+  }).catch(() => undefined);
+}
+
+const PRELOAD_COOLDOWN_MS = 30_000;
+const lastPreload = new Map<string, number>();
+
+/** Messages the server holds for a chat's next turn; they survive a page reload. */
+export interface AgentChatQueue {
+  /** Stop paused it: nothing starts until the person lets it go on. */
+  paused: boolean;
+  items: { queue_id: string; text: string }[];
+}
+
+export async function fetchAgentChatQueue(sessionId: string): Promise<AgentChatQueue> {
+  return json<AgentChatQueue>(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/queue`),
+    "queue-failed",
+  );
+}
+
+export async function resumeAgentChatQueue(sessionId: string): Promise<AgentChatQueue> {
+  return json<AgentChatQueue>(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/queue/resume`, { method: "POST" }),
+    "queue-failed",
+  );
+}
+
+/**
+ * Send a waiting message now: into the running turn when its CLI takes it
+ * (`steered`), otherwise the turn stops and it starts next (`next`);
+ * `gone` when it already started or was taken back.
+ */
+export async function sendQueuedNow(sessionId: string, queueId: string): Promise<"steered" | "next" | "gone"> {
+  const result = await json<{ steered: boolean; next: boolean }>(
+    await fetch(
+      `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}/send-now`,
+      { method: "POST" },
+    ),
+    "queue-failed",
+  );
+  return result.steered ? "steered" : result.next ? "next" : "gone";
+}
+
+/** New words for a waiting message; false when it already started or is gone. */
+export async function editQueuedMessage(sessionId: string, queueId: string, text: string): Promise<boolean> {
+  const result = await json<{ edited: boolean }>(
+    await fetch(
+      `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) },
+    ),
+    "queue-failed",
+  );
+  return result.edited;
+}
+
+export async function discardQueuedMessage(sessionId: string, queueId: string): Promise<void> {
+  await json<{ removed: boolean }>(
+    await fetch(
+      `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(queueId)}`,
+      { method: "DELETE" },
+    ),
+    "queue-failed",
+  );
+}
+
+/**
+ * A message typed while a coding thread's turn runs: `now` goes into the
+ * running turn (when its CLI takes one), `after` waits and starts as the next turn.
+ */
+export type SendDelivery = "now" | "after";
+
+/** What a send came to: a turn, a steered turn, a place in the queue, or a ritual. */
+export interface SentMessage {
+  turn_id: string;
+  steered?: boolean;
+  queued?: boolean;
+  queue_id?: string;
+  /** The lead answers the message beside its running turn, in this side thread. */
+  side_thread?: string;
+  /**
+   * The id of the ritual the message started. Its card in the conversation is
+   * the answer: no turn was started for the message.
+   */
+  ritual?: string;
+  /**
+   * The id of the side question (`/btw`) the message asked. Its card is the
+   * answer; the agent's work goes on and no turn was started.
+   */
+  aside?: string;
+}
+
+/** Close a side question's card; one still being answered is stopped. */
+export async function dismissAside(sessionId: string, asideId: string): Promise<void> {
+  await json<{ dismissed: boolean }>(
+    await fetch(
+      `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/asides/${encodeURIComponent(asideId)}`,
+      { method: "DELETE" },
+    ),
+    "aside-failed",
+  );
+}
+
+export async function sendAgentChatMessage(
+  sessionId: string,
+  text: string,
+  attachments: ChatAttachment[] = [],
+  toolChoices: string[] = [],
+  delivery?: SendDelivery,
+): Promise<SentMessage> {
+  const result = await json<SentMessage>(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        attachments,
+        ...(toolChoices.length ? { tool_choices: toolChoices } : {}),
+        ...(delivery ? { delivery } : {}),
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      }),
+    }),
+    "send-failed",
+  );
+  invalidateAgentChatSessions();
+  return result;
+}
+
+/**
+ * One file going in with the next message, and what was READ from it.
+ *
+ * `detail` is the whole point: a description written by a model that could see
+ * the image, or a document's extracted text. A chat can be answered by a coding
+ * CLI or a text-only model, neither of which can open the file itself, so the
+ * contents have to travel with the sentence.
+ *
+ * Structurally the same row the Agentic IDE's terminals hand back
+ * (`DropAttachment` in agenticIdeApi) — same backend analysis, same wire shape.
+ */
+export interface ChatAttachment {
+  name: string;
+  /** How the agent should refer to the file — `@path` or a quoted path. */
+  reference: string;
+  kind: "image" | "text" | "pdf" | "other";
+  /** The description or extracted text. Empty when neither could be produced. */
+  detail: string;
+  /** Which layer produced `detail`. */
+  described_by: "vision" | "extraction" | "none";
+  /** Why `detail` is empty or shortened. Empty on the happy path. */
+  note: string;
+}
+
+/**
+ * Hand dropped, pasted or picked files to the backend and get them READ.
+ *
+ * Nothing is sent to the agent here — the composer holds the result while the
+ * person finishes the sentence, then posts both together.
+ *
+ * `paths` are real locations the browser managed to supply (an Explorer drag,
+ * or the desktop shell resolving the drop); `files` are the bytes for
+ * everything with no path at all. Sending both is normal and the backend
+ * de-duplicates, because a drag can carry the path AND the bytes.
+ */
+export async function attachChatFiles(payload: {
+  files?: File[];
+  paths?: string[];
+  sessionId?: string | null;
+  voiceSessionId?: string;
+  cwd?: string;
+  provider?: string;
+  surface?: AgentChatSurface;
+}): Promise<ChatAttachment[]> {
+  return (await attachChatFilesIn(payload)).attachments;
+}
+
+/** {@link attachChatFiles}, plus the folder the files landed in. */
+export async function attachChatFilesIn(payload: Parameters<typeof attachChatFiles>[0]): Promise<{
+  attachments: ChatAttachment[];
+  /** Where the copies live; "" from a backend that does not say. */
+  cwd: string;
+}> {
+  const form = new FormData();
+  for (const file of payload.files ?? []) form.append("files", file, file.name);
+  if (payload.paths?.length) form.append("paths", payload.paths.join("\n"));
+  if (payload.sessionId) form.append("session_id", payload.sessionId);
+  if (payload.voiceSessionId) form.append("voice_session_id", payload.voiceSessionId);
+  if (payload.cwd) form.append("cwd", payload.cwd);
+  if (payload.provider) form.append("provider", payload.provider);
+  if (payload.surface) form.append("surface", payload.surface);
+
+  const data = await json<{ attachments?: ChatAttachment[]; cwd?: string }>(
+    await fetch("/api/agent-chat/attachments", { method: "POST", body: form }),
+    "attach-failed",
+  );
+  return {
+    attachments: Array.isArray(data.attachments) ? data.attachments : [],
+    cwd: typeof data.cwd === "string" ? data.cwd : "",
+  };
+}
+
+/** The attached picture or video itself, for a thumbnail (images and videos only). */
+export function attachmentFileUrl(cwd: string, reference: string): string {
+  const query = new URLSearchParams({ cwd, reference });
+  return `/api/agent-chat/attachments/file?${query.toString()}`;
+}
+
+/** `via` names what asked for the stop, so the backend log can say who ended a turn. */
+export async function cancelAgentChatTurn(sessionId: string, via = ""): Promise<void> {
+  await json(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+      method: "POST",
+      ...(via ? { headers: { "X-Jarvis-Stop-Via": via } } : {}),
+    }),
+    "cancel-failed",
+  );
+}
+
+export type ApprovalDecision = "allow" | "allow_always" | "deny";
+
+/** Where an "Always allow" from the card lives (the card's rule chooser). */
+export interface ApprovalRuleChoice {
+  scope: "agent" | "chat";
+  breadth?: "action" | "app";
+  /** A narrower chat rule: only this folder, only this exact command. */
+  narrow?: "folder" | "command";
+}
+
+function approvalUrl(sessionId: string, approvalId: string): string {
+  return `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}`;
+}
+
+export async function resolveAgentChatApproval(
+  sessionId: string,
+  approvalId: string,
+  decision: ApprovalDecision,
+  rule?: ApprovalRuleChoice,
+  /** What the person typed on a declined card; the agent reads it as the reason. */
+  feedback?: string,
+  /** The person's inline edits of the action's text fields (field key -> new text). */
+  edits?: Record<string, string>,
+): Promise<void> {
+  const why = decision === "deny" ? feedback?.trim() : "";
+  const changed = decision !== "deny" && edits && Object.keys(edits).length ? { edits } : {};
+  await json(
+    await fetch(approvalUrl(sessionId, approvalId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        rule && decision === "allow_always"
+          ? { decision, scope: rule.scope, breadth: rule.breadth ?? "action", ...(rule.narrow ? { narrow: rule.narrow } : {}), ...changed }
+          : { decision, ...(why ? { feedback: why } : {}), ...changed },
+      ),
+    }),
+    "approval-failed",
+  );
+}
+
+/** A standing rule saved from a settled card: "Allow every time", "Check with me every time". */
+export interface ApprovalRuleRequest extends ApprovalRuleChoice {
+  kind: "always_allow" | "require_approval";
+}
+
+export interface SavedApprovalRuleReply {
+  kind: string;
+  pattern: string;
+  app?: string;
+  verb?: string;
+  still_asks?: boolean;
+}
+
+export async function saveAgentChatApprovalRule(
+  sessionId: string,
+  approvalId: string,
+  rule: ApprovalRuleRequest,
+): Promise<SavedApprovalRuleReply> {
+  const reply = await json<{ ok: boolean; rule: SavedApprovalRuleReply }>(
+    await fetch(`${approvalUrl(sessionId, approvalId)}/rule`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: rule.kind, scope: rule.scope, breadth: rule.breadth ?? "action" }),
+    }),
+    "approval-rule-failed",
+  );
+  return reply.rule;
+}
+
+/**
+ * The person's answer to an agent's question: one option, their own words, or
+ * the picks of a multi-select question (with their own words beside them).
+ */
+export type QuestionAnswerInput =
+  | { optionIndex: number }
+  | { text: string }
+  | { optionIndices: number[]; text?: string };
+
+function questionUrl(sessionId: string, questionId: string): string {
+  return `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}`;
+}
+
+/** Answer question `index` of an agent's card. */
+export async function answerAgentChatQuestion(
+  sessionId: string,
+  questionId: string,
+  index: number,
+  answer: QuestionAnswerInput,
+): Promise<void> {
+  const body = {
+    index,
+    ...("optionIndex" in answer
+      ? { option_index: answer.optionIndex }
+      : "optionIndices" in answer
+        ? { option_indices: answer.optionIndices, ...(answer.text ? { text: answer.text } : {}) }
+        : { text: answer.text }),
+  };
+  await json(
+    await fetch(questionUrl(sessionId, questionId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    "question-failed",
+  );
+}
+
+/**
+ * Close an agent's card: its open questions take the agent's recommendations.
+ * With `index`, only that question is skipped (an empty answer the agent
+ * decides on) and the rest of the card stays open.
+ */
+export async function skipAgentChatQuestion(sessionId: string, questionId: string, index?: number): Promise<void> {
+  await json(
+    await fetch(`${questionUrl(sessionId, questionId)}/skip`, {
+      method: "POST",
+      ...(index === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ index }) }),
+    }),
+    "question-failed",
+  );
+}
+
+/** One reviewed answer of a card's series, as `/submit` takes it. */
+export type QuestionSubmitAnswer =
+  | { option_index: number }
+  | { option_indices: number[]; text?: string }
+  | { text: string }
+  | { skip: true };
+
+/** Send the person's reviewed answers to the whole card at once. */
+export async function submitAgentChatQuestion(
+  sessionId: string,
+  questionId: string,
+  answers: QuestionSubmitAnswer[],
+): Promise<void> {
+  await json(
+    await fetch(`${questionUrl(sessionId, questionId)}/submit`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    }),
+    "question-failed",
+  );
+}
+
+/** The person is still answering on the card: its quiet window starts again. */
+export async function touchAgentChatQuestion(sessionId: string, questionId: string): Promise<void> {
+  await json(await fetch(`${questionUrl(sessionId, questionId)}/touch`, { method: "POST" }), "question-failed");
+}
+
+/**
+ * A chat message sent while a question card is open answers it. `consumed`
+ * means a running turn took it as its answer and nothing else is sent; an
+ * end-of-turn card settles too, and the message then goes out as usual.
+ */
+export async function replyToAgentChatQuestion(
+  sessionId: string,
+  text: string,
+): Promise<{ consumed: boolean; question_id: string | null }> {
+  return json(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/reply-to-question`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    }),
+    "question-failed",
+  );
+}
+
+function credentialUrl(sessionId: string, requestId: string): string {
+  return `/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/credentials/${encodeURIComponent(requestId)}`;
+}
+
+export interface CredentialResult {
+  ok: boolean;
+  request_id: string;
+  status: "saved" | "declined";
+}
+
+/** Bound a submission, never the time the person has to enter a credential. */
+async function credentialRequest(url: string, init: RequestInit): Promise<CredentialResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  try {
+    return await json<CredentialResult>(await fetch(url, { ...init, signal: controller.signal }), "credential-failed");
+  } catch (error) {
+    if (controller.signal.aborted) throw new AgentChatApiError("credential-timeout", 408, "validation_timeout");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Save the secret an agent asked for. The value goes to the agent's vault and
+ * nowhere else; the response never echoes it.
+ */
+export async function submitAgentChatCredential(sessionId: string, requestId: string, value: string): Promise<CredentialResult> {
+  return credentialRequest(credentialUrl(sessionId, requestId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value }),
+  });
+}
+
+/** Close an agent's credential field without providing the secret. */
+export async function declineAgentChatCredential(sessionId: string, requestId: string): Promise<CredentialResult> {
+  return credentialRequest(`${credentialUrl(sessionId, requestId)}/decline`, { method: "POST" });
+}
+
+/** A coding agent's plan card: `build` switches to building and sends the go-ahead. */
+export type PlanDecision = "build" | "keep";
+
+/**
+ * Answer the plan card of `turnId`. `buildMode` is the mode the permission
+ * pill shows: the one the thread goes on in after `build`.
+ */
+export async function resolveAgentChatPlan(
+  sessionId: string,
+  turnId: string,
+  decision: PlanDecision,
+  buildMode?: string,
+): Promise<void> {
+  await json(
+    await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/plan`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ turn_id: turnId, decision, ...(buildMode ? { build_mode: buildMode } : {}) }),
+    }),
+    "plan-failed",
+  );
+}
+
+export async function pickAgentChatFolder(start?: string): Promise<string | null> {
+  const data = await json<{ path: string | null; cancelled: boolean }>(
+    await fetch("/api/agent-chat/pick-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ start: start ?? null }),
+    }),
+    "pick-folder-failed",
+  );
+  return data.cancelled ? null : data.path;
+}
+
+export function agentChatSocketUrl(sessionId: string, afterSeq = 0): string {
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  const after = afterSeq > 0 ? `?after=${afterSeq}` : "";
+  return `${proto}://${window.location.host}/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/ws${after}`;
+}

@@ -1,0 +1,171 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
+import { Loader2, Search } from "lucide-react";
+import { cn } from "@/lib/utils";
+
+/**
+ * A small floating panel anchored to a button — the thread view's menus
+ * (Open in, Git actions, project actions, a thread's row menu).
+ *
+ * Portalled to `body` so a scroll column never clips it, placed below the
+ * anchor (above when there is no room) and kept inside the viewport. Escape
+ * and a press outside close it; focus returns to the anchor.
+ */
+export function ThreadPopover({
+  anchor,
+  point,
+  open,
+  onClose,
+  align = "start",
+  side = "bottom",
+  width = 260,
+  className,
+  label,
+  children,
+}: {
+  anchor: RefObject<HTMLElement | null>;
+  /** Open at this viewport position (a right-click) instead of below the anchor. */
+  point?: { x: number; y: number } | null;
+  open: boolean;
+  onClose: () => void;
+  align?: "start" | "end";
+  side?: "top" | "bottom";
+  width?: number;
+  className?: string;
+  /** Accessible name of the panel. */
+  label: string;
+  children: ReactNode;
+}) {
+  const panel = useRef<HTMLDivElement | null>(null);
+  const [place, setPlace] = useState<{ left: number; top: number; maxHeight: number } | null>(null);
+
+  const measure = useCallback(() => {
+    const host = anchor.current;
+    if (!host && !point) return;
+    const rect = point
+      ? { left: point.x, right: point.x, top: point.y, bottom: point.y }
+      : host!.getBoundingClientRect();
+    const margin = 8;
+    const height = panel.current?.offsetHeight ?? 0;
+    const below = window.innerHeight - rect.bottom - margin;
+    const above = rect.top - margin;
+    const wantTop = side === "top" ? above > Math.min(height, 240) || above > below : below < Math.min(height, 240) && above > below;
+    const left = align === "end" ? rect.right - width : rect.left;
+    const clampedLeft = Math.max(margin, Math.min(left, window.innerWidth - width - margin));
+    // A right-click menu that does not fit below the pointer moves up until it
+    // does, as the system's own menus do, rather than scrolling inside itself.
+    // Its full height, not the height an earlier pass capped it to.
+    const full = panel.current?.scrollHeight ?? 0;
+    const fitsWindow = full > 0 && full <= window.innerHeight - 2 * margin;
+    if (point && fitsWindow && full > below - 4) {
+      setPlace({ left: clampedLeft, top: Math.max(margin, window.innerHeight - margin - full), maxHeight: window.innerHeight - 2 * margin });
+      return;
+    }
+    const room = Math.max(120, wantTop ? above - 4 : below - 4);
+    const top = wantTop ? Math.max(margin, rect.top - 4 - Math.min(height, room)) : rect.bottom + 4;
+    setPlace({ left: clampedLeft, top, maxHeight: room });
+  }, [anchor, point, align, side, width]);
+
+  useLayoutEffect(() => {
+    if (!open) { setPlace(null); return; }
+    measure();
+    // A second pass once the panel has its real height.
+    const frame = requestAnimationFrame(measure);
+    // And again whenever its content grows or shrinks (rows that load after it opened),
+    // so a panel above its anchor never grows down over it.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => measure());
+    if (observer && panel.current) observer.observe(panel.current);
+    return () => { cancelAnimationFrame(frame); observer?.disconnect(); };
+  }, [open, measure]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (panel.current?.contains(target) || anchor.current?.contains(target)) return;
+      onClose();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      onClose();
+      anchor.current?.focus();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("resize", measure);
+    };
+  }, [open, onClose, anchor, measure]);
+
+  if (!open) return null;
+  return createPortal(
+    <div ref={panel} role="dialog" aria-label={label}
+      style={{ left: place?.left ?? -9999, top: place?.top ?? -9999, width, maxHeight: place?.maxHeight }}
+      className={cn("fixed z-[90] overflow-y-auto rounded-xl border border-border bg-popover p-1 text-sm text-popover-foreground shadow-float scrollbar-jarvis", className)}>
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
+/** One row of a popover menu: icon, words, an optional quiet hint. */
+export function ThreadMenuItem({
+  icon,
+  label,
+  hint,
+  onSelect,
+  disabled = false,
+  danger = false,
+  selected = false,
+}: {
+  icon?: ReactNode;
+  label: ReactNode;
+  hint?: ReactNode;
+  onSelect: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  selected?: boolean;
+}) {
+  return <button type="button" role="menuitem" disabled={disabled} onClick={onSelect}
+    className={cn(
+      "flex min-h-8 w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-45",
+      danger ? "text-destructive hover:bg-destructive/10" : "hover:bg-secondary",
+      selected && "bg-secondary text-foreground-strong",
+    )}>
+    {icon && <span className={cn("flex h-4 w-4 shrink-0 items-center justify-center", danger ? "text-destructive" : "text-muted-foreground")}>{icon}</span>}
+    <span className="min-w-0 flex-1 truncate">{label}</span>
+    {hint && <span className="shrink-0 text-xs text-muted-foreground">{hint}</span>}
+  </button>;
+}
+
+/** A quiet group heading inside a popover. */
+export function ThreadMenuHeading({ children }: { children: ReactNode }) {
+  return <div className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">{children}</div>;
+}
+
+export function ThreadMenuSeparator() {
+  return <div role="separator" className="my-1 h-px bg-border" />;
+}
+
+/** The filter field on top of a long menu; it takes the focus when the menu opens. */
+export function ThreadMenuSearch({ value, onChange, placeholder, busy = false, testId }: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  /** The list below is still loading. */
+  busy?: boolean;
+  testId?: string;
+}) {
+  return <label className="mb-1 flex h-8 items-center gap-2 rounded-md border border-border bg-background px-2 text-muted-foreground focus-within:border-border-strong">
+    <Search aria-hidden className="h-3.5 w-3.5 shrink-0" />
+    <input autoFocus value={value} onChange={(event) => onChange(event.target.value)} data-testid={testId}
+      placeholder={placeholder} aria-label={placeholder}
+      className="h-full min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground" />
+    {busy && <Loader2 aria-hidden className="h-3.5 w-3.5 shrink-0 animate-spin" />}
+  </label>;
+}

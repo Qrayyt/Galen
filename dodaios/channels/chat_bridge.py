@@ -1,0 +1,569 @@
+"""Bridge ChannelAdapter inboxes into the normal Jarvis chat event path."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections.abc import Callable
+from typing import Any
+
+from dodaios.channels.base import ChannelMessage
+from dodaios.channels.manager import ChannelManager
+from dodaios.channels.output_contract import enforce
+from dodaios.core.bus import EventBus
+from dodaios.core.events import MessageSent
+from dodaios.core.protocols import ChannelAdapter
+
+log = logging.getLogger(__name__)
+
+#: The same line is not sent to the same chat twice within this many seconds.
+_DEDUPE_S = 600.0
+
+
+def _phone_allows(kind: str) -> bool:
+    """The owner's routing choice for ``kind`` (``notify.settings`` ``phone``)."""
+    try:
+        from dodaios.notify.settings import load_settings
+
+        return load_settings().phone_allows(kind)
+    except Exception:  # noqa: BLE001 — unreadable settings fall back to the defaults
+        from dodaios.notify.settings import PHONE_DEFAULTS
+
+        return PHONE_DEFAULTS.get(kind, False)
+
+
+class ChannelChatBridge:
+    """Consumes channel inboxes and publishes ``MessageSent(role="user")``.
+
+    The web UI already enters the chat path through ``WebServer._route_incoming``.
+    External channels such as Telegram only expose an async ``messages()``
+    iterator, so they need this small runtime bridge. The original
+    ``ChannelMessage.trace_id`` is preserved; response channels use that id to
+    route the assistant reply back to the originating chat.
+    """
+
+    def __init__(
+        self,
+        *,
+        bus: EventBus,
+        manager: ChannelManager,
+        get_chat_service: Callable[[], Any | None] | None = None,
+        phone_allows: Callable[[str], bool] | None = None,
+        get_scheduler: Callable[[], Any | None] | None = None,
+    ) -> None:
+        self._get_scheduler = get_scheduler
+        self._bus = bus
+        self._manager = manager
+        self._get_chat_service = get_chat_service
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._replies: set[asyncio.Task[None]] = set()
+        self._phone_allows = phone_allows or _phone_allows
+        self._sent: dict[tuple[str, str], float] = {}
+        self._stopped = False
+
+    def start(self) -> None:
+        self._stopped = False
+        # A channel that comes up later, on a background retry (no network
+        # yet at login), gets its consumer then, like one started with the app.
+        add_listener = getattr(self._manager, "add_late_start_listener", None)
+        if callable(add_listener):
+            add_listener(self._on_late_start)
+        for name in self._manager.started():
+            if name in self._tasks:
+                continue
+            try:
+                channel = self._manager.get(name)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("ChannelChatBridge could not get '%s': %s", name, exc)
+                continue
+            self._tasks[name] = asyncio.create_task(
+                self._consume(name, channel),
+                name=f"channel-chat-bridge:{name}",
+            )
+        log.info("ChannelChatBridge started for channels: %s", sorted(self._tasks))
+
+    async def stop(self) -> None:
+        # From here on no consumer is added: a channel that a retry starts
+        # during the shutdown must not leave one behind.
+        self._stopped = True
+        remove_listener = getattr(self._manager, "remove_late_start_listener", None)
+        if callable(remove_listener):
+            remove_listener(self._on_late_start)
+        if not self._tasks:
+            return
+        tasks = list(self._tasks.values())
+        self._tasks.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        log.info("ChannelChatBridge stopped")
+
+    async def _on_late_start(self, name: str) -> None:
+        """A background retry started ``name``: consume its inbox from now on."""
+        await self.refresh(name)
+
+    async def refresh(self, name: str) -> None:
+        """Rebind the consumer for ``name`` to the manager's current instance.
+
+        A live reload (marketplace connect) drops the old channel instance and
+        builds a new one. The old consumer task is still iterating the old,
+        now-detached ``messages()`` iterator, so inbound messages on the new
+        instance would never reach the bus. This cancels the stale consumer and
+        spawns a fresh one bound to ``manager.get(name)``. Idempotent and
+        no-op-safe if the channel is unknown. A channel that a background
+        retry started late is bound the same way. Does nothing once the bridge
+        is stopped.
+        """
+        if self._stopped:
+            return
+        task = self._tasks.pop(name, None)
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if self._stopped:  # stopped while the old consumer ended
+                return
+        try:
+            channel = self._manager.get(name)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChannelChatBridge.refresh could not get '%s': %s", name, exc)
+            return
+        self._tasks[name] = asyncio.create_task(
+            self._consume(name, channel),
+            name=f"channel-chat-bridge:{name}",
+        )
+        how = "rebound" if task is not None else "bound"
+        log.info("ChannelChatBridge consumer %s for '%s'", how, name)
+
+    async def _consume(self, name: str, channel: ChannelAdapter) -> None:
+        try:
+            async for msg in channel.messages():
+                await self._handle_message(name, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChannelChatBridge consumer for '%s' stopped: %s", name, exc)
+
+    async def _handle_message(self, name: str, msg: ChannelMessage) -> None:
+        if msg.kind not in {"text", "voice"}:
+            return
+        text = (msg.content or "").strip()
+        pictures = [item for item in msg.media if item.kind == "image"]
+        voices = [item for item in msg.media if item.kind == "voice"]
+        if voices:
+            # A voice message is the owner's words: read it, then treat it as
+            # if it had been typed.
+            heard = await self._read_voice(name, msg, voices)
+            text = "\n\n".join(part for part in (text, heard) if part)
+        if not text and not pictures:
+            return
+        svc = self._lead_service(name, msg)
+        if svc is not None:
+            if text and await self._owner_stop_or_resume(svc, name, msg, text):
+                return
+            if not pictures and await self._answers_open_card(svc, text):
+                return  # the waiting turn goes on and answers this chat itself
+            # The owner's own private chat continues the assistant's one
+            # conversation; the reply goes back to the same chat.
+            task = asyncio.create_task(
+                self._answer_in_lead(svc, name, msg, text), name=f"channel-lead:{name}"
+            )
+            self._replies.add(task)
+            task.add_done_callback(self._replies.discard)
+            return
+        if not text:
+            return  # pictures alone reach only the owner's own conversation
+        # Not the owner's private chat: a trigger candidate for the lead's event
+        # intake (a no-op unless the owner turned the channel source on).
+        from dodaios.lead_triggers.wiring import on_channel_message
+
+        await on_channel_message(
+            name,
+            _thread_id_for(name, msg),
+            _metadata_value(msg.metadata, "friend_id") or _metadata_value(msg.metadata, "sender"),
+            text,
+        )
+        await self._bus.publish(
+            MessageSent(
+                trace_id=msg.trace_id,
+                thread_id=_thread_id_for(name, msg),
+                role="user",
+                text=text,
+                source_layer=f"channel.{name}",
+            )
+        )
+
+    async def _owner_stop_or_resume(
+        self, svc: Any, name: str, msg: ChannelMessage, text: str
+    ) -> bool:
+        """The owner's "stop" halts everything; "resume" lifts a stop that is in force.
+
+        Only the owner's private chat gets here (``_lead_service``), and only a
+        message that is nothing but the stop word counts. The answer is the
+        one written confirmation the owner asked for, so it is sent whatever
+        the routing choices for progress chatter say. "Resume" is an ordinary
+        message when no stop is in force.
+        """
+        from dodaios.safety.stop_everything import (
+            is_resume_everything,
+            is_stop_everything,
+            resume_everything,
+            stop_everything,
+        )
+        from dodaios.safety.stop_hold import stop_holds
+
+        stopping = is_stop_everything(text)
+        if not stopping and not (
+            is_resume_everything(text) and stop_holds().get("everything") is not None
+        ):
+            return False
+        language = _language_of(text)
+        scheduler = self._get_scheduler() if self._get_scheduler is not None else None
+        try:
+            if stopping:
+                from dodaios.orchestrator.jobs import get_ledger
+
+                report = await stop_everything(
+                    chat_service=svc,
+                    scheduler=scheduler,
+                    ledger=get_ledger(),
+                    bus=self._bus,
+                    reason=f"Stopped from {name}",
+                    source=name,
+                )
+                line = report.message(language)
+            else:
+                line = (
+                    await resume_everything(scheduler=scheduler, source=name)
+                ).message(language)
+        except Exception as exc:  # noqa: BLE001 — say so honestly; the hold is already written
+            log.warning("ChannelChatBridge: owner %s from '%s' failed: %s", text, name, exc)
+            line = _failure_line("error", language)
+        await self._reply(name, msg, line)
+        return True
+
+    def _lead_service(self, name: str, msg: ChannelMessage) -> Any | None:
+        """The chat service when this message belongs in the lead conversation.
+
+        Only the owner's private chats qualify: a Telegram private chat, a
+        Discord direct message, the owner's own WhatsApp chat (the channel
+        admits nobody else), or the owner's direct message to their Slack app
+        and their mention of it (the Slack channel passes nobody else on). A
+        friend (``friend_id``), a group chat or a server channel never reaches
+        the owner's personal conversation, and other channels keep their own
+        threads.
+        """
+        if self._get_chat_service is None or name not in (
+            "telegram", "discord", "whatsapp", "slack"
+        ):
+            return None
+        if _metadata_value(msg.metadata, "friend_id"):
+            return None
+        if name == "telegram":
+            try:
+                if int(_metadata_value(msg.metadata, "telegram_chat_id") or "0") <= 0:
+                    return None
+            except ValueError:  # an unreadable chat id is not the owner's private chat
+                return None
+        elif name == "whatsapp":
+            if msg.metadata.get("whatsapp_private") is not True:
+                return None
+        elif name == "slack":
+            if msg.metadata.get("slack_owner") is not True:
+                return None
+        elif msg.metadata.get("discord_dm") is not True:
+            return None
+        try:
+            return self._get_chat_service()
+        except Exception:  # noqa: BLE001 — fall back to the classic chat path
+            return None
+
+    async def _read_voice(self, name: str, msg: ChannelMessage, voices: list[Any]) -> str:
+        """The words of the message's voice notes; "" (after one honest line) when unreadable."""
+        from dodaios.speech.voice_note import (
+            VoiceNoteError,
+            VoiceNoteUnavailable,
+            transcribe_voice_note,
+        )
+
+        language = _sender_language(msg)
+        heard: list[str] = []
+        problem = ""
+        for note in voices:
+            try:
+                words = await transcribe_voice_note(note.data)
+            except VoiceNoteUnavailable:  # the owner is told below that voice is off
+                problem = "voice_off"
+                continue
+            except VoiceNoteError as exc:
+                log.warning("ChannelChatBridge: voice note from '%s' unreadable: %s", name, exc)
+                problem = problem or "voice_unreadable"
+                continue
+            if words:
+                heard.append(words)
+            else:
+                problem = problem or "voice_unreadable"
+        if heard:
+            log.info("ChannelChatBridge: voice note from '%s' read (%d chars)", name,
+                     sum(len(w) for w in heard))
+            return "\n\n".join(heard)
+        if problem:
+            await self._update(name, msg, "failures", _failure_line(problem, language))
+        return ""
+
+    async def _answer_in_lead(self, svc: Any, name: str, msg: ChannelMessage, text: str) -> None:
+        from dodaios.agent_chat.lead import LeadCard, LeadReport, answer_in_lead
+
+        language = _language_of(text, fallback=_sender_language(msg))
+        report = LeadReport()
+        pictures = [(item.name, item.data) for item in msg.media if item.kind == "image"]
+
+        async def on_card(card: LeadCard) -> None:
+            await self._update(name, msg, "decisions", _card_line(card, language))
+
+        try:
+            answer = await answer_in_lead(
+                svc, text, source=name, report=report, on_card=on_card, pictures=pictures
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChannelChatBridge: lead turn for '%s' failed: %s", name, exc)
+            answer = ""
+            report.status = "error"
+        # The owner gets an answer, or one honest line (each kind is the
+        # owner's routing choice). The phone copy is short; the full answer
+        # stays in the lead conversation.
+        if answer:
+            await self._update(name, msg, "results", enforce(answer, language=language).text)
+        else:
+            await self._update(name, msg, "failures", _failure_line(report.status, language))
+
+    async def _update(self, name: str, msg: ChannelMessage, kind: str, content: str) -> None:
+        """Send one update of ``kind`` unless the owner switched that kind off.
+
+        Progress chatter has no sender here and is off by default; a repeat of
+        the same open-card line to the same chat is dropped (no nagging).
+        """
+        if not content or not self._phone_allows(kind):
+            log.debug("ChannelChatBridge: '%s' update for '%s' not sent", kind, name)
+            return
+        if kind == "decisions":  # a card line that is asked again is one ask
+            now = time.monotonic()
+            self._sent = {k: t for k, t in self._sent.items() if now - t < _DEDUPE_S}
+            key = (_thread_id_for(name, msg), content)
+            if key in self._sent:
+                return
+            self._sent[key] = now
+        await self._reply(name, msg, content)
+
+    async def _reply(self, name: str, msg: ChannelMessage, content: str) -> None:
+        try:
+            channel = self._manager.get(name)
+            await channel.send_message(
+                ChannelMessage(
+                    session_id=msg.session_id,
+                    kind="text",
+                    content=content,
+                    trace_id=msg.trace_id,
+                    metadata=dict(msg.metadata),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ChannelChatBridge: reply to '%s' failed: %s", name, exc)
+
+    async def _answers_open_card(self, svc: Any, text: str) -> bool:
+        """Whether this message answered a card the lead's turn waits on.
+
+        A plain yes / no settles the oldest open approval; any other message
+        answers an open question card. Anything else is a new message.
+        """
+        try:
+            from dodaios.agent_chat.lead import lead_session, open_approval_ids
+
+            session = lead_session(svc)
+            if session is None:
+                return False
+            sid = session.session_id
+            decision = _decision_of(text)
+            approvals = open_approval_ids(svc, sid) if decision else []
+            if approvals:
+                return bool(svc.resolve_approval(sid, approvals[0], decision))
+            if svc.pending_questions(sid):
+                outcome = await svc.answer_by_message(sid, text)
+                return bool(outcome.get("consumed"))
+        except Exception as exc:  # noqa: BLE001 — a card not answerable here is answered in the app
+            log.debug("ChannelChatBridge: card answer not applied: %s", exc)
+        return False
+
+
+# Input vocabulary (closed lists, like the screen-reference words): a message
+# that is only one of these answers an open approval card.
+_YES: frozenset[str] = frozenset(
+    {"yes", "y", "ok", "okay", "allow", "approve", "approved", "sure", "go",  # i18n-allow
+     "ja", "j", "klar", "erlaubt", "genehmigt", "freigeben",  # i18n-allow
+     "si", "sí", "sim", "claro", "permitir"}  # i18n-allow
+)
+_NO: frozenset[str] = frozenset(
+    {"no", "n", "nope", "deny", "denied", "stop", "cancel",  # i18n-allow
+     "nein", "ablehnen", "abbrechen",  # i18n-allow
+     "nao", "não", "cancelar", "negar"}  # i18n-allow
+)
+
+_LANGS: tuple[str, ...] = ("en", "de", "es", "pt")
+
+# Short lines for the owner's phone. The reason is generic on purpose: a
+# provider's own text never reaches a chat.
+_FAILURES: dict[str, dict[str, str]] = {
+    "en": {
+        "error": "I couldn't finish that: the turn hit an error. It's in the app.",
+        "cancelled": "I couldn't finish that: the turn was stopped. It's in the app.",
+        "timeout": "I couldn't finish that: it is taking too long. It continues in the app.",
+        "empty": "I couldn't finish that: the turn ended without an answer. It's in the app.",
+        "not_sent": "I couldn't start that: the message did not go through. It's in the app.",
+        "no_session": "I couldn't reach the conversation. Please try again in the app.",
+        "voice_off": "I can't listen to voice messages right now: speech recognition is off on the computer. Please write it instead.",  # noqa: E501
+        "voice_unreadable": "I couldn't understand that voice message. Please say it again or write it.",  # noqa: E501
+    },
+    "de": {  # i18n-allow: localized phone lines
+        "error": "Das habe ich nicht geschafft: Es gab einen Fehler. Es steht in der App.",  # i18n-allow  # noqa: E501
+        "cancelled": "Das habe ich nicht geschafft: Ich wurde gestoppt. Es steht in der App.",  # i18n-allow  # noqa: E501
+        "timeout": "Das habe ich nicht geschafft: Es dauert zu lange. Es läuft in der App weiter.",  # i18n-allow  # noqa: E501
+        "empty": "Das habe ich nicht geschafft: Es kam keine Antwort. Es steht in der App.",  # i18n-allow  # noqa: E501
+        "not_sent": "Das konnte ich nicht starten: Nachricht nicht angekommen. Es steht in der App.",  # i18n-allow  # noqa: E501
+        "no_session": "Ich komme gerade nicht an die Unterhaltung. Bitte versuch es in der App.",  # i18n-allow  # noqa: E501
+        "voice_off": "Sprachnachrichten kann ich gerade nicht anhören: Die Spracherkennung am Computer ist aus. Bitte schreib es mir.",  # i18n-allow  # noqa: E501
+        "voice_unreadable": "Die Sprachnachricht habe ich nicht verstanden. Sag es bitte noch einmal oder schreib es mir.",  # i18n-allow  # noqa: E501
+    },
+    "es": {  # i18n-allow: localized phone lines
+        "error": "No pude terminarlo: hubo un error. Está en la app.",
+        "cancelled": "No pude terminarlo: se detuvo. Está en la app.",
+        "timeout": "No pude terminarlo: tarda demasiado. Sigue en la app.",
+        "empty": "No pude terminarlo: terminó sin respuesta. Está en la app.",
+        "not_sent": "No pude empezarlo: el mensaje no se envió. Está en la app.",
+        "no_session": "No llego a la conversación. Inténtalo en la app.",
+        "voice_off": "Ahora no puedo escuchar mensajes de voz: el reconocimiento de voz está apagado en el ordenador. Escríbemelo, por favor.",  # i18n-allow  # noqa: E501
+        "voice_unreadable": "No entendí el mensaje de voz. Repítelo o escríbemelo, por favor.",  # i18n-allow  # noqa: E501
+    },
+    "pt": {  # i18n-allow: localized phone lines
+        "error": "Não consegui terminar: houve um erro. Está na app.",
+        "cancelled": "Não consegui terminar: foi parado. Está na app.",
+        "timeout": "Não consegui terminar: demora demais. Continua na app.",
+        "empty": "Não consegui terminar: acabou sem resposta. Está na app.",
+        "not_sent": "Não consegui começar: a mensagem não seguiu. Está na app.",
+        "no_session": "Não consigo chegar à conversa. Tenta na app.",
+        "voice_off": "Agora não consigo ouvir mensagens de voz: o reconhecimento de voz está desligado no computador. Escreve-me, por favor.",  # i18n-allow  # noqa: E501
+        "voice_unreadable": "Não percebi a mensagem de voz. Repete ou escreve-me, por favor.",  # i18n-allow  # noqa: E501
+    },
+}
+_CARD_APPROVAL: dict[str, str] = {
+    "en": "Needs your OK: {summary}\nReply yes or no.",
+    "de": "Ich brauche dein OK: {summary}\nAntworte mit ja oder nein.",  # i18n-allow
+    "es": "Necesito tu visto bueno: {summary}\nResponde sí o no.",  # i18n-allow
+    "pt": "Preciso da tua autorização: {summary}\nResponde sim ou não.",  # i18n-allow
+}
+_CARD_QUESTION: dict[str, str] = {
+    "en": "A question for you: {summary}{options}\nReply with your answer.",
+    "de": "Eine Frage an dich: {summary}{options}\nAntworte einfach hier.",  # i18n-allow
+    "es": "Una pregunta para ti: {summary}{options}\nResponde aquí.",  # i18n-allow
+    "pt": "Uma pergunta para ti: {summary}{options}\nResponde aqui.",  # i18n-allow
+}
+_CARD_TAKEOVER: dict[str, str] = {
+    "en": (
+        "My browser needs you at the computer: {summary}\n"
+        "Open Dodaios, take over, then hand back."
+    ),
+    "de": (  # i18n-allow
+        "Mein Browser braucht dich am Computer: {summary}\n"
+        "Öffne Dodaios, übernimm den Browser und gib ihn zurück."  # i18n-allow
+    ),
+    "es": (  # i18n-allow
+        "Mi navegador te necesita en el ordenador: {summary}\n"
+        "Abre Dodaios, toma el control del navegador y devuélvemelo."
+    ),
+    "pt": (  # i18n-allow
+        "O meu navegador precisa de ti no computador: {summary}\n"
+        "Abre o Dodaios, assume o navegador e devolve-o."
+    ),
+}
+_OPTIONS: dict[str, str] = {"en": "Options", "de": "Optionen", "es": "Opciones", "pt": "Opções"}
+
+
+def _language_of(text: str, *, fallback: str = "en") -> str:
+    """The language of the owner's message; ``fallback`` when it cannot be told."""
+    fallback = fallback if fallback in _LANGS else "en"
+    try:
+        from dodaios.core.turn_language import resolve_turn_language
+
+        code = resolve_turn_language(None, text, default=fallback)
+    except Exception:  # noqa: BLE001
+        log.debug("ChannelChatBridge: reply language not detected", exc_info=True)
+        return fallback
+    return code if code in _LANGS else fallback
+
+
+def _sender_language(msg: ChannelMessage) -> str:
+    """The language the sender's chat app is set to (Telegram and Slack say it), else English.
+
+    A message that carries no words to read the language from (a picture, a
+    voice note that could not be read) is answered in this one.
+    """
+    told = _metadata_value(msg.metadata, "telegram_language") or _metadata_value(
+        msg.metadata, "slack_language"
+    )
+    code = told.lower().split("-")[0]
+    return code if code in _LANGS else "en"
+
+
+def _failure_line(status: str, language: str) -> str:
+    lines = _FAILURES.get(language) or _FAILURES["en"]
+    return lines.get(status) or lines["empty"]
+
+
+def _card_line(card: Any, language: str) -> str:
+    summary = card.summary or ""
+    if card.kind == "approval":
+        preview = getattr(card, "preview", None)
+        if preview:
+            # The same essentials as the app's card, in the owner's language.
+            from dodaios.agent_chat.approval_preview import compact_line
+
+            summary = compact_line(preview, language) or summary
+        return _CARD_APPROVAL.get(language, _CARD_APPROVAL["en"]).format(summary=summary)
+    if card.kind == "takeover":
+        return _CARD_TAKEOVER.get(language, _CARD_TAKEOVER["en"]).format(summary=summary)
+    options = ""
+    if card.options:
+        options = f"\n{_OPTIONS.get(language, 'Options')}: " + ", ".join(card.options)
+    return _CARD_QUESTION.get(language, _CARD_QUESTION["en"]).format(
+        summary=summary, options=options
+    )
+
+
+def _decision_of(text: str) -> str:
+    """``allow`` / ``deny`` for a message that is only a yes or a no, else ""."""
+    word = "".join(ch for ch in text.lower() if ch.isalpha() or ch.isspace()).strip()
+    if word in _YES:
+        return "allow"
+    if word in _NO:
+        return "deny"
+    return ""
+
+
+def _thread_id_for(name: str, msg: ChannelMessage) -> str:
+    chat_id = _metadata_value(msg.metadata, "telegram_chat_id")
+    if chat_id:
+        return f"telegram:{chat_id}"
+    jid = _metadata_value(msg.metadata, "whatsapp_jid")
+    if jid:
+        return f"whatsapp:{jid}"
+    channel_session = _metadata_value(msg.metadata, "channel_session_id")
+    if channel_session:
+        return f"{name}:{channel_session}"
+    return f"{name}:{msg.session_id}"
+
+
+def _metadata_value(metadata: dict[str, Any], key: str) -> str:
+    value = metadata.get(key)
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return text

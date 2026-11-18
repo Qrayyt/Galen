@@ -1,0 +1,1612 @@
+import { create, type StoreApi, type UseBoundStore } from "zustand";
+import { bindComposerDraftTarget, captureComposerDraftTarget, resetBlankComposerDraftTarget, type ComposerDraftTarget } from "@/components/agentchat/composerDrafts";
+import { discardHeldFiles, moveHeldFiles } from "@/components/agentchat/useChatAttachments";
+
+import {
+  AgentChatApiError,
+  agentChatSocketUrl,
+  cancelAgentChatTurn,
+  createAgentChatSession,
+  deleteAgentChatSession,
+  fetchAgentChatCatalog,
+  fetchAgentChatSession,
+  fetchAgentChatSessions,
+  fetchAgentConnections,
+  fetchLeadSession,
+  fetchProviderHealth,
+  fetchProviderModels,
+  isApiRunner,
+  invalidateAgentChatSessions,
+  patchAgentChatSession,
+  resolveAgentChatApproval,
+  saveAgentChatApprovalRule,
+  answerAgentChatQuestion,
+  bindVoiceChat,
+  replyToAgentChatQuestion,
+  skipAgentChatQuestion,
+  submitAgentChatQuestion,
+  touchAgentChatQuestion,
+  type QuestionSubmitAnswer,
+  resolveAgentChatPlan,
+  type PlanDecision,
+  type QuestionAnswerInput,
+  sendAgentChatMessage,
+  saveChatSelection,
+  type AgentChatCatalog,
+  type AgentChatEvent,
+  type AgentChatProvider,
+  type AgentChatSession,
+  type AgentChatSurface,
+  type AgentConnectionRow,
+  type ApprovalDecision,
+  type ApprovalRuleChoice,
+  type ApprovalRuleRequest,
+  type ChatAttachment,
+  type SendDelivery,
+  type CuratedModel,
+  type PatchSessionInput,
+  type ProviderHealth,
+} from "@/lib/agentChatApi";
+import { EMPTY_TIMELINE, localStopEvent, markApprovalAnswering, noteApprovalRule, reduceEvent, reduceEvents, runningTurn, settleApproval, type Timeline, type TurnItem } from "@/components/agentchat/reduce";
+import { markAnswered } from "@/components/society/attention/attentionStore";
+import { openQuestionOf } from "@/components/agentchat/questions/questionModel";
+import { jitteredDelay, requestConnect } from "../lib/connectBudget";
+import { HISTORY_CHANGED, reuseHistoryRows } from "@/lib/historyRequests";
+import { outboxEntry, recordedEntries, type OutboxEntry } from "@/components/agentchat/outbox";
+import { bestModelId } from "@/lib/modelRanking";
+
+/**
+ * The agent chat's store — one per SURFACE (`createAgentChatStore`).
+ *
+ * The front page's store (`useAgentChatStore`, surface `jarvis`) is Jarvis
+ * with a keyboard: what is typed there goes to the same assistant the
+ * microphone reaches, and its sessions are the front page's chats. An
+ * Agentic IDE store (surface `agent`) holds coding sessions instead. Each
+ * store asks the backend for its own list and catalog, stamps its surface on
+ * the sessions it creates, and keeps its own socket and draft.
+ *
+ * One active session at a time: its timeline is fed by one WebSocket
+ * (snapshot, then live events, reconnect from the last seq). The composer's
+ * choice of provider / model / effort / permission mode lives here as the
+ * DRAFT: for a fresh chat it is what the next session is created with; with
+ * a session open, changing a pick patches that session on the backend and
+ * the same draft mirrors it. The draft survives a reload (localStorage) so
+ * the composer opens on what you used last.
+ *
+ * The provider list is the backend catalog (`/api/agent-chat/catalog`)
+ * joined with the Agents tab's credential truth (`/api/jarvis-agent/status`):
+ * a provider is offered when it is connected — a key saved, a subscription
+ * logged in, or a local server — and shown greyed out with a "connect" hint
+ * otherwise. The one marked active on the Agents tab is the draft's default.
+ */
+
+/**
+ * Where the composer's draft survives a reload. The front page keeps the key
+ * it has always had, so picks made before the surface split still load; an
+ * IDE store gets its own so the two never overwrite each other's picks.
+ */
+export function draftKey(surface: AgentChatSurface): string {
+  // v2 for the front page (2026-08-25): the v1 draft was written while the
+  // IDE's chat and the front page shared one store, so it carried the IDE's
+  // last folder and a vendor permission mode the Jarvis ladder does not know.
+  // A new key starts the Jarvis chat clean — the active brain, the home
+  // folder, the ladder's default — instead of on a coding session's picks.
+  return surface === "jarvis" ? "jarvis.agentChat.draft.v2" : `jarvis.agentChat.draft.${surface}.v1`;
+}
+/** First retry delay; each further failure doubles it under full jitter. */
+const RECONNECT_MS = 1500;
+/** Ceiling on the retry wait — a flat 1.5 s forever is a spin, not a retry. */
+const RECONNECT_MAX_MS = 30_000;
+/** How many sessions the list holds — the "All chats" archive shows them all. */
+const SESSION_LIST_LIMIT = 500;
+/**
+ * The longest an open socket may stay silent. The backend pings every 20 s of
+ * silence, so two missed pings mean the connection is dead without having
+ * closed; the store drops it and reconnects from the last seq.
+ */
+export const FRAME_IDLE_MS = 45_000;
+/**
+ * How long a sent message counts as the start of a turn whose
+ * `turn_started` has not arrived yet. Some CLIs take seconds to start; a
+ * message that never got a turn stops counting after this.
+ */
+export const TURN_START_GRACE_MS = 60_000;
+/** Wait before asking again for a session list whose reads were all invalidated. */
+const LIST_RETRY_MS = 750;
+/**
+ * A sent message whose own `user_message` never came back (the backend wrote
+ * it differently, or the socket missed it) stops being drawn after this long;
+ * the next read of the conversation shows what was recorded.
+ */
+const OUTBOX_GIVE_UP_MS = 30_000;
+/** Focus and visibility events closer together than this resync only once. */
+const WAKE_RESYNC_MIN_MS = 3_000;
+
+export interface ComposerDraft {
+  provider: string;
+  accountId?: string;
+  model: string;
+  effort: string;
+  /** The coding CLI's speed tier (fast mode); empty or absent = standard. */
+  speed?: string;
+  permissionMode: string;
+  /** The permission mode to go back to when Plan is switched off. */
+  buildMode: string;
+  cwd: string;
+  /** The connected computer a new thread runs on; empty or absent = this computer. */
+  computerId?: string;
+}
+
+export interface ProviderOption extends AgentChatProvider {
+  /** Usable right now: credential present (or keyless) and, for a CLI, installed. */
+  connected: boolean;
+  /** The sub-agent marked active on the Agents tab. */
+  active: boolean;
+  /**
+   * Draw this row with a CODING AGENT's mark rather than a provider-family
+   * logo, naming the workspace entry whose mark it is ("opencode", "kimi").
+   *
+   * The catalog's rows are brands the provider table knows; the Agentic IDE's
+   * rows are the CLIs installed on this machine, and several of them —
+   * OpenCode, Kimi, GLM — are marks only `AgentMark` carries. Without this the
+   * IDE's picker would fall back to a letter in a box, which is the one thing
+   * a logo must never be here. Absent for every catalog row, which keeps the
+   * front page's picker exactly as it was.
+   */
+  agentMark?: string;
+  /** A mark the entry brings itself — the file a user uploaded for their own CLI. */
+  logoUrl?: string;
+}
+
+export interface AgentChatStore {
+  /** Which list and catalog this store speaks for; fixed at creation. */
+  readonly surface: AgentChatSurface;
+  catalog: AgentChatCatalog | null;
+  connections: AgentConnectionRow[];
+  /**
+   * The catalog on hand is a copy from before (the last start, or the chat
+   * left behind), painted at once while a fresh read is on its way. The
+   * composer used to show "Provider" for seconds on every start and every new
+   * chat because the catalog route waits on CLI model lists; the picks now
+   * read from this copy and settle when the fresh one lands.
+   */
+  catalogStale: boolean;
+  catalogError: string | null;
+  /**
+   * The catalog answered without the fields this bundle reads (no permission
+   * ladders): the backend process predates the app on disk — an update that
+   * was reloaded but not yet restarted. The composer says so instead of
+   * silently showing fewer picks.
+   */
+  backendOutdated: boolean;
+  /** Live model lists per provider id (the API-backed rows). */
+  liveModels: Record<string, CuratedModel[]>;
+  /** Live per-provider state, keyed by provider id; empty until the sweep lands. */
+  health: Record<string, ProviderHealth>;
+  sessions: AgentChatSession[];
+  activeSessionId: string | null;
+  activeSession: AgentChatSession | null;
+  timeline: Timeline;
+  /**
+   * The conversation that belongs on stage is still on its way: the lead's
+   * id is being asked for, or an opened session's transcript has not arrived
+   * yet. An empty timeline then means "not here yet", not "nothing said", so
+   * the front page shows no greeting meanwhile. The greeting used to flash
+   * for a second or two on every start before the conversation replaced it.
+   * Absent on stores that always have their conversation at hand (a pane's).
+   */
+  opening?: boolean;
+  socketState: "idle" | "connecting" | "open" | "closed";
+  draft: ComposerDraft;
+  busy: boolean;
+  /**
+   * Messages sent and not yet in the timeline, drawn at the foot of their
+   * chat until their own `user_message` arrives (components/agentchat/outbox).
+   * Absent on stores that do not draw them.
+   */
+  outbox?: OutboxEntry[];
+  lastError: string | null;
+  /**
+   * The picks this chat cannot take, each with the sentence that says why —
+   * the composer disables that pill and shows the sentence on it. Absent (a
+   * session the chat runs itself) means every pick is live. A pane's store
+   * sets these: its CLI chose its provider the moment it started, and takes
+   * the other three only where it has a typed command for them
+   * (`store/paneChat`, `RuntimePickOffers`).
+   */
+  locks?: Partial<Record<"provider" | "model" | "effort" | "permissionMode", string>>;
+
+  loadCatalog: () => Promise<void>;
+  loadSessions: () => Promise<void>;
+  loadModels: (providerId: string) => Promise<void>;
+  providerOptions: () => ProviderOption[];
+  /** Ask which seats actually answer. Never awaited by a render path. */
+  loadHealth: (refresh?: boolean) => Promise<void>;
+  providerById: (id: string) => ProviderOption | null;
+  setDraft: (patch: Partial<ComposerDraft>) => Promise<void>;
+  setPlan: (on: boolean) => Promise<void>;
+  /**
+   * A blank page. `voiceSessionId` = an archived voice chat goes on stage
+   * instead, and calls continue it rather than opening a new chat.
+   */
+  newChat: (opts?: { voiceSessionId?: string }) => void;
+  openSession: (sessionId: string) => void;
+  /**
+   * Read a thread the person is about to open (the pointer rests on it) over
+   * plain HTTP, so opening it paints at once instead of waiting for the
+   * socket's first frame. Fire and forget.
+   */
+  preloadSession: (sessionId: string) => void;
+  removeSession: (sessionId: string) => Promise<void>;
+  /** Send the sentence, with whatever files the composer is holding for it. */
+  send: (text: string, attachments?: ChatAttachment[], toolChoices?: string[], onSessionCreated?: (session: AgentChatSession) => void, delivery?: SendDelivery) => Promise<void | "sent" | "failed" | "stale">;
+  /** Stop the running turn; `via` names the control that asked, for the log. */
+  cancel: (via?: string) => Promise<void>;
+  /**
+   * Answer an approval card in the active session. The card closes as soon as
+   * the backend took the answer, or said nothing waits on it any more; any
+   * other failure throws so the card can say why.
+   */
+  decide: (approvalId: string, decision: ApprovalDecision, rule?: ApprovalRuleChoice, feedback?: string, edits?: Record<string, string>) => Promise<void>;
+  /**
+   * Turn an approval card into a standing rule after the fact ("Allow every
+   * time", "Check with me every time"). The card shows it at once; throws so
+   * the card can say why when nothing was saved.
+   */
+  saveApprovalRule: (approvalId: string, rule: ApprovalRuleRequest) => Promise<void>;
+  /** Answer question `index` of an agent's card in the active session; throws so the card can say why. */
+  answerQuestion: (questionId: string, index: number, answer: QuestionAnswerInput) => Promise<void>;
+  /**
+   * Close an agent's card so its recommendations apply; with `index`, skip
+   * only that question. Throws so the card can say why.
+   */
+  skipQuestion: (questionId: string, index?: number) => Promise<void>;
+  /**
+   * Send the person's reviewed answers to the whole card at once. Optional:
+   * a store without it gets the answers one question at a time. Throws so the
+   * card can roll back; a card the server no longer holds resolves quietly.
+   */
+  submitQuestion?: (questionId: string, answers: QuestionSubmitAnswer[]) => Promise<void>;
+  /** The person is still answering: the card's quiet window starts again. Never throws. */
+  touchQuestion?: (questionId: string) => Promise<void>;
+  /**
+   * A composer message while a card is open answers it. True when a running
+   * turn took the message as its answer, so nothing else is sent; false sends
+   * it as usual (an end-of-turn card is settled by the same call).
+   */
+  answerByMessage?: (text: string) => Promise<boolean>;
+  /** Answer a coding agent's plan card in the active session; throws so the card can say why. */
+  resolvePlan: (turnId: string, decision: PlanDecision, buildMode?: string) => Promise<void>;
+  /** Tests and the socket: fold one event into the active timeline. */
+  ingest: (event: AgentChatEvent) => void;
+  disconnect: () => void;
+}
+
+function readDraft(key: string): ComposerDraft {
+  const empty: ComposerDraft = {
+    provider: "",
+    model: "",
+    effort: "",
+    permissionMode: "",
+    buildMode: "",
+    cwd: "",
+  };
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw) as Partial<ComposerDraft>;
+    return { ...empty, ...parsed };
+  } catch {
+    return empty;
+  }
+}
+
+function writeDraft(key: string, draft: ComposerDraft): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(draft));
+  } catch {
+    /* storage blocked — the draft just does not survive a reload */
+  }
+}
+
+/**
+ * Where the id of the lead's one conversation is kept between starts, so the
+ * front page opens it at once instead of waiting for `/api/agent-chat/lead`,
+ * which answers slowly while the backend is busy starting up (seen 1.1 s).
+ * The route still answers and corrects a stale id.
+ */
+const LEAD_SESSION_KEY = "jarvis.agentChat.leadSession.v1";
+
+function readLeadSessionId(): string | null {
+  try {
+    return window.localStorage.getItem(LEAD_SESSION_KEY) || null;
+  } catch {
+    return null; // storage blocked: wait for the route
+  }
+}
+
+function writeLeadSessionId(sessionId: string): void {
+  try {
+    window.localStorage.setItem(LEAD_SESSION_KEY, sessionId);
+  } catch {
+    /* storage blocked: the next start waits for the route */
+  }
+}
+
+/** Where the last catalog a surface read is kept between starts. */
+function catalogCacheKey(surface: AgentChatSurface): string {
+  return `jarvis.agentChat.catalog.${surface}.v1`;
+}
+
+interface CatalogSnapshot {
+  catalog: AgentChatCatalog;
+  connections: AgentConnectionRow[];
+}
+
+function readCatalogSnapshot(surface: AgentChatSurface): CatalogSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(catalogCacheKey(surface));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CatalogSnapshot>;
+    if (!parsed.catalog || !Array.isArray(parsed.catalog.providers)) return null;
+    return {
+      catalog: parsed.catalog,
+      connections: Array.isArray(parsed.connections) ? parsed.connections : [],
+    };
+  } catch {
+    return null; // storage blocked or a damaged copy — wait for the route
+  }
+}
+
+function writeCatalogSnapshot(surface: AgentChatSurface, snapshot: CatalogSnapshot): void {
+  try {
+    window.localStorage.setItem(catalogCacheKey(surface), JSON.stringify(snapshot));
+  } catch {
+    /* storage blocked or full — the next start just waits for the route */
+  }
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Which `/api/jarvis-agent/status` row speaks for a catalog provider. */
+function connectionFor(
+  provider: AgentChatProvider,
+  rows: AgentConnectionRow[],
+): AgentConnectionRow | undefined {
+  return rows.find((r) => r.jarvis === provider.id);
+}
+
+/**
+ * The catalog joined with the Agents tab's credential truth — one row per
+ * provider with `connected` decided here and nowhere else. Pure, so a surface
+ * without a chat store (the society's creator) joins the same way and the
+ * two pickers can never disagree about what is usable.
+ */
+export function joinProviderOptions(
+  providers: AgentChatProvider[],
+  connections: AgentConnectionRow[],
+): ProviderOption[] {
+  return providers.map((p) => {
+    const row = connectionFor(p, connections);
+    // An API seat needs an API KEY, not just any credential. The Agents
+    // tab counts a subscription login as connected — right for a row a
+    // CLI runs — but the brain runner calls the provider's endpoint,
+    // where a Claude Code login buys nothing. `key_set` stands in when
+    // an older backend does not report the finer field. A chat-only API
+    // provider without an Agents status row reports key presence in its catalog.
+    // A coding CLI the Agents tab has no card for — OpenCode, Kimi,
+    // GLM Coding Plan, the DeepSeek harness — keeps its own login where
+    // this app has no verified reader; installed is all it can know,
+    // and the live sweep says the rest.
+    const credentialed = p.keyless
+      ? true
+      : isApiRunner(p.runner)
+        ? Boolean(row?.api_key_set ?? row?.key_set ?? p.api_key_set)
+        : row
+          ? Boolean(row.key_set)
+          : true;
+    const installed = p.cli_installed === null ? true : p.cli_installed;
+    return {
+      ...p,
+      connected: credentialed && installed,
+      active: Boolean(row?.is_active_brain),
+      // The IDE's mark for the CLI behind a CLI row; an API row keeps
+      // its provider-family logo.
+      agentMark: p.agent || undefined,
+    };
+  });
+}
+
+/** A session patch the composer's draft must mirror. */
+function draftFromSession(session: AgentChatSession): ComposerDraft {
+  const plan = session.permission_mode === "plan";
+  return {
+    provider: session.provider,
+    accountId: session.account_id ?? "",
+    model: session.model,
+    effort: session.effort,
+    speed: session.speed ?? "",
+    permissionMode: session.permission_mode,
+    // In Plan the session itself says where Build returns to. One that kept
+    // none (a fork, a thread from a grid pane) shows the ladder's ask rung
+    // (`planReturnMode`), never another thread's mode.
+    buildMode: plan ? session.build_mode || "" : session.permission_mode,
+    cwd: session.cwd,
+    computerId: session.computer_id ?? "",
+  };
+}
+
+/**
+ * One store per surface. Each holds its own socket, its own draft key and
+ * its own session list, so the front page's chat and an IDE's coding
+ * sessions can be open at the same time without sharing a connection.
+ */
+/** `value` when the ladder offers it (or the ladder is unknown), else `fallback`. */
+/**
+ * The mode an approved plan goes on in, as the permission pill shows it: the
+ * draft's pick when the ladder offers it, else the ladder's first mode that is
+ * not Plan (its ask rung). Never the provider's default: that is "Bypass
+ * permissions" on most coding ladders, and the server never falls back to it
+ * either (`permissions.mode_after_plan`).
+ */
+export function planReturnMode(draft: Pick<ComposerDraft, "buildMode">, provider: ProviderOption | null): string {
+  const offered = (provider?.permission_modes ?? []).map((mode) => mode.id).filter((id) => id !== "plan");
+  const picked = draft.buildMode && draft.buildMode !== "plan" ? draft.buildMode : "";
+  if (offered.length === 0) return picked;
+  return picked && offered.includes(picked) ? picked : offered[0];
+}
+
+function onLadder(value: string, ladder: readonly string[], fallback: string): string {
+  if (!value) return fallback;
+  if (ladder.length === 0) return value;
+  return ladder.includes(value) ? value : fallback;
+}
+
+/** How many left-behind transcripts the store keeps for an instant switch-back. */
+const TIMELINE_CACHE_LIMIT = 24;
+/** Threads read ahead at once (`preloadSession`). */
+const PRELOAD_LIMIT = 2;
+
+/**
+ * What `running` should say for the session this timeline belongs to.
+ *
+ * The row's flag is whatever the last snapshot or poll reported. A thread
+ * the person is watching already has the turn's end in its timeline
+ * ("Worked for"), and nothing used to rewrite that flag until the socket
+ * connected again, so the composer kept its stop control. A timeline with
+ * no turn yet still trusts the report: the thread may already be working
+ * and its events have not arrived.
+ *
+ * A message sent after the last turn (in the timeline, or `sentAtMs` from
+ * this window before its `user_message` arrived) is a turn about to start:
+ * for `TURN_START_GRACE_MS` it counts as running, so the stop control and the
+ * row's spinner do not drop in the seconds before `turn_started`, and a
+ * queued message is not flushed into that gap. After the grace the report
+ * decides again. A message that started a ritual is the exception: the
+ * ritual's card under it is its answer.
+ */
+/** The card a started ritual puts under the phrase that started it (not the one that follows later). */
+function isRitualStart(item: Timeline["items"][number]): boolean {
+  return item.type === "notice" && item.kind === "society_result"
+    && item.data.source === "ritual" && item.data.late !== true;
+}
+
+export function runningForTimeline(
+  timeline: Timeline,
+  reported: boolean | undefined,
+  opts: { now?: number; sentAtMs?: number } = {},
+): boolean | undefined {
+  if (runningTurn(timeline) !== null) return true;
+  let lastTurn: TurnItem | null = null;
+  let askedAt: number | null = null;
+  let newestMessageSeen = false;
+  let answeredByRitual = false;
+  for (let i = timeline.items.length - 1; i >= 0; i -= 1) {
+    const item = timeline.items[i];
+    if (item.type === "turn") {
+      lastTurn = item;
+      break;
+    }
+    // A ritual's phrase is answered by the card under it: no turn is on the way.
+    if (!newestMessageSeen && isRitualStart(item)) answeredByRitual = true;
+    if (item.type === "user" && !newestMessageSeen) {
+      newestMessageSeen = true;
+      if (!answeredByRitual) askedAt = item.tsMs;
+    }
+  }
+  const sent = opts.sentAtMs;
+  if (sent !== undefined && (lastTurn === null || lastTurn.startedMs <= sent)) askedAt = Math.max(askedAt ?? 0, sent);
+  if (askedAt !== null) {
+    const now = opts.now ?? Date.now();
+    return now - askedAt < TURN_START_GRACE_MS ? true : reported;
+  }
+  if (lastTurn) return false;
+  return reported;
+}
+
+function withRunning(session: AgentChatSession, timeline: Timeline, sentAtMs?: number): AgentChatSession {
+  const running = runningForTimeline(timeline, session.running, { sentAtMs });
+  return running === session.running ? session : { ...session, running };
+}
+
+/**
+ * What one store tells the other stores of its surface. The IDE's thread list
+ * reads the main thread store, while a side column runs its own store and
+ * socket; without this the list kept a finished side thread's spinner until
+ * its next poll.
+ */
+interface StorePeer {
+  surface: AgentChatSurface;
+  /** Another store saw this session's turn start or end. */
+  patchRunning: (sessionId: string, running: boolean) => void;
+  /** Another store's list read: a report on the session this store has open. */
+  noteRows: (rows: AgentChatSession[]) => void;
+  /** The window came back (focus, visible, online): resync the open session now. */
+  wake: () => void;
+  refresh: () => void;
+}
+
+const storePeers = new Set<StorePeer>();
+let wakeListening = false;
+
+function wakePeers(): void {
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+  for (const peer of [...storePeers]) peer.wake();
+}
+
+function joinPeers(peer: StorePeer): void {
+  storePeers.add(peer);
+  if (wakeListening || typeof window === "undefined") return;
+  wakeListening = true;
+  window.addEventListener("focus", wakePeers);
+  window.addEventListener("online", wakePeers);
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", wakePeers);
+}
+
+function tellPeers(from: StorePeer, act: (peer: StorePeer) => void): void {
+  for (const peer of [...storePeers]) {
+    if (peer !== from && peer.surface === from.surface) act(peer);
+  }
+}
+
+export function createAgentChatStore(
+  surface: AgentChatSurface,
+  draftNamespace = "",
+  /** `voice: false`: a view of a session that is not the chat on stage (a side thread). */
+  options: { voice?: boolean } = {},
+): UseBoundStore<StoreApi<AgentChatStore>> {
+  const DRAFT_KEY = draftKey(surface) + (draftNamespace ? `:${draftNamespace}` : "");
+
+  /**
+   * Tell the backend which Jarvis chat is on stage, so a voice call continues
+   * THIS chat — its turns land here and it starts with this chat's history.
+   * `null` = a blank page: the next call opens a new chat. Only the front
+   * page's chat has a voice; the other surfaces never bind.
+   */
+  const bindVoice = (sessionId: string | null, voiceSessionId: string | null = null) => {
+    if (surface !== "jarvis" || options.voice === false) return;
+    void bindVoiceChat(sessionId, voiceSessionId).catch((err: unknown) => {
+      // Not fatal: the composer's voice button binds again before a call.
+      console.info("Voice chat binding failed.", err);
+    });
+  };
+
+  let leadRequest = 0;
+  /** Open the lead's conversation; a blank page stays if the server has none yet. */
+  const openLead = () => {
+    const request = ++leadRequest;
+    // The id from the last start opens at once; the route confirms it.
+    const remembered = readLeadSessionId();
+    if (remembered) {
+      chatStore.getState().openSession(remembered);
+    } else {
+      bindVoice(null);
+      chatStore.setState({ opening: true });
+      void chatStore.getState().loadCatalog();
+    }
+    // A failure keeps the blank page; the first send then reaches the lead.
+    void fetchLeadSession()
+      .then((session) => {
+        const st = chatStore.getState();
+        const sessionId = session?.session_id;
+        if (sessionId) writeLeadSessionId(sessionId);
+        // A later page (an archived voice chat, another open) replaced this one.
+        if (request !== leadRequest) return;
+        const untouched = st.activeSessionId === null || (remembered !== null && st.activeSessionId === remembered);
+        if (!untouched) return;
+        if (sessionId && sessionId !== st.activeSessionId) st.openSession(sessionId);
+        else if (!sessionId && st.activeSessionId === null) chatStore.setState({ opening: false });
+      })
+      .catch(() => {
+        const st = chatStore.getState();
+        if (request === leadRequest && st.activeSessionId === null) chatStore.setState({ opening: false });
+      });
+  };
+
+  let catalogRequest = 0;
+  const patchQueues = new Map<string, Promise<void>>();
+  const patchRevisions = new Map<string, number>();
+  type SendLane = { tail: Promise<unknown>; pending: number; sessionId: string | null; draftTarget?: ComposerDraftTarget };
+  const sendLanes = new Map<string, SendLane>();
+  const emptySendLane = (): SendLane => ({ tail: Promise.resolve(), pending: 0, sessionId: null });
+  let newChatLane = emptySendLane();
+  /** Stop requests still in flight per session; a send waits for its session's. */
+  const stopping = new Map<string, Promise<void>>();
+  let selectionRevision = 0;
+  let selectionWrite: Promise<unknown> = Promise.resolve();
+  let socket: WebSocket | null = null;
+  let socketSession: string | null = null;
+  /** Cancels the reconnect waiting in the shared connect budget. */
+  let cancelReconnect: (() => void) | null = null;
+  /** Consecutive failed reconnects — the exponent under the jitter. */
+  let reconnectAttempt = 0;
+  /**
+   * Last-known transcript per session. Switching chats (or society agents)
+   * used to keep painting the previous session until the new socket's
+   * snapshot arrived; this cache is restored synchronously in `openSession`
+   * so the column never shows another conversation, and a return visit
+   * paints immediately while the socket refreshes.
+   */
+  const timelineCache = new Map<string, Timeline>();
+  /** Transcripts being read ahead of an open (`preloadSession`); null when the read failed. */
+  const preloads = new Map<string, Promise<Timeline | null>>();
+  /** When this window last sent into a session whose next turn has not started yet. */
+  const sentAt = new Map<string, number>();
+  /** Drops a socket that stopped delivering frames without closing. */
+  let frameWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /** The session and seq a poll-versus-timeline disagreement already resynced at. */
+  let mismatchResync: { sessionId: string; seq: number } | null = null;
+  /** A list read lost to back-to-back invalidations asks again once, shortly. */
+  let listRetry: ReturnType<typeof setTimeout> | null = null;
+  let lastWakeMs = 0;
+
+  function aligned(session: AgentChatSession, timeline: Timeline): AgentChatSession {
+    return withRunning(session, timeline, sentAt.get(session.session_id));
+  }
+
+  function clearFrameWatchdog(): void {
+    if (frameWatchdog !== null) clearTimeout(frameWatchdog);
+    frameWatchdog = null;
+  }
+
+  function rememberTimeline(sessionId: string, timeline: Timeline): void {
+    if (timeline.lastSeq <= 0 && timeline.items.length === 0) return;
+    timelineCache.delete(sessionId);
+    timelineCache.set(sessionId, timeline);
+    while (timelineCache.size > TIMELINE_CACHE_LIMIT) {
+      const oldest = timelineCache.keys().next().value;
+      if (oldest === undefined) break;
+      timelineCache.delete(oldest);
+    }
+  }
+
+  function closeSocket(): void {
+    clearFrameWatchdog();
+    cancelReconnect?.();
+    cancelReconnect = null;
+    const s = socket;
+    socket = null;
+    socketSession = null;
+    if (s) {
+      s.onclose = null;
+      s.onmessage = null;
+      s.onerror = null;
+      s.onopen = null;
+      try {
+        s.close();
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+
+  const chatStore = create<AgentChatStore>((set, get) => {
+    /**
+     * Drop the open session's socket and connect again from the last seq,
+     * right now: no backoff, since something says the stream fell behind
+     * (a silent socket, a poll that disagrees, the window coming back).
+     */
+    function resync(): void {
+      const st = get();
+      const sid = st.activeSessionId;
+      if (!sid || socketSession !== sid) return;
+      reconnectAttempt = 0;
+      connect(sid, st.timeline.lastSeq);
+    }
+
+    /**
+     * The list says the open session is not running while its timeline still
+     * holds a running turn: the socket may have stopped delivering (the
+     * backend dropped its subscriber, pings still flowing). Resync once at
+     * this seq; if the resync brought nothing new, the report is believed.
+     */
+    function runningMismatch(rows: AgentChatSession[]): "none" | "resync" | "trust" {
+      const st = get();
+      const sid = st.activeSessionId;
+      if (!sid || socketSession !== sid) return "none";
+      const row = rows.find((r) => r.session_id === sid);
+      if (!row || row.running !== false || runningTurn(st.timeline) === null) return "none";
+      const seq = st.timeline.lastSeq;
+      if (mismatchResync?.sessionId === sid && mismatchResync.seq === seq) return "trust";
+      mismatchResync = { sessionId: sid, seq };
+      return "resync";
+    }
+
+    function armFrameWatchdog(ws: WebSocket, sessionId: string): void {
+      clearFrameWatchdog();
+      frameWatchdog = setTimeout(() => {
+        frameWatchdog = null;
+        if (socket !== ws || get().activeSessionId !== sessionId) return;
+        console.info("Agent chat socket went silent; reconnecting.", { sessionId });
+        resync();
+      }, FRAME_IDLE_MS);
+    }
+
+    function dropOutgoing(id: string): void {
+      const outbox = get().outbox ?? [];
+      if (outbox.some((entry) => entry.id === id)) set({ outbox: outbox.filter((entry) => entry.id !== id) });
+    }
+
+    function connect(sessionId: string, afterSeq: number): void {
+      if (typeof WebSocket === "undefined") return;
+      closeSocket();
+      joinPeers(peer);
+      socketSession = sessionId;
+      set({ socketState: "connecting" });
+      const ws = new WebSocket(agentChatSocketUrl(sessionId, afterSeq));
+      socket = ws;
+      armFrameWatchdog(ws, sessionId);
+      ws.onopen = () => {
+        if (socket !== ws) return;
+        // A socket that opened is proof the backend is back: the next outage
+        // starts its backoff from the fast end again.
+        reconnectAttempt = 0;
+        armFrameWatchdog(ws, sessionId);
+        set({ socketState: "open" });
+      };
+      ws.onmessage = (msg) => {
+        if (socket !== ws) return;
+        // Every frame counts as life, pings included.
+        armFrameWatchdog(ws, sessionId);
+        let frame: { type?: string; session?: AgentChatSession; events?: AgentChatEvent[]; event?: AgentChatEvent };
+        try {
+          frame = JSON.parse(String(msg.data));
+        } catch {
+          return;
+        }
+        if (frame.type === "snapshot" && frame.session) {
+          const prev = get();
+          // A snapshot after a reconnect only carries events past `after`;
+          // fold them onto what is already there, else start fresh. The
+          // timeline on hand must be this session's and reach `after`, or
+          // the events in between would be missing: then read it all again.
+          const resumable = prev.activeSessionId === sessionId && prev.timeline.lastSeq >= afterSeq;
+          if (afterSeq > 0 && !resumable) {
+            connect(sessionId, 0);
+            return;
+          }
+          const base = afterSeq > 0 ? prev.timeline : EMPTY_TIMELINE;
+          const tl = reduceEvents(base, frame.events ?? []);
+          const session = aligned(frame.session, tl);
+          const sessions = prev.sessions.map((row) => row.session_id === session.session_id ? aligned(row, tl) : row);
+          set({
+            activeSession: session,
+            sessions: sessions.some((row, index) => row !== prev.sessions[index]) ? sessions : prev.sessions,
+            timeline: { ...tl, sessionPatch: null },
+            opening: false,
+            draft: draftFromSession(session),
+          });
+          if (surface !== "jarvis") writeDraft(DRAFT_KEY, get().draft);
+          if (typeof session.running === "boolean") announceRunning(session.session_id, session.running);
+          if (prev.activeSession?.account_id !== frame.session.account_id) void get().loadCatalog();
+          return;
+        }
+        if (frame.type === "event" && frame.event) get().ingest(frame.event);
+      };
+      ws.onclose = () => {
+        if (socket !== ws) return;
+        socket = null;
+        set({ socketState: "closed" });
+        // Reconnect while this session is still the open one; the backend
+        // replays what was missed from the last seq.
+        // Jittered, escalating and paid for out of the shared connect budget.
+        // It used to be a flat 1.5 s with no cap and no spread: every window
+        // holding this session retried in the same millisecond, forever, which
+        // is one of the loops that emptied the machine's socket pool when the
+        // backend went away for a while (BUG-215, AP-33).
+        reconnectAttempt += 1;
+        cancelReconnect = requestConnect(
+          () => {
+            cancelReconnect = null;
+            const st = get();
+            if (st.activeSessionId === sessionId && socketSession === sessionId) {
+              connect(sessionId, st.timeline.lastSeq);
+            }
+          },
+          jitteredDelay(reconnectAttempt - 1, RECONNECT_MS, RECONNECT_MAX_MS),
+        );
+      };
+      ws.onerror = () => {
+        /* onclose follows and schedules the reconnect */
+      };
+    }
+
+    /** Patch one row's running flag; the session open here follows its own timeline instead. */
+    function patchRowRunning(sessionId: string, running: boolean): void {
+      set((state) => {
+        if (state.activeSessionId === sessionId && socketSession === sessionId) return state;
+        let changed = false;
+        const sessions = state.sessions.map((row) => {
+          if (row.session_id !== sessionId || row.running === running) return row;
+          changed = true;
+          return { ...row, running };
+        });
+        return changed ? { sessions } : state;
+      });
+    }
+
+    function announceRunning(sessionId: string, running: boolean): void {
+      tellPeers(peer, (other) => other.patchRunning(sessionId, running));
+    }
+
+    const peer: StorePeer = {
+      surface,
+      patchRunning: patchRowRunning,
+      noteRows: (rows) => {
+        if (runningMismatch(rows) === "resync") resync();
+      },
+      wake: () => {
+        const st = get();
+        if (!st.activeSessionId || socketSession !== st.activeSessionId) return;
+        const now = Date.now();
+        // A socket that is not open reconnects at once, whatever the backoff
+        // said; an open one resyncs too (it may be silently behind), but a
+        // burst of focus and visibility events only does it once.
+        if (socket && st.socketState === "open" && now - lastWakeMs < WAKE_RESYNC_MIN_MS) return;
+        lastWakeMs = now;
+        resync();
+        void st.loadSessions();
+      },
+      refresh: () => {
+        void get().loadSessions();
+      },
+    };
+
+    const snapshot = readCatalogSnapshot(surface);
+    return {
+      surface,
+      catalog: snapshot?.catalog ?? null,
+      connections: snapshot?.connections ?? [],
+      catalogStale: snapshot !== null,
+      catalogError: null,
+      backendOutdated: false,
+      liveModels: {},
+      health: {},
+      sessions: [],
+      activeSessionId: null,
+      activeSession: null,
+      timeline: EMPTY_TIMELINE,
+      // The front page's chat opens the lead's conversation on first paint
+      // (AssistantChat): no greeting before that has had its chance.
+      opening: surface === "jarvis" && options.voice !== false,
+      socketState: "idle",
+      draft: readDraft(DRAFT_KEY),
+      busy: false,
+      outbox: [],
+      lastError: null,
+
+      loadCatalog: async () => {
+        const requestId = ++catalogRequest;
+        const revision = selectionRevision;
+        const sessionId = get().activeSessionId;
+        try {
+          if (surface === "jarvis" && !sessionId) await selectionWrite;
+          const [raw, connections] = await Promise.all([
+            fetchAgentChatCatalog(surface, { sessionId: sessionId ?? undefined, cwd: get().draft.cwd || undefined }),
+            fetchAgentConnections().catch(() => [] as AgentConnectionRow[]),
+          ]);
+          if (requestId !== catalogRequest || sessionId !== get().activeSessionId) return;
+          // A backend older than this bundle (the app not yet restarted after
+          // an update) may lack the newer arrays; an empty ladder is honest,
+          // a crash is not — and the composer tells the person to restart.
+          // `permission_modes` is the tell: every row of the current route
+          // carries the array (possibly empty); only the older route omits it.
+          const providersRaw = raw.providers ?? [];
+          const backendOutdated =
+            providersRaw.length > 0 && providersRaw.some((p) => !Array.isArray(p.permission_modes));
+          const catalog: AgentChatCatalog = {
+            ...raw,
+            providers: providersRaw.map((p) => ({
+              ...p,
+              curated_models: Array.isArray(p.curated_models) ? p.curated_models : [],
+              effort_levels: Array.isArray(p.effort_levels) ? p.effort_levels : [],
+              permission_modes: Array.isArray(p.permission_modes) ? p.permission_modes : [],
+              default_permission_mode: p.default_permission_mode ?? "",
+              default_effort: p.default_effort ?? "",
+              // No provider starts on "its default model": a row that names none
+              // opens on its strongest listed model, so the person sees what runs.
+              default_model: p.default_model || bestModelId(Array.isArray(p.curated_models) ? p.curated_models : []),
+            })),
+          };
+          set({ catalog, connections, catalogStale: false, catalogError: null, backendOutdated });
+          if (!backendOutdated) writeCatalogSnapshot(surface, { catalog, connections });
+          // Deliberately not awaited: the sweep reads CLI logins and can take
+          // a moment. It never sends a request to a provider — the dots show
+          // the outcome of each seat's last real call. The composer paints
+          // from the catalog now and the dots appear when the answer arrives.
+          // The society picker has no health dots, so it skips the sweep.
+          if (surface !== "society") void get().loadHealth();
+          // Settle the draft: an empty or unknown provider becomes the active
+          // sub-agent (else the first connected one); blank picks take the
+          // provider's defaults.
+          const st = get();
+          const options = st.providerOptions();
+          let draft = st.draft;
+          if (surface === "jarvis" && !sessionId && revision === selectionRevision && catalog.selection) {
+            draft = { ...draft, provider: catalog.selection.provider, model: catalog.selection.model, effort: catalog.selection.effort, accountId: catalog.selection.account_id ?? "" };
+          }
+          const known = options.find((o) => o.id === draft.provider);
+          if (!known) {
+            const pick = options.find((o) => o.active && o.connected) ?? options.find((o) => o.connected) ?? options[0];
+            if (pick) {
+              draft = {
+                provider: pick.id,
+                model: pick.default_model,
+                effort: pick.default_effort,
+                permissionMode: pick.default_permission_mode,
+                buildMode: pick.default_permission_mode,
+                cwd: draft.cwd || catalog.default_cwd,
+              };
+            }
+          } else {
+            draft = {
+              ...draft,
+              // A pick saved before models were chosen by name ("" = the
+              // provider's default) settles on the row's model. The brain's own
+              // selection is the person's and stays as saved.
+              model: draft.model || catalog.selection ? draft.model : known.default_model, // (model set) or (brain selection) keeps the pick
+              effort: onLadder(draft.effort, known.effort_levels, known.default_effort),
+              // A stored mode the row's ladder does not offer (a vendor word
+              // from before the unified ladder, a pick made on another
+              // surface) snaps to the row's default rather than showing a
+              // label the person cannot choose.
+              permissionMode: onLadder(
+                draft.permissionMode,
+                known.permission_modes.map((m) => m.id),
+                known.default_permission_mode,
+              ),
+              // No build mode stays none, and one the ladder does not offer
+              // snaps to its ask rung (`planReturnMode`), never to the
+              // provider's default.
+              buildMode: draft.buildMode ? planReturnMode(draft, known) : "",
+              cwd: draft.cwd || catalog.default_cwd,
+            };
+          }
+          if (draft !== st.draft) {
+            set({ draft });
+            if (surface !== "jarvis" || !sessionId) writeDraft(DRAFT_KEY, draft);
+          }
+          // Upgrade an existing local pick once, so voice can use it before
+          // the person sends another chat message.
+          if (surface === "jarvis" && !sessionId && !catalog.selection && known && revision === selectionRevision) {
+            const selection = { provider: draft.provider, model: draft.model, effort: draft.effort, ...(draft.accountId ? { account_id: draft.accountId } : {}) };
+            selectionWrite = selectionWrite.catch(() => undefined).then(() => saveChatSelection(selection));
+            try {
+              await selectionWrite;
+            } catch (err) {
+              set({ lastError: errorText(err) });
+            }
+          }
+          if (draft.provider) void get().loadModels(draft.provider);
+        } catch (err) {
+          if (requestId === catalogRequest && sessionId === get().activeSessionId) {
+            set({ catalogError: errorText(err), catalogStale: false });
+          }
+        }
+      },
+
+      loadSessions: async () => {
+        joinPeers(peer);
+        try {
+          const rows = await fetchAgentChatSessions(SESSION_LIST_LIMIT, surface);
+          if (listRetry !== null) {
+            clearTimeout(listRetry);
+            listRetry = null;
+          }
+          // The backend filters by surface; a row that names another surface
+          // anyway is dropped here too. A row with no surface at all comes
+          // from a backend older than the split — those are kept, so an
+          // update never makes a person's chats vanish until the restart.
+          const sessions = rows.filter((row) => row.surface === undefined || row.surface === surface);
+          const mismatch = runningMismatch(sessions);
+          set((state) => {
+            const sid = state.activeSessionId;
+            // The open thread's timeline is ahead of this poll: a finished
+            // turn must not be marked working again, and one still running
+            // must not drop its mark because the list has not caught up.
+            // Unless a resync at this seq already brought nothing new: then
+            // the turn's end was lost and the report is the truth.
+            const align = (row: AgentChatSession) => mismatch !== "trust"
+              ? aligned(row, state.timeline)
+              : row.running === false ? row : { ...row, running: false };
+            const next = sid
+              ? sessions.map((row) => row.session_id === sid ? align(row) : row)
+              : sessions;
+            const shared = reuseHistoryRows(state.sessions, next, (row) => row.session_id);
+            const active = state.activeSession && state.activeSession.session_id === sid
+              ? align(state.activeSession)
+              : state.activeSession;
+            if (shared === state.sessions && active === state.activeSession) return state;
+            return { sessions: shared, activeSession: active };
+          });
+          // A disagreement means the socket may be behind: read it again now
+          // rather than trusting a timeline that may never hear the end.
+          if (mismatch === "resync") resync();
+          tellPeers(peer, (other) => other.noteRows(sessions));
+        } catch (err) {
+          // Offline / headless — keep the list as-is. A read every response of
+          // which was invalidated (two turns ending at once, say) is asked
+          // again shortly, so the refresh that asked for it is not lost.
+          if (err instanceof Error && err.name === HISTORY_CHANGED && listRetry === null) {
+            listRetry = setTimeout(() => {
+              listRetry = null;
+              void get().loadSessions();
+            }, LIST_RETRY_MS);
+          }
+        }
+      },
+
+      loadModels: async (providerId) => {
+        const provider = get().catalog?.providers.find((p) => p.id === providerId);
+        if (!provider || provider.models_source !== "live") return;
+        if (get().liveModels[providerId]) return;
+        try {
+          const models = await fetchProviderModels(providerId);
+          const rows: CuratedModel[] = models.map((m) => ({ id: m.id, label: m.label ?? m.name ?? m.id }));
+          set((s) => ({ liveModels: { ...s.liveModels, [providerId]: rows } }));
+        } catch {
+          /* the curated list stays */
+        }
+      },
+
+      loadHealth: async (refresh = false) => {
+        try {
+          const rows = await fetchProviderHealth(surface, refresh);
+          const health: Record<string, ProviderHealth> = {};
+          for (const row of rows) health[row.provider] = row;
+          set({ health });
+        } catch {
+          // A backend too old to know the route, or a sweep that failed: the
+          // composer simply shows no live state, which is what it did before.
+          // Never an error banner — nothing the person did went wrong.
+        }
+      },
+
+      providerOptions: () => {
+        const { catalog, connections } = get();
+        if (!catalog) return [];
+        return joinProviderOptions(catalog.providers, connections);
+      },
+
+      providerById: (id) => get().providerOptions().find((p) => p.id === id) ?? null,
+
+      setDraft: async (patch) => {
+        const st = get();
+        const changesSelection = patch.provider !== undefined || patch.model !== undefined || patch.effort !== undefined;
+        if (changesSelection) ++selectionRevision;
+        let draft: ComposerDraft = { ...st.draft, ...patch };
+        // A provider change re-seats model / effort / permission on the new
+        // provider's defaults unless the caller set them explicitly.
+        if (patch.provider && patch.provider !== st.draft.provider) {
+          const p = st.providerById(patch.provider);
+          if (p) {
+            draft = {
+              ...draft,
+              model: patch.model ?? p.default_model,
+              accountId: patch.accountId ?? "",
+              effort: patch.effort ?? p.default_effort,
+              speed: patch.speed ?? "",
+              permissionMode: patch.permissionMode ?? p.default_permission_mode,
+              buildMode: patch.permissionMode ?? p.default_permission_mode,
+            };
+          }
+          void get().loadModels(patch.provider);
+        } else if (patch.permissionMode && patch.permissionMode !== "plan") {
+          draft = { ...draft, buildMode: patch.permissionMode };
+        }
+        set({ draft });
+        writeDraft(DRAFT_KEY, draft);
+        // With a session open, the pick applies to it right away.
+        const sid = st.activeSessionId;
+        if (surface === "jarvis" && changesSelection && !sid && draft.provider) {
+          const selection = { provider: draft.provider, model: draft.model, effort: draft.effort, ...(draft.accountId ? { account_id: draft.accountId } : {}) };
+          selectionWrite = selectionWrite.catch(() => undefined).then(() => saveChatSelection(selection));
+          try {
+            await selectionWrite;
+          } catch (err) {
+            set({ lastError: errorText(err) });
+          }
+        }
+        // The mode Build returns to (the pill while Plan is on) goes to the
+        // session too: its plan is approved into that mode, not the default.
+        const buildPick = (patch.buildMode !== undefined || patch.permissionMode === "plan")
+          && draft.permissionMode === "plan" && Boolean(draft.buildMode) && draft.buildMode !== "plan";
+        const localOnly = Object.keys(patch).every((key) => key === "buildMode") && !buildPick;
+        if (sid && !localOnly) {
+          const body: PatchSessionInput = {};
+          if (buildPick) body.build_mode = draft.buildMode;
+          if (patch.provider !== undefined) body.provider = draft.provider;
+          if (patch.provider !== undefined || patch.model !== undefined) body.model = draft.model;
+          if (patch.provider !== undefined || patch.effort !== undefined) body.effort = draft.effort;
+          if (patch.provider !== undefined || patch.speed !== undefined) body.speed = draft.speed ?? "";
+          if (patch.provider !== undefined || patch.permissionMode !== undefined) {
+            body.permission_mode = draft.permissionMode;
+          }
+          if (patch.cwd !== undefined) body.cwd = draft.cwd;
+          if (patch.computerId !== undefined) body.computer_id = patch.computerId;
+          const revision = (patchRevisions.get(sid) ?? 0) + 1;
+          patchRevisions.set(sid, revision);
+          const previous = surface === "jarvis"
+            ? selectionWrite.catch(() => undefined)
+            : patchQueues.get(sid) ?? Promise.resolve();
+          const pending = previous.then(() => patchAgentChatSession(sid, body));
+          if (surface === "jarvis") selectionWrite = pending;
+          patchQueues.set(sid, pending.then(() => undefined, () => undefined));
+          try {
+            const session = await pending;
+            let reconciledDraft: ComposerDraft | null = null;
+            set((s) => {
+              const latest = patchRevisions.get(sid) === revision;
+              const active = s.activeSessionId === sid && latest;
+              if (active) reconciledDraft = draftFromSession(session);
+              return {
+                activeSession: active ? session : s.activeSession,
+                draft: reconciledDraft ?? s.draft,
+                sessions: latest
+                  ? s.sessions.map((x) => (x.session_id === sid ? { ...x, ...session } : x))
+                  : s.sessions,
+              };
+            });
+            if (reconciledDraft) writeDraft(DRAFT_KEY, reconciledDraft);
+          } catch (err) {
+            if (get().activeSessionId === sid && patchRevisions.get(sid) === revision) {
+              set({ lastError: errorText(err) });
+            }
+          } finally {
+            if (patchRevisions.get(sid) === revision) {
+              patchQueues.delete(sid);
+              patchRevisions.delete(sid);
+            }
+          }
+        }
+      },
+
+      setPlan: async (on) => {
+        const st = get();
+        if (on) {
+          await st.setDraft({ permissionMode: "plan" });
+        } else {
+          // The mode the pill shows. One the ladder no longer offers (an old
+          // thread's acceptEdits) would be refused by the session route.
+          const back = planReturnMode(st.draft, st.providerById(st.draft.provider));
+          await st.setDraft({ permissionMode: back });
+        }
+      },
+
+      newChat: (opts) => {
+        // A lead open still waiting on its route must not replace this page.
+        ++leadRequest;
+        // Keep the transcript on hand: on the front page "new chat" reopens
+        // this same conversation (the Dodaios tab does it on every visit),
+        // and it then paints at once instead of reading it all again. Other
+        // surfaces really leave for a blank page.
+        const left = get();
+        if (surface === "jarvis" && left.activeSessionId) rememberTimeline(left.activeSessionId, left.timeline);
+        closeSocket();
+        newChatLane = emptySendLane();
+        resetBlankComposerDraftTarget(chatStore);
+        discardHeldFiles(chatStore, "");
+        ++catalogRequest;
+        set({
+          ...(surface === "jarvis" ? { draft: readDraft(DRAFT_KEY) } : {}),
+          activeSessionId: null,
+          activeSession: null,
+          busy: false,
+          timeline: EMPTY_TIMELINE,
+          opening: false,
+          socketState: "idle",
+          lastError: null,
+          // The chat left behind keeps the picks painted while this one's
+          // fresh read runs; blanking the catalog showed "Provider" for
+          // seconds on every new chat.
+          catalogStale: get().catalog !== null,
+        });
+        if (surface === "jarvis" && !opts?.voiceSessionId) {
+          // Dodaios keeps ONE endless conversation: every door that used to
+          // open a blank chat opens it instead (agent_chat/lead.py).
+          openLead();
+          return;
+        }
+        bindVoice(null, opts?.voiceSessionId ?? null);
+        void get().loadCatalog();
+      },
+
+      openSession: (sessionId) => {
+        if (get().activeSessionId === sessionId && socket) return;
+        const prev = get();
+        if (prev.activeSessionId && prev.activeSessionId !== sessionId) {
+          rememberTimeline(prev.activeSessionId, prev.timeline);
+        }
+        // The transcript this window already holds for the session: the one
+        // left behind on a switch, or the one still on screen when the same
+        // session opens again after its socket was dropped.
+        const known = timelineCache.get(sessionId)
+          ?? (prev.activeSessionId === sessionId ? prev.timeline : null);
+        const timeline = known ?? EMPTY_TIMELINE;
+        const row = prev.sessions.find((s) => s.session_id === sessionId)
+          ?? (prev.activeSession?.session_id === sessionId ? prev.activeSession : null);
+        set({
+          activeSessionId: sessionId,
+          // The list row may be from before the cached turn ended (or began).
+          activeSession: row ? aligned(row, timeline) : null,
+          timeline,
+          opening: known === null,
+          busy: (sendLanes.get(sessionId)?.pending ?? 0) > 0,
+          lastError: null,
+        });
+        bindVoice(sessionId);
+        void get().loadCatalog();
+        // Only what happened since the cached transcript; the snapshot folds
+        // it on, and reads everything when the cache cannot be resumed.
+        connect(sessionId, timeline.lastSeq);
+        const loading = known ? undefined : preloads.get(sessionId);
+        if (!loading) return;
+        // The thread is already being read over HTTP, which answers well
+        // before the socket's full first frame for a long one. Whichever
+        // lands first shows: a read that wins streams again from its end.
+        const socketAtOpen = socket;
+        void loading.then((read) => {
+          const st = get();
+          if (!read || st.activeSessionId !== sessionId || socket !== socketAtOpen) return;
+          if (st.timeline.lastSeq > 0 || st.timeline.items.length > 0) return; // the snapshot was first
+          set({ timeline: read, opening: false, activeSession: st.activeSession ? aligned(st.activeSession, read) : null });
+          connect(sessionId, read.lastSeq);
+        });
+      },
+
+      preloadSession: (sessionId) => {
+        if (get().activeSessionId === sessionId || timelineCache.has(sessionId) || preloads.has(sessionId)) return;
+        // A sweep down the list reads one or two threads, not every one it crosses.
+        if (preloads.size >= PRELOAD_LIMIT) return;
+        const loading = fetchAgentChatSession(sessionId)
+          .then(({ events }) => reduceEvents(EMPTY_TIMELINE, events))
+          .catch(() => null);
+        preloads.set(sessionId, loading);
+        void loading.then((read) => {
+          preloads.delete(sessionId);
+          // Opened meanwhile: the open takes it from here.
+          if (read && get().activeSessionId !== sessionId) rememberTimeline(sessionId, read);
+        });
+      },
+
+      removeSession: async (sessionId) => {
+        try {
+          await deleteAgentChatSession(sessionId);
+        } catch (err) {
+          set({ lastError: errorText(err) });
+        }
+        timelineCache.delete(sessionId);
+        patchQueues.delete(sessionId);
+        patchRevisions.delete(sessionId);
+        if (get().activeSessionId === sessionId) get().newChat();
+        set((s) => ({ sessions: s.sessions.filter((x) => x.session_id !== sessionId) }));
+        void get().loadSessions();
+      },
+
+      send: async (text, attachments = [], toolChoices = [], onSessionCreated, delivery) => {
+        const content = text.trim();
+        // A message may be files alone — dropping a screenshot and pressing
+        // Enter is a complete gesture — but never nothing at all.
+        if (!content && attachments.length === 0) return "failed";
+        const st = get();
+        const lane = st.activeSessionId
+          ? sendLanes.get(st.activeSessionId) ?? { ...emptySendLane(), sessionId: st.activeSessionId }
+          : newChatLane;
+        lane.draftTarget ??= captureComposerDraftTarget(chatStore, st.activeSessionId);
+        if (lane.sessionId) sendLanes.set(lane.sessionId, lane);
+        const isVisible = () => lane.sessionId
+          ? get().activeSessionId === lane.sessionId
+          : get().activeSessionId === null && newChatLane === lane;
+        const previous = lane.tail;
+        lane.pending += 1;
+        // The message shows in the chat now, not when the backend has
+        // prepared its turn and the socket brought it back a second later.
+        const outgoing = isVisible() ? outboxEntry(lane.sessionId, content, attachments, Date.now()) : null;
+        set({ busy: true, lastError: null, ...(outgoing ? { outbox: [...(get().outbox ?? []), outgoing] } : {}) });
+        // Serialize transport admission, not agent execution. A second send
+        // shares an unfinished session creation and reaches the server in order.
+        const submission = previous.catch(() => undefined).then(async () => {
+        try {
+          await selectionWrite;
+          if (!lane.sessionId) {
+            const d = st.draft;
+            const session = await createAgentChatSession({
+              provider: d.provider,
+              ...(d.accountId ? { account_id: d.accountId } : {}),
+              model: d.model,
+              effort: d.effort,
+              ...(d.speed ? { speed: d.speed } : {}),
+              cwd: d.cwd || null,
+              permission_mode: d.permissionMode,
+              // A thread that starts in Plan: the pill's mode is where Build returns to.
+              ...(d.permissionMode === "plan" && d.buildMode && d.buildMode !== "plan" ? { build_mode: d.buildMode } : {}),
+              ...(d.computerId ? { computer_id: d.computerId } : {}),
+              surface,
+            });
+            const visible = isVisible();
+            if (bindComposerDraftTarget(chatStore, lane.draftTarget!, session.session_id)) {
+              moveHeldFiles(chatStore, "", session.session_id);
+            }
+            lane.sessionId = session.session_id;
+            sendLanes.set(session.session_id, lane);
+            if (outgoing) {
+              outgoing.sessionId = session.session_id;
+              set({ outbox: (get().outbox ?? []).map((entry) => entry.id === outgoing.id ? { ...outgoing } : entry) });
+            }
+            set({ sessions: [session, ...get().sessions.filter((s) => s.session_id !== session.session_id)] });
+            onSessionCreated?.(session);
+            if (visible) {
+              set({ activeSessionId: session.session_id, activeSession: session, timeline: EMPTY_TIMELINE, opening: false });
+              bindVoice(session.session_id);
+              connect(session.session_id, 0);
+            }
+          }
+          const sid = lane.sessionId;
+          // A turn stopped on screen may still be unwinding in the backend;
+          // a message sent right after Stop waits for that instead of
+          // bouncing off the busy session.
+          await stopping.get(sid);
+          const sent = await sendAgentChatMessage(sid, content, attachments, toolChoices, delivery);
+          // A message steered into the running turn, answered beside it or
+          // waiting in a queue is drawn there, never as a message of its own.
+          if (outgoing && (sent.ritual || sent.steered || sent.queued || sent.side_thread || sent.aside)) dropOutgoing(outgoing.id);
+          else if (outgoing) setTimeout(() => dropOutgoing(outgoing.id), OUTBOX_GIVE_UP_MS);
+          if (sent.ritual || sent.aside) {
+            // The message was a ritual's phrase or a side question (/btw): its
+            // card is the answer and no turn is on the way, so nothing here
+            // pretends one is.
+            if (surface === "jarvis") writeDraft(DRAFT_KEY, st.draft);
+            return isVisible() ? "sent" as const : "stale" as const;
+          }
+          // The message is in: its turn is on the way even before the socket
+          // says so, and the stop control and the row's spinner show it.
+          sentAt.set(sid, Date.now());
+          if (get().activeSessionId === sid) {
+            set((state) => {
+              const active = state.activeSession ? aligned(state.activeSession, state.timeline) : null;
+              const sessions = state.sessions.map((row) => row.session_id === sid ? aligned(row, state.timeline) : row);
+              return {
+                activeSession: active,
+                ...(sessions.some((row, index) => row !== state.sessions[index]) ? { sessions } : {}),
+              };
+            });
+          }
+          announceRunning(sid, true);
+          if (surface === "jarvis") writeDraft(DRAFT_KEY, st.draft);
+          if (get().activeSessionId === sid) void get().loadSessions();
+          return isVisible() ? "sent" as const : "stale" as const;
+        } catch (err) {
+          // The composer puts the words back in the box; the chat does not keep a copy.
+          if (outgoing) dropOutgoing(outgoing.id);
+          if (isVisible()) set({ lastError: errorText(err) });
+          return "failed" as const;
+        } finally {
+          // A switch away from this session already cleared `busy`; do not
+          // unlock (or error) the chat that is on screen now.
+          lane.pending -= 1;
+          if (isVisible()) set({ busy: lane.pending > 0 });
+          if (lane.pending === 0 && lane.sessionId && sendLanes.get(lane.sessionId) === lane) {
+            sendLanes.delete(lane.sessionId);
+          }
+        }
+        });
+        lane.tail = submission;
+        return submission;
+      },
+
+      cancel: async (via) => {
+        const sid = get().activeSessionId;
+        if (!sid) return;
+        // The stop shows at once: the backend may need seconds to confirm (an
+        // ACP runtime gets a grace period before it is killed), and the person
+        // pressed Stop now. The real `turn_finished` replaces this local end.
+        const turn = runningTurn(get().timeline);
+        if (turn) get().ingest(localStopEvent(turn.id, Date.now()));
+        const request = cancelAgentChatTurn(sid, via).catch((err: unknown) => {
+          if (get().activeSessionId !== sid) return;
+          set({ lastError: errorText(err) });
+          // The stop did not reach the backend: read the thread again so the
+          // turn shows as working again if it still is.
+          if (turn) connect(sid, 0);
+        });
+        stopping.set(sid, request);
+        try {
+          await request;
+        } finally {
+          if (stopping.get(sid) === request) stopping.delete(sid);
+        }
+      },
+
+      decide: async (approvalId, decision, rule, feedback, edits) => {
+        const sid = get().activeSessionId;
+        if (!sid) return;
+        let outcome: string = decision;
+        // The person has answered: "needs your OK" leaves the live line and
+        // the roster now, not when the backend's confirmation arrives.
+        set({ timeline: markApprovalAnswering(get().timeline, approvalId, true) });
+        try {
+          if (rule) await resolveAgentChatApproval(sid, approvalId, decision, rule, undefined, edits);
+          else if (edits && Object.keys(edits).length) await resolveAgentChatApproval(sid, approvalId, decision, undefined, undefined, edits);
+          else if (feedback?.trim()) await resolveAgentChatApproval(sid, approvalId, decision, undefined, feedback);
+          else await resolveAgentChatApproval(sid, approvalId, decision);
+          markAnswered(approvalId);
+        } catch (err) {
+          // 410: the card outlived what it asked for (an app restart) and is
+          // closed now; 404: the backend never knew it. Either way nothing
+          // waits on it, and the next card the agent opened takes its place.
+          const gone = err instanceof AgentChatApiError && (err.status === 404 || err.status === 410);
+          if (!gone) {
+            if (get().activeSessionId === sid) set({ timeline: markApprovalAnswering(get().timeline, approvalId, false) });
+            throw err;
+          }
+          outcome = "expired";
+        }
+        if (get().activeSessionId === sid) {
+          const scope = outcome === "allow_always" ? rule?.scope : undefined;
+          set({ timeline: settleApproval(get().timeline, approvalId, outcome, "", scope) });
+        }
+      },
+
+      saveApprovalRule: async (approvalId, rule) => {
+        const sid = get().activeSessionId;
+        if (!sid) throw new Error("no open chat");
+        const saved = await saveAgentChatApprovalRule(sid, approvalId, rule);
+        if (get().activeSessionId !== sid) return;
+        // The socket's notice says the same; the card must not wait on it.
+        set({ timeline: noteApprovalRule(get().timeline, approvalId, {
+          kind: rule.kind, scope: rule.scope, pattern: saved.pattern,
+          app: saved.app ?? "", verb: saved.verb ?? "", stillAsks: saved.still_asks === true,
+        }) });
+      },
+
+      answerQuestion: async (questionId, index, answer) => {
+        const sid = get().activeSessionId;
+        if (!sid) throw new Error("no open chat");
+        await answerAgentChatQuestion(sid, questionId, index, answer);
+      },
+
+      skipQuestion: async (questionId, index) => {
+        const sid = get().activeSessionId;
+        if (!sid) throw new Error("no open chat");
+        await skipAgentChatQuestion(sid, questionId, index);
+      },
+
+      submitQuestion: async (questionId, answers) => {
+        const sid = get().activeSessionId;
+        if (!sid) throw new Error("no open chat");
+        try {
+          await submitAgentChatQuestion(sid, questionId, answers);
+        } catch (err) {
+          // 404: the card closed on the server meanwhile (its window ran out,
+          // or the turn ended). Its own closing event says what was chosen.
+          if (err instanceof AgentChatApiError && err.status === 404) return;
+          throw err;
+        }
+      },
+
+      touchQuestion: async (questionId) => {
+        const sid = get().activeSessionId;
+        if (!sid) return;
+        try {
+          await touchAgentChatQuestion(sid, questionId);
+        } catch {
+          /* a lost touch only means the card keeps its first deadline */
+        }
+      },
+
+      answerByMessage: async (text) => {
+        const sid = get().activeSessionId;
+        if (!sid || !text.trim() || !openQuestionOf(get().timeline)) return false;
+        try {
+          const outcome = await replyToAgentChatQuestion(sid, text);
+          return outcome.consumed;
+        } catch {
+          // The route failed: the message still goes out as an ordinary one.
+          return false;
+        }
+      },
+
+      resolvePlan: async (turnId, decision, buildMode) => {
+        const sid = get().activeSessionId;
+        if (!sid) throw new Error("no open chat");
+        await resolveAgentChatPlan(sid, turnId, decision, buildMode);
+      },
+
+      ingest: (event) => {
+        const st = get();
+        const tl = reduceEvent(st.timeline, event);
+        const patch: Partial<AgentChatStore> = {};
+        if (tl !== st.timeline) patch.timeline = tl;
+        let session = st.activeSession;
+        if (patch.timeline && tl.sessionPatch && session) {
+          session = { ...session, ...tl.sessionPatch } as AgentChatSession;
+          patch.activeSession = session;
+          patch.draft = draftFromSession(session);
+          if (surface !== "jarvis") writeDraft(DRAFT_KEY, patch.draft);
+        }
+        const sid = st.activeSessionId;
+        if (sid && event.kind === "turn_started") sentAt.delete(sid);
+        // The stop control reads this flag. The turn's own end is in the
+        // timeline now; leave the flag on and the arrow never comes back.
+        // The row is patched here and now too, not left to the list read
+        // below, which can still meet the backend before the turn left it.
+        if (sid) {
+          if (session && session.session_id === sid) {
+            const next = aligned(session, tl);
+            if (next !== session) patch.activeSession = next;
+          }
+          const sessions = st.sessions.map((row) => row.session_id === sid ? aligned(row, tl) : row);
+          if (sessions.some((row, index) => row !== st.sessions[index])) patch.sessions = sessions;
+        }
+        if (Object.keys(patch).length === 0) return;
+        set(patch);
+        if (sid && (event.kind === "turn_started" || event.kind === "turn_finished")) {
+          const running = runningForTimeline(tl, true, { sentAtMs: sentAt.get(sid) }) === true;
+          announceRunning(sid, running);
+        }
+        if (event.kind === "turn_finished" || event.kind === "user_message") {
+          invalidateAgentChatSessions();
+          void st.loadSessions();
+          // Every other list of this surface (the thread list, when this is a
+          // side column's store) reads again too; one shared request serves them.
+          if (event.kind === "turn_finished") tellPeers(peer, (other) => other.refresh());
+        }
+      },
+
+      disconnect: () => {
+        closeSocket();
+        // A side column's store goes away with its column; it rejoins on its
+        // next connect or list read if it is used again.
+        storePeers.delete(peer);
+        if (listRetry !== null) clearTimeout(listRetry);
+        listRetry = null;
+        set({ socketState: "idle" });
+      },
+    };
+  });
+  // A sent message leaves the outbox when its own message is in the timeline.
+  chatStore.subscribe((state, before) => {
+    const sid = state.activeSessionId;
+    if (state.timeline === before.timeline || !sid || !state.outbox?.length) return;
+    const done = recordedEntries(state.outbox.filter((entry) => entry.sessionId === sid), state.timeline.items);
+    if (done.size) chatStore.setState({ outbox: state.outbox.filter((entry) => !done.has(entry.id)) });
+  });
+  return chatStore;
+}
+
+/** The front page's store — every existing call site reads this one. */
+export const useAgentChatStore = createAgentChatStore("jarvis");
+
+/**
+ * The Agentic IDE's chat store — surface `agent`: coding-agent sessions in a
+ * workspace's folder, with their own sessions, draft and socket. The shared
+ * chat components reach it through `AgentChatStoreProvider`
+ * (components/agentchat/AgentChatStoreContext); nothing on the front page
+ * ever reads it, so the IDE's last chat can never appear there.
+ */
+export const useAgentSessionStore = createAgentChatStore("agent");
+
+/** The hook a `createAgentChatStore` call returns — what the context carries. */
+export type AgentChatStoreHook = typeof useAgentChatStore;

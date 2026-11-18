@@ -1,0 +1,1361 @@
+"""SQLite persistence for agent-chat sessions.
+
+Mirrors ``dodaios/state/chat_store.py``: one ``sqlite3`` connection in WAL
+mode behind a ``threading.Lock`` (route handlers and the runner share the
+asyncio loop; the lock keeps a future worker-thread caller safe). Three tables:
+
+``agent_chat_sessions``
+    One row per session — title, the provider / model / effort the composer
+    last used in it, the working directory, the permission mode, the SURFACE
+    it belongs to (see :data:`SURFACES`) and, for the CLI runners, the
+    vendor's own session id so a later turn can resume it.
+
+``agent_chat_events``
+    The append-only event log (see :mod:`dodaios.agent_chat.events`), ordered
+    by ``seq`` per session. Transient kinds are never written.
+
+``agent_chat_permission_overrides``
+    A user's explicit Society chat stance, kept apart from the roster ceiling.
+
+``agent_chat_thread_owners``
+    Which chat started a coding thread on another chat's behalf (a Jarvis
+    agent handing work to a coding CLI, ``dodaios/society/coding_threads.py``),
+    plus that coordinator's own bookkeeping as one JSON object.
+
+Ordering by ``seq`` (our own counter), not by wall clock: Windows ``time()``
+resolution can tie two fast appends.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+import threading
+import uuid
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Final
+
+from dodaios.agent_chat.events import is_transient, now_ms, shown_text
+from dodaios.agent_chat.permissions import PLAN_MODES as _PLAN_MODES
+
+log = logging.getLogger(__name__)
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS agent_chat_sessions (
+    session_id       TEXT PRIMARY KEY,
+    title            TEXT NOT NULL DEFAULT '',
+    provider         TEXT NOT NULL DEFAULT '',
+    model            TEXT NOT NULL DEFAULT '',
+    effort           TEXT NOT NULL DEFAULT '',
+    cwd              TEXT NOT NULL DEFAULT '',
+    permission_mode  TEXT NOT NULL DEFAULT 'bypass',
+    vendor_session   TEXT,
+    created_ms       INTEGER NOT NULL,
+    updated_ms       INTEGER NOT NULL,
+    message_count    INTEGER NOT NULL DEFAULT 0,
+    preview          TEXT NOT NULL DEFAULT '',
+    surface          TEXT NOT NULL DEFAULT 'agent',
+    account_id       TEXT NOT NULL DEFAULT '',
+    runtime          TEXT NOT NULL DEFAULT '',
+    computer_id      TEXT NOT NULL DEFAULT '',
+    last_message_ms  INTEGER NOT NULL DEFAULT 0,
+    speed            TEXT NOT NULL DEFAULT '',
+    started_by       TEXT NOT NULL DEFAULT '',
+    build_mode       TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS agent_chat_events (
+    session_id  TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    ts_ms       INTEGER NOT NULL,
+    kind        TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
+CREATE TABLE IF NOT EXISTS agent_chat_permission_overrides (
+    session_id TEXT PRIMARY KEY,
+    mode TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS agent_chat_thread_owners (
+    session_id     TEXT PRIMARY KEY,
+    owner_session  TEXT NOT NULL,
+    owner_agent    TEXT NOT NULL DEFAULT '',
+    owner_name     TEXT NOT NULL DEFAULT '',
+    created_ms     INTEGER NOT NULL,
+    state          TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_agent_chat_sessions_updated
+    ON agent_chat_sessions(updated_ms DESC);
+CREATE TABLE IF NOT EXISTS jarvis_chat_selection (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    provider    TEXT NOT NULL,
+    model       TEXT NOT NULL DEFAULT '',
+    effort      TEXT NOT NULL DEFAULT '',
+    account_id  TEXT NOT NULL DEFAULT ''
+);
+-- Restart durability: what the person decided or is waiting for must outlive
+-- the process. "Always allow" choices and narrow rules, per chat and per kind
+-- (``bag``); the entry is the tool name or a JSON rule.
+CREATE TABLE IF NOT EXISTS agent_chat_approval_memory (
+    session_id  TEXT NOT NULL,
+    bag         TEXT NOT NULL,
+    entry       TEXT NOT NULL,
+    PRIMARY KEY (session_id, bag, entry)
+);
+-- Messages waiting behind a running turn (send_queue.py): the full payload, so a
+-- restart re-enqueues them. The ``message_queued`` notice stays the visible
+-- receipt; this row is removed when its ``message_dequeued`` notice is posted.
+CREATE TABLE IF NOT EXISTS agent_chat_queued_messages (
+    queue_id    TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,
+    payload     TEXT NOT NULL,
+    queued_ms   INTEGER NOT NULL
+);
+-- Voice turns already filed into a chat: the unique id is the dedup, so a
+-- turn delivered twice across a restart or reconnect is never shown twice.
+CREATE TABLE IF NOT EXISTS agent_chat_voice_turns (
+    voice_turn_id  TEXT PRIMARY KEY,
+    session_id     TEXT NOT NULL,
+    ts_ms          INTEGER NOT NULL
+);
+-- Requests whose delegates still work (parked_work.py): rebuilt on boot so
+-- "I will tell you when the agents are done" survives a restart.
+CREATE TABLE IF NOT EXISTS agent_chat_parked_work (
+    session_id  TEXT NOT NULL,
+    turn_id     TEXT NOT NULL,
+    request     TEXT NOT NULL DEFAULT '',
+    original    TEXT NOT NULL DEFAULT '',
+    work        TEXT NOT NULL DEFAULT '[]',
+    delivered   TEXT NOT NULL DEFAULT '[]',
+    results     TEXT NOT NULL DEFAULT '[]',
+    reported    INTEGER NOT NULL DEFAULT 0,
+    created_ms  INTEGER NOT NULL,
+    PRIMARY KEY (session_id, turn_id)
+);
+-- The lead's one endless conversation: the chat session that every
+-- typed turn, voice call, agent report and notice of the lead lands in.
+CREATE TABLE IF NOT EXISTS jarvis_lead_session (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    session_id  TEXT NOT NULL
+);
+-- Side threads (side_threads.py): a message sent while the conversation's turn
+-- was still working is answered in a session of its own. The row names the
+-- conversation it belongs to and keeps it out of every chat list; ``status``
+-- is ``running`` until its ``side_thread_finished`` notice is posted.
+CREATE TABLE IF NOT EXISTS agent_chat_side_threads (
+    session_id      TEXT PRIMARY KEY,
+    parent_session  TEXT NOT NULL,
+    request         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'running',
+    created_ms      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_chat_side_threads_parent
+    ON agent_chat_side_threads(parent_session, status);
+"""
+
+_VOICE_DEDUP_KEEP_MS: Final[int] = 30 * 24 * 3600 * 1000
+#: SQL: a session that is a chat of its own, not a side thread of another one.
+_NOT_A_SIDE_THREAD: Final[str] = (
+    "session_id NOT IN (SELECT session_id FROM agent_chat_side_threads)"
+)
+_TITLE_MAX_CHARS = 80
+_PREVIEW_MAX_CHARS = 120
+#: How much of a matching message the thread search shows.
+_SNIPPET_CHARS: Final = 140
+# The permission ladders live in dodaios/agent_chat/permissions.py (per
+# runner); the store keeps whatever id the route validated.
+
+#: Which chat a session belongs to. ``"jarvis"`` is the front page's chat —
+#: Jarvis with a keyboard: the same assistant the microphone talks to, on the
+#: model the composer picked for this chat. ``"agent"`` is a plain coding-agent
+#: session (a vendor CLI or the API tool loop in a folder), which is what the
+#: Agentic IDE's chat mode runs. Rows written before the column existed were
+#: coding sessions, so the column's default is ``"agent"``. The TypeScript twin
+#: is ``AgentChatSurface`` in ``src/lib/agentChatApi.ts`` and the Pydantic one
+#: ``CreateSessionBody.surface`` in ``dodaios/ui/web/agent_chat_routes.py`` —
+#: ``tests/unit/agent_chat/test_agent_chat_surface_parity.py`` keeps the three
+#: in step (AP-4). ``"local-models"`` is the Local models section's setup
+#: assistant: one session per install, its own hands, never in either chat's
+#: session list. ``"society"`` is an agent's one canonical chat (session id
+#: ``society:<agent_id>``, see ``dodaios/society/chat_binding.py``): Jarvis'
+#: brain runner with the agent's own hands, listed only inside the society.
+#: ``"side"`` is the Agentic IDE's side chat: a plain conversation with no
+#: tools on any seat, listed only in the IDE's side panel.
+SURFACES: Final[tuple[str, ...]] = ("jarvis", "agent", "local-models", "society", "side")
+DEFAULT_SURFACE: Final[str] = "agent"
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSelection:
+    """The last explicit Jarvis chat pick, independent of viewed history or voice."""
+
+    provider: str
+    model: str = ""
+    effort: str = ""
+    account_id: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class AgentChatSession:
+    session_id: str
+    title: str
+    provider: str
+    model: str
+    effort: str
+    cwd: str
+    permission_mode: str
+    vendor_session: str | None
+    created_ms: int
+    updated_ms: int
+    message_count: int
+    preview: str
+    surface: str = DEFAULT_SURFACE
+    #: The subscription seat (``dodaios.agent_accounts`` id) a CLI turn runs on;
+    #: empty = the platform's active account.
+    account_id: str = ""
+    #: A society agent's external runtime (``hermes`` / ``openclaw``,
+    #: ``docs/agent-runtimes.md``); empty = the provider picks the runner.
+    runtime: str = ""
+    #: A coding thread's placement: the connected computer its turns run on
+    #: (``dodaios.computers``); empty = this computer.
+    computer_id: str = ""
+    #: When a message last reached the thread (the person's, or another
+    #: agent's); the creation time until the first one. The sidebar orders by
+    #: it, so a thread's tool calls and answers never move it in the list.
+    last_message_ms: int = 0
+    #: The coding CLI's speed tier (``dodaios.agent_chat.speed``): Claude
+    #: Code's fast mode, a Codex service tier. Empty = the standard speed.
+    speed: str = ""
+    #: The agent that opened the thread (``LEAD_AGENT_ID`` for Dodaios itself,
+    #: a society agent's id): the author of its first message. Empty = the
+    #: person started it.
+    started_by: str = ""
+    #: The access mode a session in Plan goes back to once its plan is
+    #: approved (``permissions.mode_after_plan``): the mode its permission
+    #: pill names. Set only while the session is in Plan; empty there means
+    #: the ladder's default.
+    build_mode: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _title_from(text: str) -> str:
+    line = " ".join((text or "").split())
+    if len(line) > _TITLE_MAX_CHARS:
+        return line[: _TITLE_MAX_CHARS - 1].rstrip() + "…"
+    return line
+
+
+def _fold(value: Any) -> str:
+    """Caseless form for search (SQLite's ``lower`` only folds ASCII)."""
+    return value.casefold() if isinstance(value, str) else ""
+
+
+def _snippet(text: str, needle: str) -> str:
+    """One line of ``text`` around the first ``needle`` (already folded)."""
+    line = " ".join(text.split())
+    at = line.casefold().find(needle)
+    if at < 0:
+        return line[: _SNIPPET_CHARS]
+    start = max(0, at - _SNIPPET_CHARS // 3)
+    end = min(len(line), start + _SNIPPET_CHARS)
+    start = max(0, min(start, end - _SNIPPET_CHARS))
+    return ("…" if start else "") + line[start:end].strip() + ("…" if end < len(line) else "")
+
+
+class AgentChatStore:
+    """Sessions + event log. ``db_path=":memory:"`` for tests."""
+
+    def __init__(self, db_path: str | Path = ":memory:") -> None:
+        self._path = str(db_path)
+        if self._path != ":memory:":
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        # The thread search's caseless match (``search_sessions``).
+        self._conn.create_function("dodaios_fold", 1, _fold, deterministic=True)
+        self._lock = threading.Lock()
+        with self._lock:
+            if self._path != ":memory:":
+                self._conn.execute("PRAGMA journal_mode=WAL")
+                # Every streamed event commits. In WAL mode NORMAL waits for the
+                # disk only at a checkpoint, not at each commit, and still never
+                # corrupts the file; at worst a power cut loses the last events.
+                self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.executescript(_SCHEMA)
+            self._migrate()
+            # A voice turn id only has to outlive a redelivery, not the chat.
+            self._conn.execute(
+                "DELETE FROM agent_chat_voice_turns WHERE ts_ms < ?",
+                (now_ms() - _VOICE_DEDUP_KEEP_MS,),
+            )
+            self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add columns a database from an older build lacks (same idiom as
+        ``dodaios/state/chat_store.py``). ``CREATE TABLE IF NOT EXISTS`` never
+        touches an existing table, so a column added to ``_SCHEMA`` reaches an
+        old file only through here."""
+        have = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(agent_chat_sessions)").fetchall()
+        }
+        if "surface" not in have:
+            # Every row from before the column is a coding session: the chat
+            # surface was the agent chat back then (see SURFACES).
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN surface TEXT NOT NULL "
+                f"DEFAULT '{DEFAULT_SURFACE}'"
+            )
+        if "account_id" not in have:
+            # Which subscription seat a CLI turn runs on; empty = the platform's
+            # active account (the pre-column behaviour).
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "runtime" not in have:
+            # The society agent's external runtime (hermes / openclaw); empty =
+            # the provider decides the runner (the pre-column behaviour).
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN runtime TEXT NOT NULL DEFAULT ''"
+            )
+
+        if "computer_id" not in have:
+            # A coding thread's placement; empty = this computer.
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN computer_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "last_message_ms" not in have:
+            # The sidebar's order key; an old row takes its newest message's
+            # time, or its creation time when it has none.
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN last_message_ms INTEGER NOT NULL DEFAULT 0"
+            )
+            self._conn.execute(
+                "UPDATE agent_chat_sessions SET last_message_ms = COALESCE(("
+                "SELECT MAX(e.ts_ms) FROM agent_chat_events e "
+                "WHERE e.session_id = agent_chat_sessions.session_id "
+                "AND e.kind IN ('user_message', 'agent_message')), created_ms)"
+            )
+        if "speed" not in have:
+            # The CLI's speed tier; empty = the standard speed (the pre-column behaviour).
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN speed TEXT NOT NULL DEFAULT ''"
+            )
+        if "started_by" not in have:
+            # Which agent opened the thread; an old row takes the author of its
+            # first message, empty when the person wrote that one.
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN started_by TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.execute(
+                "UPDATE agent_chat_sessions SET started_by = COALESCE(("
+                "SELECT json_extract(e.payload, '$.author.agent_id') FROM agent_chat_events e "
+                "WHERE e.session_id = agent_chat_sessions.session_id "
+                "AND e.kind = 'user_message' ORDER BY e.seq LIMIT 1), '')"
+            )
+        if "build_mode" not in have:
+            # The mode a session in Plan returns to; empty = the ladder's default,
+            # which is what a session from before the column returned to.
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN build_mode TEXT NOT NULL DEFAULT ''"
+            )
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def chat_selection(self) -> ChatSelection | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM jarvis_chat_selection WHERE id = 1").fetchone()
+            if row is None:
+                # Upgrade installs whose last choice exists only in chat history.
+                # Agent replies and automatic control turns must not win recency.
+                history = self._conn.execute(
+                    "SELECT s.provider, s.model, s.effort, s.account_id, e.payload "
+                    "FROM agent_chat_sessions s JOIN agent_chat_events e USING (session_id) "
+                    "WHERE s.surface = 'jarvis' AND e.kind = 'user_message' "
+                    "ORDER BY e.ts_ms DESC, e.seq DESC"
+                )
+                for previous in history:
+                    if (
+                        previous["provider"]
+                        and json.loads(previous["payload"]).get("origin") != "control"
+                    ):
+                        row = previous
+                        break
+        if row is None:
+            return None
+        return ChatSelection(
+            **{key: row[key] for key in ("provider", "model", "effort", "account_id")}
+        )
+
+    def save_chat_selection(self, selection: ChatSelection) -> None:
+        if not selection.provider.strip():
+            raise ValueError("A chat selection needs a provider")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO jarvis_chat_selection (id, provider, model, effort, account_id) "
+                "VALUES (1, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "provider=excluded.provider, model=excluded.model, "
+                "effort=excluded.effort, account_id=excluded.account_id",
+                (selection.provider, selection.model, selection.effort, selection.account_id),
+            )
+            self._conn.commit()
+
+    # --------------------------------------------------------- lead thread
+
+    def lead_session_id(self) -> str | None:
+        """The id of the lead's one conversation, once it was chosen."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT session_id FROM jarvis_lead_session WHERE id = 1"
+            ).fetchone()
+        return str(row["session_id"]) if row else None
+
+    def set_lead_session_id(self, session_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO jarvis_lead_session (id, session_id) VALUES (1, ?) "
+                "ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id",
+                (session_id,),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------ sessions
+
+    def create_session(
+        self,
+        *,
+        provider: str,
+        model: str,
+        effort: str,
+        cwd: str,
+        permission_mode: str = "",
+        title: str = "",
+        session_id: str | None = None,
+        surface: str = DEFAULT_SURFACE,
+        account_id: str = "",
+        runtime: str = "",
+        computer_id: str = "",
+        speed: str = "",
+        build_mode: str = "",
+    ) -> AgentChatSession:
+        if surface not in SURFACES:
+            raise ValueError(f"surface must be one of {SURFACES}, not {surface!r}")
+        sid = session_id or uuid.uuid4().hex
+        now = now_ms()
+        # The route validated the mode against the runner's ladder; the store
+        # keeps the id as given.
+        mode = (permission_mode or "").strip() or "bypass"
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_chat_sessions (session_id, title, provider, model, effort, "
+                "cwd, permission_mode, vendor_session, created_ms, updated_ms, message_count, "
+                "preview, surface, account_id, runtime, computer_id, last_message_ms, speed, "
+                "build_mode) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    sid,
+                    title,
+                    provider,
+                    model,
+                    effort,
+                    cwd,
+                    mode,
+                    now,
+                    now,
+                    surface,
+                    account_id,
+                    runtime,
+                    computer_id,
+                    now,
+                    speed,
+                    # Only a session that starts in Plan has a mode to return to.
+                    build_mode if mode in _PLAN_MODES else "",
+                ),
+            )
+            self._conn.commit()
+        session = self.get_session(sid)
+        assert session is not None
+        return session
+
+    def get_session(self, session_id: str) -> AgentChatSession | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_chat_sessions WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return self._row_to_session(row) if row else None
+
+    def list_sessions(
+        self, limit: int = 200, *, surface: str | None = None
+    ) -> list[AgentChatSession]:
+        """Newest first; ``surface`` narrows the list to one chat's sessions.
+
+        A side thread is part of the conversation it was started from and is
+        drawn there, so it is never a chat of its own in a list.
+        """
+        with self._lock:
+            if surface is None:
+                rows = self._conn.execute(
+                    f"SELECT * FROM agent_chat_sessions WHERE {_NOT_A_SIDE_THREAD} "  # noqa: S608
+                    "ORDER BY updated_ms DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    f"SELECT * FROM agent_chat_sessions WHERE surface = ? "  # noqa: S608
+                    f"AND {_NOT_A_SIDE_THREAD} ORDER BY updated_ms DESC LIMIT ?",
+                    (surface, int(limit)),
+                ).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def sessions_briefed_by(
+        self, agent_id: str, *, surface: str = "agent", limit: int = 30, scan: int = 120
+    ) -> list[tuple[AgentChatSession, int]]:
+        """Sessions of ``surface`` that ``agent_id`` wrote a task into.
+
+        A message an agent writes on the person's behalf carries its
+        ``author``; that mark is the record, whichever tool opened the
+        session. Each hit comes with the time of the agent's newest message,
+        newest first. Only the ``scan`` most recently active sessions are
+        read, so the cost does not grow with the history.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT s.*, t.briefed_ms FROM agent_chat_sessions s JOIN ("
+                "SELECT e.session_id, MAX(e.ts_ms) AS briefed_ms FROM agent_chat_events e "
+                "WHERE e.session_id IN (SELECT session_id FROM agent_chat_sessions "
+                "WHERE surface = ? ORDER BY updated_ms DESC LIMIT ?) "
+                "AND e.kind = 'user_message' "
+                "AND json_extract(e.payload, '$.author.agent_id') = ? "
+                "GROUP BY e.session_id) t ON t.session_id = s.session_id "
+                "ORDER BY t.briefed_ms DESC LIMIT ?",
+                (surface, int(scan), agent_id, int(limit)),
+            ).fetchall()
+        return [(self._row_to_session(r), int(r["briefed_ms"])) for r in rows]
+
+    def assistant_texts(self, session_id: str, *, limit: int = 300) -> list[tuple[int, str]]:
+        """The newest ``limit`` messages the assistant wrote in a session, newest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts_ms, json_extract(payload, '$.text') AS text FROM agent_chat_events "
+                "WHERE session_id = ? AND kind = 'assistant_text' ORDER BY seq DESC LIMIT ?",
+                (session_id, int(limit)),
+            ).fetchall()
+        return [(int(r["ts_ms"]), str(r["text"] or "")) for r in rows]
+
+    def title_is_automatic(self, session: AgentChatSession) -> bool:
+        """Whether ``session``'s title is still the one its first message gave it.
+
+        A title the person typed differs from that; a session with no message
+        yet has nothing to compare and counts as automatic.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM agent_chat_events WHERE session_id = ? "
+                "AND kind IN ('user_message', 'agent_message') ORDER BY seq ASC LIMIT 1",
+                (session.session_id,),
+            ).fetchone()
+        if row is None:
+            return True
+        try:
+            payload = json.loads(row["payload"]) or {}
+            text = str(payload.get("text") or "")
+            shown = shown_text(payload)
+        except (TypeError, ValueError, AttributeError):  # unreadable: keep auto-titling
+            return True
+        # A title given before 2026-11-12 came from the composed prompt.
+        return session.title in (_title_from(shown), _title_from(text))
+
+    def list_sessions_matching(
+        self, prefix: str, suffix: str = "", *, limit: int = 200
+    ) -> list[AgentChatSession]:
+        """Newest first; every session whose id starts with ``prefix`` (and ends
+        with ``suffix`` when given) — e.g. an agent's conversation chats."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_chat_sessions WHERE substr(session_id,1,?)=? "
+                "AND (?='' OR substr(session_id,-?)=?) ORDER BY updated_ms DESC LIMIT ?",
+                (len(prefix), prefix, suffix, max(1, len(suffix)), suffix, int(limit)),
+            ).fetchall()
+        return [self._row_to_session(r) for r in rows]
+
+    def search_sessions(
+        self, query: str, *, surface: str = DEFAULT_SURFACE, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Sessions of ``surface`` whose title or messages contain ``query``.
+
+        Case-insensitive for every alphabet (``str.casefold``, not SQLite's
+        ASCII-only ``LIKE``). Newest activity first; each hit carries the
+        latest matching message as ``snippet`` (with its ``seq``) and how many
+        messages matched, so the thread search can show why a thread came up,
+        and the session's ``title`` / ``cwd`` / ``updated_ms`` for a thread the
+        sidebar has not loaded. A title-only match has an empty snippet.
+        """
+        needle = " ".join((query or "").split()).casefold()
+        if not needle:
+            return []
+        with self._lock:
+            sessions = self._conn.execute(
+                "SELECT session_id, title, cwd, updated_ms FROM agent_chat_sessions "  # noqa: S608
+                f"WHERE surface = ? AND {_NOT_A_SIDE_THREAD}",
+                (surface,),
+            ).fetchall()
+            rows = self._conn.execute(
+                "SELECT e.session_id, e.seq, e.ts_ms, e.kind, "  # noqa: S608
+                "json_extract(e.payload, '$.text') AS text "
+                "FROM agent_chat_events e JOIN agent_chat_sessions s "
+                "ON s.session_id = e.session_id "
+                "WHERE s.surface = ? AND e.kind IN ('user_message', 'agent_message', 'assistant_text') "
+                f"AND s.{_NOT_A_SIDE_THREAD} "
+                "AND instr(dodaios_fold(json_extract(e.payload, '$.text')), ?) > 0 "
+                "ORDER BY e.seq DESC",
+                (surface, needle),
+            ).fetchall()
+        hits: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            hit = hits.get(row["session_id"])
+            if hit is None:
+                hits[row["session_id"]] = {
+                    "session_id": row["session_id"],
+                    "snippet": _snippet(str(row["text"] or ""), needle),
+                    "seq": int(row["seq"]),
+                    "kind": str(row["kind"]),
+                    "ts_ms": int(row["ts_ms"]),
+                    "matches": 1,
+                    "title_match": False,
+                }
+            else:
+                hit["matches"] += 1
+        known = {row["session_id"]: row for row in sessions}
+        for row in sessions:
+            if needle not in _fold(row["title"]):
+                continue
+            hit = hits.setdefault(row["session_id"], {
+                "session_id": row["session_id"], "snippet": "", "seq": 0, "kind": "",
+                "ts_ms": int(row["updated_ms"]), "matches": 0, "title_match": True,
+            })
+            hit["title_match"] = True
+        for hit in hits.values():
+            row = known[hit["session_id"]]
+            hit.update(title=row["title"], cwd=row["cwd"], updated_ms=int(row["updated_ms"]))
+        ordered = sorted(hits.values(), key=lambda hit: hit["updated_ms"], reverse=True)
+        return ordered[: max(1, int(limit))]
+
+    def update_session(self, session_id: str, **fields: Any) -> AgentChatSession | None:
+        """Set any of title / provider / model / effort / speed / cwd /
+        permission_mode / build_mode / vendor_session. Unknown keys are ignored so a route
+        can pass its body through after validation. ``surface`` is deliberately NOT
+        settable: a session is born on one chat and stays there.
+
+        A session that enters Plan keeps the mode it had as its ``build_mode``
+        (unless the caller names one), and one that leaves Plan drops it."""
+        allowed = {
+            "title",
+            "provider",
+            "model",
+            "effort",
+            "speed",
+            "cwd",
+            "permission_mode",
+            "build_mode",
+            "vendor_session",
+            "account_id",
+            "runtime",
+            "computer_id",
+        }
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates:
+            return self.get_session(session_id)
+        updates["updated_ms"] = now_ms()
+        with self._lock:
+            mode = updates.get("permission_mode")
+            if mode is not None and mode not in _PLAN_MODES:
+                updates["build_mode"] = ""
+            elif mode is not None and "build_mode" not in updates:
+                row = self._conn.execute(
+                    "SELECT permission_mode FROM agent_chat_sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row is not None and row[0] and row[0] not in _PLAN_MODES:
+                    updates["build_mode"] = str(row[0])
+            cols = ", ".join(f"{k} = ?" for k in updates)
+            self._conn.execute(
+                f"UPDATE agent_chat_sessions SET {cols} WHERE session_id = ?",  # noqa: S608 — column names are from the allow-list above
+                (*updates.values(), session_id),
+            )
+            self._conn.commit()
+        return self.get_session(session_id)
+
+    def permission_override(self, session_id: str) -> str:
+        """The user's explicit stance, separate from a Society roster ceiling."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT mode FROM agent_chat_permission_overrides WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return str(row[0]) if row else ""
+
+    def set_permission_override(self, session_id: str, mode: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_chat_permission_overrides (session_id, mode) VALUES (?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET mode = excluded.mode",
+                (session_id, mode),
+            )
+            self._conn.commit()
+
+    def clear_permission_override(self, session_id: str) -> None:
+        """Forget the chat's own stance so the agent's chosen mode applies again."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM agent_chat_permission_overrides WHERE session_id = ?",
+                (session_id,),
+            )
+            self._conn.commit()
+
+    def data_version(self) -> int:
+        """How many one-shot data migrations this file has already had.
+
+        Schema changes are idempotent (``_migrate`` adds missing columns);
+        a DATA migration is not — it rewrites what someone picked, so it has
+        to run exactly once. SQLite's own ``user_version`` is the marker.
+        """
+        with self._lock:
+            row = self._conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
+
+    def set_data_version(self, version: int) -> None:
+        with self._lock:
+            # PRAGMA takes no bound parameter; the value is an int by signature.
+            self._conn.execute(f"PRAGMA user_version = {int(version)}")
+            self._conn.commit()
+
+    def sessions_on(self, surface: str, provider: str) -> list[AgentChatSession]:
+        """Every session of ``surface`` currently seated on ``provider``."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_chat_sessions WHERE surface = ? AND provider = ?",
+                (surface, provider),
+            ).fetchall()
+        return [self._row_to_session(row) for row in rows]
+
+    def reseat_session(self, session_id: str, *, provider: str, model: str) -> None:
+        """Move a session onto another provider, leaving ``updated_ms`` alone.
+
+        For migrations, not for the composer: the chat list is ordered by
+        that timestamp, and re-seating everyone's history because the runner
+        behind a surface changed would shuffle it to the top for no reason
+        the person did. The vendor session id goes with it — it belongs to
+        the CLI conversation this session is leaving.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agent_chat_sessions SET provider = ?, model = ?, vendor_session = '' "
+                "WHERE session_id = ?",
+                (provider, model, session_id),
+            )
+            self._conn.commit()
+
+    def delete_session(self, session_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM agent_chat_sessions WHERE session_id = ?", (session_id,)
+            )
+            self._conn.execute("DELETE FROM agent_chat_events WHERE session_id = ?", (session_id,))
+            self._conn.execute(
+                "DELETE FROM agent_chat_permission_overrides WHERE session_id = ?", (session_id,)
+            )
+            self._conn.execute(
+                "DELETE FROM agent_chat_thread_owners WHERE session_id = ?", (session_id,)
+            )
+            for table in (
+                "agent_chat_approval_memory",
+                "agent_chat_parked_work",
+                "agent_chat_queued_messages",
+                "agent_chat_side_threads",
+            ):
+                self._conn.execute(
+                    f"DELETE FROM {table} WHERE session_id = ?",  # noqa: S608 - fixed names
+                    (session_id,),
+                )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    # -------------------------------------------------------- thread owners
+
+    def set_thread_owner(
+        self,
+        session_id: str,
+        *,
+        owner_session: str,
+        owner_agent: str = "",
+        owner_name: str = "",
+        state: dict[str, Any] | None = None,
+    ) -> None:
+        """Record that ``owner_session`` started (and steers) ``session_id``."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO agent_chat_thread_owners (session_id, owner_session, "
+                "owner_agent, owner_name, created_ms, state) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    owner_session,
+                    owner_agent,
+                    owner_name,
+                    now_ms(),
+                    json.dumps(state or {}),
+                ),
+            )
+            self._conn.commit()
+
+    def thread_owner(self, session_id: str) -> dict[str, Any] | None:
+        """The owner row of a thread a chat started, or None for an ordinary one."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_chat_thread_owners WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return self._owner_row(row) if row else None
+
+    def thread_owners(self, owner_session: str | None = None) -> list[dict[str, Any]]:
+        """Every owned thread (newest first), or only those of ``owner_session``."""
+        with self._lock:
+            if owner_session is None:
+                rows = self._conn.execute(
+                    "SELECT * FROM agent_chat_thread_owners ORDER BY created_ms DESC"
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT * FROM agent_chat_thread_owners WHERE owner_session = ? "
+                    "ORDER BY created_ms DESC",
+                    (owner_session,),
+                ).fetchall()
+        return [self._owner_row(r) for r in rows]
+
+    def update_thread_owner_state(self, session_id: str, state: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE agent_chat_thread_owners SET state = ? WHERE session_id = ?",
+                (json.dumps(state), session_id),
+            )
+            self._conn.commit()
+
+    @staticmethod
+    def _owner_row(row: sqlite3.Row) -> dict[str, Any]:
+        try:
+            state = json.loads(row["state"] or "{}")
+        except ValueError:  # a damaged state restarts the bookkeeping, never the link
+            state = {}
+        return {
+            "session_id": row["session_id"],
+            "owner_session": row["owner_session"],
+            "owner_agent": row["owner_agent"],
+            "owner_name": row["owner_name"],
+            "created_ms": int(row["created_ms"]),
+            "state": state if isinstance(state, dict) else {},
+        }
+
+    # -------------------------------------------------------------- events
+
+    def append_event(self, session_id: str, event: dict[str, Any]) -> dict[str, Any]:
+        """Persist ``event`` (assigning ``seq``) and return it with the seq set.
+
+        Transient kinds are returned unchanged and never written. A
+        ``user_message`` bumps the session's counters and, on the first one,
+        becomes its title; an ``assistant_text`` refreshes the preview.
+        """
+        if is_transient(event):
+            return event
+        kind = str(event.get("kind") or "")
+        payload = event.get("payload") or {}
+        ts_ms = int(event.get("ts_ms") or now_ms())
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM agent_chat_events "
+                "WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            seq = int(row["next"]) if row else 1
+            self._conn.execute(
+                "INSERT INTO agent_chat_events (session_id, seq, ts_ms, kind, payload) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, seq, ts_ms, kind, json.dumps(payload, ensure_ascii=False)),
+            )
+            if kind in {"user_message", "agent_message"}:
+                # The person's own words: the prompt of a message with files
+                # also holds the note and the file blocks written for the model.
+                text = shown_text(payload)
+                self._conn.execute(
+                    "UPDATE agent_chat_sessions SET message_count = message_count + 1, "
+                    "updated_ms = ?, last_message_ms = ?, preview = ?, "
+                    "title = CASE WHEN title = '' THEN ? ELSE title END "
+                    "WHERE session_id = ?",
+                    (ts_ms, ts_ms, text[:_PREVIEW_MAX_CHARS], _title_from(text), session_id),
+                )
+                if kind == "user_message":
+                    # The thread's first message names who opened it: the
+                    # agent that wrote it, or the person (no author).
+                    author = payload.get("author")
+                    starter = author.get("agent_id") if isinstance(author, dict) else ""
+                    if starter and seq == self._first_message_seq(session_id):
+                        self._conn.execute(
+                            "UPDATE agent_chat_sessions SET started_by = ? WHERE session_id = ?",
+                            (str(starter), session_id),
+                        )
+            elif kind == "assistant_text":
+                text = " ".join(str(payload.get("text") or "").split())
+                if text:
+                    self._conn.execute(
+                        "UPDATE agent_chat_sessions SET updated_ms = ?, preview = ? "
+                        "WHERE session_id = ?",
+                        (ts_ms, text[:_PREVIEW_MAX_CHARS], session_id),
+                    )
+            else:
+                self._conn.execute(
+                    "UPDATE agent_chat_sessions SET updated_ms = ? WHERE session_id = ?",
+                    (ts_ms, session_id),
+                )
+            self._conn.commit()
+        out = dict(event)
+        out["seq"] = seq
+        out["ts_ms"] = ts_ms
+        return out
+
+    def _first_message_seq(self, session_id: str) -> int:
+        """The seq of the session's first ``user_message`` (lock held by the caller)."""
+        row = self._conn.execute(
+            "SELECT MIN(seq) AS first FROM agent_chat_events "
+            "WHERE session_id = ? AND kind = 'user_message'",
+            (session_id,),
+        ).fetchone()
+        return int(row["first"]) if row and row["first"] is not None else 0
+
+    def incoming_message(self, session_id: str, message_id: str) -> dict[str, Any] | None:
+        """Fold a receipt and its status updates; old user messages stay untouched."""
+        receipt = None
+        for event in self.list_events(session_id):
+            payload = event["payload"]
+            if payload.get("message_id") != message_id:
+                continue
+            if event["kind"] == "agent_message":
+                receipt = dict(payload)
+            elif event["kind"] == "agent_message_status" and receipt is not None:
+                receipt.update(payload)
+        return receipt
+
+    def open_turns(self) -> list[tuple[str, str, int, int]]:
+        """Every session whose newest turn never got its ``turn_finished``.
+
+        ``(session_id, turn_id, started_ms, last_ts_ms)``: when the turn began
+        and when the session last heard anything at all.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT e.session_id, json_extract(e.payload, '$.turn_id') AS turn_id, "
+                "e.ts_ms AS started_ms, "
+                "(SELECT MAX(x.ts_ms) FROM agent_chat_events x "
+                " WHERE x.session_id = e.session_id) AS last_ms "
+                "FROM (SELECT session_id, MAX(seq) AS seq FROM agent_chat_events "
+                "      WHERE kind = 'turn_started' GROUP BY session_id) l "
+                "JOIN agent_chat_events e ON e.session_id = l.session_id AND e.seq = l.seq "
+                "WHERE NOT EXISTS (SELECT 1 FROM agent_chat_events f "
+                "  WHERE f.session_id = l.session_id AND f.seq > l.seq "
+                "  AND f.kind = 'turn_finished')"
+            ).fetchall()
+        return [
+            (str(r["session_id"]), str(r["turn_id"] or ""), int(r["started_ms"]), int(r["last_ms"]))
+            for r in rows
+        ]
+
+    def turn_terminal(self, session_id: str, turn_id: str) -> dict[str, Any] | None:
+        """Read the first durable completion; stale readers cannot revise its outcome."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT seq, ts_ms, kind, payload FROM agent_chat_events "
+                "WHERE session_id = ? AND kind = 'turn_finished' "
+                "AND json_extract(payload, '$.turn_id') = ? ORDER BY seq ASC LIMIT 1",
+                (session_id, turn_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "seq": int(row["seq"]),
+            "ts_ms": int(row["ts_ms"]),
+            "kind": row["kind"],
+            "payload": json.loads(row["payload"]),
+        }
+
+    def finished_turns(self, prefix: str) -> list[tuple[str, str, int, str]]:
+        """``(session_id, turn_id, ts_ms, status)`` of every finished turn in the
+        sessions whose id starts with ``prefix``, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT session_id, ts_ms, json_extract(payload, '$.turn_id') AS turn_id, "
+                "json_extract(payload, '$.status') AS status FROM agent_chat_events "
+                "WHERE substr(session_id, 1, ?) = ? AND kind = 'turn_finished' "
+                "ORDER BY ts_ms, seq",
+                (len(prefix), prefix),
+            ).fetchall()
+        return [
+            (str(r["session_id"]), str(r["turn_id"]), int(r["ts_ms"]), str(r["status"] or ""))
+            for r in rows
+            if r["turn_id"]
+        ]
+
+    def turn_has_text_before(self, session_id: str, turn_id: str, before_seq: int) -> bool:
+        """Whether this exact turn wrote a nonblank answer before its terminal."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM agent_chat_events WHERE session_id = ? AND seq < ? "
+                "AND kind = 'assistant_text' AND json_extract(payload, '$.turn_id') = ? "
+                "AND trim(coalesce(json_extract(payload, '$.text'), '')) <> '' LIMIT 1",
+                (session_id, before_seq, turn_id),
+            ).fetchone()
+        return row is not None
+
+    # ------------------------------------------------- restart durability
+
+    def sessions_with_waiting_messages(self) -> list[str]:
+        """Chats with a ``message_queued`` notice that no ``message_dequeued`` answers."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT q.session_id FROM agent_chat_events q "
+                "WHERE q.kind = 'notice' AND json_extract(q.payload, '$.kind') = 'message_queued' "
+                "AND NOT EXISTS (SELECT 1 FROM agent_chat_events d "
+                "  WHERE d.session_id = q.session_id AND d.seq > q.seq AND d.kind = 'notice' "
+                "  AND json_extract(d.payload, '$.kind') = 'message_dequeued' "
+                "  AND json_extract(d.payload, '$.queue_id') "
+                "      = json_extract(q.payload, '$.queue_id'))"
+            ).fetchall()
+        return [str(r["session_id"]) for r in rows]
+
+    def save_queued_message(
+        self, queue_id: str, session_id: str, payload: dict[str, Any]
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO agent_chat_queued_messages "
+                "(queue_id, session_id, payload, queued_ms) VALUES (?, ?, ?, ?)",
+                (queue_id, session_id, json.dumps(payload, ensure_ascii=False), now_ms()),
+            )
+            self._conn.commit()
+
+    def queued_message(self, queue_id: str) -> dict[str, Any] | None:
+        """The saved payload of a waiting message, with ``queued_ms``; ``None`` if unknown."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload, queued_ms FROM agent_chat_queued_messages WHERE queue_id = ?",
+                (queue_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            log.warning("agent chat: saved message %s is damaged", queue_id)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return {**payload, "queued_ms": int(row["queued_ms"])}
+
+    def delete_queued_message(self, queue_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM agent_chat_queued_messages WHERE queue_id = ?", (queue_id,)
+            )
+            self._conn.commit()
+
+    def approval_memory(self) -> list[tuple[str, str, str]]:
+        """Every saved ``(session_id, bag, entry)`` of "Always allow" and narrow rules."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT session_id, bag, entry FROM agent_chat_approval_memory"
+            ).fetchall()
+        return [(str(r["session_id"]), str(r["bag"]), str(r["entry"])) for r in rows]
+
+    def replace_approval_memory(self, session_id: str, bag: str, entries: list[str]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM agent_chat_approval_memory WHERE session_id = ? AND bag = ?",
+                (session_id, bag),
+            )
+            self._conn.executemany(
+                "INSERT OR IGNORE INTO agent_chat_approval_memory (session_id, bag, entry) "
+                "VALUES (?, ?, ?)",
+                [(session_id, bag, entry) for entry in entries],
+            )
+            self._conn.commit()
+
+    def claim_voice_turn(self, voice_turn_id: str, session_id: str) -> bool:
+        """True the first time a voice turn id is filed, False for every repeat."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO agent_chat_voice_turns (voice_turn_id, session_id, ts_ms) "
+                "VALUES (?, ?, ?)",
+                (voice_turn_id, session_id, now_ms()),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def release_voice_turn(self, voice_turn_id: str) -> None:
+        """Forget a claim whose turn could not be filed, so a retry can succeed."""
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM agent_chat_voice_turns WHERE voice_turn_id = ?", (voice_turn_id,)
+            )
+            self._conn.commit()
+
+    def save_parked_work(self, session_id: str, turn_id: str, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO agent_chat_parked_work (session_id, turn_id, request, original, "
+                "work, delivered, results, reported, created_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_id, turn_id) DO UPDATE SET request = excluded.request, "
+                "original = excluded.original, work = excluded.work, "
+                "delivered = excluded.delivered, results = excluded.results, "
+                "reported = excluded.reported",
+                (
+                    session_id,
+                    turn_id,
+                    str(record.get("request") or ""),
+                    str(record.get("original") or ""),
+                    json.dumps(record.get("work") or [], ensure_ascii=False),
+                    json.dumps(record.get("delivered") or [], ensure_ascii=False),
+                    json.dumps(record.get("results") or [], ensure_ascii=False, default=str),
+                    1 if record.get("reported") else 0,
+                    int(record.get("created_ms") or now_ms()),
+                ),
+            )
+            self._conn.commit()
+
+    def delete_parked_work(self, session_id: str, turn_id: str | None = None) -> None:
+        with self._lock:
+            if turn_id is None:
+                self._conn.execute(
+                    "DELETE FROM agent_chat_parked_work WHERE session_id = ?", (session_id,)
+                )
+            else:
+                self._conn.execute(
+                    "DELETE FROM agent_chat_parked_work WHERE session_id = ? AND turn_id = ?",
+                    (session_id, turn_id),
+                )
+            self._conn.commit()
+
+    def parked_work(self) -> list[dict[str, Any]]:
+        """Every parked request a previous process left, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM agent_chat_parked_work ORDER BY created_ms, rowid"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                out.append({
+                    "session_id": str(r["session_id"]),
+                    "turn_id": str(r["turn_id"]),
+                    "request": str(r["request"]),
+                    "original": str(r["original"]),
+                    "work": json.loads(r["work"]),
+                    "delivered": json.loads(r["delivered"]),
+                    "results": json.loads(r["results"]),
+                    "reported": bool(r["reported"]),
+                    "created_ms": int(r["created_ms"]),
+                })
+            except (ValueError, TypeError):
+                log.warning("agent chat: parked wait row damaged, dropped")
+                continue  # a damaged row is dropped rather than blocking boot
+        return out
+
+    # ---------------------------------------------------------- side threads
+
+    def save_side_thread(self, session_id: str, parent_session: str, request: str) -> None:
+        """Mark ``session_id`` as a running side thread of ``parent_session``."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO agent_chat_side_threads "
+                "(session_id, parent_session, request, status, created_ms) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (session_id, parent_session, request, now_ms()),
+            )
+            self._conn.commit()
+
+    def close_side_thread(self, session_id: str, status: str) -> bool:
+        """Record how a side thread ended; False when it had already ended.
+
+        The one place a side thread stops being ``running``, so its closing
+        notice is posted exactly once however many paths notice the end.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agent_chat_side_threads SET status = ? "
+                "WHERE session_id = ? AND status = 'running'",
+                (status, session_id),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
+
+    def side_thread(self, session_id: str) -> dict[str, Any] | None:
+        """The side-thread row of ``session_id``; ``None`` for a chat of its own."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM agent_chat_side_threads WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return self._side_row(row) if row else None
+
+    def side_threads(
+        self, parent_session: str | None = None, *, running: bool = False
+    ) -> list[dict[str, Any]]:
+        """Side threads, oldest first: of one conversation, or of every one."""
+        clauses: list[str] = []
+        args: list[Any] = []
+        if parent_session is not None:
+            clauses.append("parent_session = ?")
+            args.append(parent_session)
+        if running:
+            clauses.append("status = 'running'")
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM agent_chat_side_threads{where} ORDER BY created_ms, rowid",  # noqa: S608
+                args,
+            ).fetchall()
+        return [self._side_row(r) for r in rows]
+
+    @staticmethod
+    def _side_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "session_id": str(row["session_id"]),
+            "parent_session": str(row["parent_session"]),
+            "request": str(row["request"]),
+            "status": str(row["status"]),
+            "created_ms": int(row["created_ms"]),
+        }
+
+    def queue_notice_events(self, session_id: str) -> list[dict[str, Any]]:
+        """Queue receipts only, including waits hidden behind long tool streams."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, payload FROM agent_chat_events WHERE session_id = ? "
+                "AND kind = 'notice' AND json_extract(payload, '$.kind') "
+                "IN ('message_queued', 'message_dequeued') ORDER BY seq",
+                (session_id,),
+            ).fetchall()
+        return [{"kind": row["kind"], "payload": json.loads(row["payload"])} for row in rows]
+
+    def credential_events(self, session_id: str) -> list[dict[str, Any]]:
+        """Pending fields and recent receipts, without loading the chat's text.
+
+        Keep every pending field even in an old turn, plus only the newest 256
+        closed fields for idempotent save retries across a process restart.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "WITH fields AS ("
+                "SELECT json_extract(payload, '$.request_id') AS rid, "
+                "max(CASE WHEN kind = 'credential_required' THEN seq END) AS opened, "
+                "max(CASE WHEN kind = 'credential_resolved' THEN seq END) AS closed "
+                "FROM agent_chat_events WHERE session_id = ? "
+                "AND kind IN ('credential_required', 'credential_resolved') GROUP BY rid"
+                "), retained AS ("
+                "SELECT opened, closed FROM fields WHERE closed IS NULL UNION ALL "
+                "SELECT opened, closed FROM (SELECT opened, closed FROM fields "
+                "WHERE closed IS NOT NULL ORDER BY closed DESC LIMIT 256)"
+                ") SELECT e.kind, e.payload FROM retained r JOIN agent_chat_events e "
+                "ON e.session_id = ? AND (e.seq = r.opened OR e.seq = r.closed) ORDER BY e.seq",
+                (session_id, session_id),
+            ).fetchall()
+        return [{"kind": row["kind"], "payload": json.loads(row["payload"])} for row in rows]
+
+    def recent_user_messages(self, session_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        """The newest ``user_message`` events (newest first), however long the chat is.
+
+        A busy coding thread holds thousands of tool events after the
+        person's last words; a tail of the event list would miss them.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT kind, payload FROM agent_chat_events WHERE session_id = ? "
+                "AND kind = 'user_message' ORDER BY seq DESC LIMIT ?",
+                (session_id, int(limit)),
+            ).fetchall()
+        return [{"kind": row["kind"], "payload": json.loads(row["payload"])} for row in rows]
+
+    def finished_turn_count(self, since_ms: int, *, exclude_session: str = "") -> int:
+        """Turns of any session that finished after ``since_ms`` (one chat left out)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM agent_chat_events WHERE kind = 'turn_finished' "
+                "AND ts_ms > ? AND session_id != ?",
+                (int(since_ms), exclude_session),
+            ).fetchone()
+        return int(row[0] or 0)
+
+    def list_events(
+        self, session_id: str, *, after_seq: int = 0, tail: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Events in order; ``tail`` keeps only the newest N (still oldest first)."""
+        with self._lock:
+            if tail is not None:
+                rows = self._conn.execute(
+                    "SELECT seq, ts_ms, kind, payload FROM ("
+                    "SELECT seq, ts_ms, kind, payload FROM agent_chat_events "
+                    "WHERE session_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?"
+                    ") ORDER BY seq ASC",
+                    (session_id, int(after_seq), max(0, int(tail))),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT seq, ts_ms, kind, payload FROM agent_chat_events "
+                    "WHERE session_id = ? AND seq > ? ORDER BY seq ASC",
+                    (session_id, int(after_seq)),
+                ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            try:
+                payload = json.loads(r["payload"])
+            except (TypeError, ValueError):
+                payload = {}
+            out.append(
+                {
+                    "seq": int(r["seq"]),
+                    "ts_ms": int(r["ts_ms"]),
+                    "kind": r["kind"],
+                    "payload": payload,
+                }
+            )
+        return out
+
+    # ------------------------------------------------------------- helpers
+
+    @staticmethod
+    def _row_to_session(row: sqlite3.Row) -> AgentChatSession:
+        return AgentChatSession(
+            session_id=row["session_id"],
+            title=row["title"],
+            provider=row["provider"],
+            model=row["model"],
+            effort=row["effort"],
+            cwd=row["cwd"],
+            permission_mode=row["permission_mode"],
+            vendor_session=row["vendor_session"],
+            created_ms=int(row["created_ms"]),
+            updated_ms=int(row["updated_ms"]),
+            message_count=int(row["message_count"]),
+            preview=row["preview"],
+            surface=str(row["surface"] or DEFAULT_SURFACE),
+            account_id=str(row["account_id"] or "") if "account_id" in row.keys() else "",
+            runtime=str(row["runtime"] or "") if "runtime" in row.keys() else "",
+            computer_id=str(row["computer_id"] or "") if "computer_id" in row.keys() else "",
+            last_message_ms=(
+                int(row["last_message_ms"] or 0) if "last_message_ms" in row.keys() else 0
+            ),
+            speed=str(row["speed"] or "") if "speed" in row.keys() else "",
+            started_by=str(row["started_by"] or "") if "started_by" in row.keys() else "",
+            build_mode=str(row["build_mode"] or "") if "build_mode" in row.keys() else "",
+        )

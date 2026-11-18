@@ -1,0 +1,1901 @@
+import type { AgentChatEvent, InternalMessage } from "@/lib/agentChatApi";
+import type { ChatControlState } from "@/lib/chatControlApi";
+import { hideAskBlocks } from "./askFence";
+import { hideMeetingPass } from "./meetingPass";
+import { readToolChoices, type ToolChoice } from "./toolChoices";
+import { parseApprovalCard, parseSavedRule, type ApprovalCardInfo, type ApprovalEdits, type RuleScope, type SavedApprovalRule } from "./actionCard/approvalInfo";
+import { userAttachments, type UserAttachment } from "./userAttachment";
+import { COMPACTION_TOOL } from "./compaction";
+
+export { userAttachments, type UserAttachment };
+
+/**
+ * Fold the agent-chat event log into the timeline the column renders.
+ *
+ * The backend speaks ONE vocabulary for the persisted log and the live
+ * stream (dodaios/agent_chat/events.py), so this reducer serves both: a
+ * reopened session replays its stored events through it, and the socket
+ * keeps feeding it live ones. The result is immutable per step — an event
+ * that changes nothing returns the same object, so the store can skip the
+ * re-render.
+ *
+ * Shape: a list of items, each either the person's message or one assistant
+ * turn. A turn holds ordered blocks — text, reasoning, tool calls (with
+ * their result and, when the runner asked, the approval card) — plus the
+ * turn's status and the usage the runner reported at the end.
+ */
+
+/** Id prefix of a text block that is the person's message sent into a running turn. */
+export const STEER_PREFIX = "steer-";
+
+export interface TextBlock {
+  kind: "text";
+  id: string;
+  /** What the reply shows: the agent's text without an end-of-turn question block. */
+  text: string;
+  /** The text as the agent wrote it, kept only when a question block was hidden from it. */
+  raw?: string;
+  /** The files of a message the person sent into the running turn (a `steer-` block). */
+  attachments?: UserAttachment[];
+  /**
+   * When the message began to arrive. The conversation look places a message
+   * by it: one written after the person's next message stands below that
+   * message (`chronology.ts`). Absent on a block from before the field existed.
+   */
+  tsMs?: number;
+}
+
+export interface ReasoningBlock {
+  kind: "reasoning";
+  id: string;
+  /** Empty when the vendor redacts its thinking — the block still says it happened. */
+  text: string;
+  durationMs: number | null;
+  /** Still streaming — the finished block carries the duration. */
+  live: boolean;
+  /** When the model began to think (drives the live elapsed counter). */
+  startedMs: number;
+  /** The model message the thought belongs to, when the runner names one. */
+  messageId?: string;
+}
+
+export interface ApprovalState {
+  approvalId: string;
+  summary: string;
+  /** Set once the person (or a cancel) decided. */
+  decision: string | null;
+  /** What the card shows besides its answers; absent on events older than the fields. */
+  card?: ApprovalCardInfo;
+  /** Where an "Always allow" from the card lives (`approval_resolved.scope`). */
+  scope?: RuleScope;
+  /** A standing rule saved from this card, now or later. */
+  rule?: SavedApprovalRule;
+  /** The person answered here and the answer is on its way: nothing waits on them any more. */
+  answering?: boolean;
+  /** The chat moved on to a new message: the card stays open and an Allow later runs the call. */
+  deferred?: boolean;
+  /** What the person changed in the action's text before allowing it. */
+  edited?: ApprovalEdits;
+}
+
+/** One prepared answer on an agent's question card. */
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+/** How a question is answered: one option, any number of them, or own words. */
+export type QuestionKind = "single" | "multi" | "text";
+
+/** One question of a card. Option 0 is the agent's recommendation when `recommendedCount` > 0. */
+export interface QuestionItem {
+  question: string;
+  options: QuestionOption[];
+  recommendationReason: string;
+  /** `single` on older events. */
+  kind: QuestionKind;
+  /** The person may type their own answer (always true for `text`). */
+  allowCustom: boolean;
+  /** How many leading options are recommended: up to all but one for `multi`, else 1; 0 when none is. */
+  recommendedCount: number;
+}
+
+/**
+ * What one question resolved to. `source`: `person`, `timeout` (nobody
+ * answered in time), `skipped` (the agent was left to decide), `declined`
+ * (the person skipped this one question), `message` (answered from the chat
+ * composer), `moved_on` (the person wrote about something else), `cancelled`,
+ * `unattended`, or `closed` (the turn ended without an answer).
+ */
+export interface QuestionAnswerState {
+  /** What the agent reads; a multi answer holds one label per line. */
+  text: string;
+  optionIndex: number | null;
+  source: string;
+  /** The picked options of a multi answer. */
+  optionIndices?: number[];
+}
+
+/**
+ * An agent's question card (dodaios/agent_chat/questions.py): a short series
+ * the person answers one by one. Open questions take their recommendation
+ * when nobody answers before `expiresMs`, which every answer pushes back.
+ */
+export interface QuestionState {
+  questionId: string;
+  /** The agent asking, for the card's title; empty on older events. */
+  asker: string;
+  questions: QuestionItem[];
+  /** One slot per question; `null` while unanswered. */
+  answers: (QuestionAnswerState | null)[];
+  expiresMs: number | null;
+  /** The card no longer takes answers (resolved, or the turn ended). */
+  closed: boolean;
+  /**
+   * An end-of-turn card (dodaios/agent_chat/turn_prompts.py): the agent already
+   * stopped, and the answers go to it as the next message. It stays open after
+   * its turn ended and closes when the person starts another turn instead.
+   */
+  deferred?: boolean;
+}
+
+/** The tool an agent asks its question with — bare or behind an MCP prefix. */
+export const QUESTION_TOOL = "society_ask_user";
+/** Claude Code's own question tool, answered on the same card. */
+export const CLAUDE_QUESTION_TOOL = "AskUserQuestion";
+
+export function isQuestionTool(name: string): boolean {
+  return name === QUESTION_TOOL || name.endsWith(`__${QUESTION_TOOL}`) || name === CLAUDE_QUESTION_TOOL;
+}
+
+/**
+ * An agent's secure credential field (dodaios/agent_chat/credential_requests.py).
+ * The person pastes a secret that goes straight to the agent's vault; no event
+ * ever carries the value. `status` is `null` until the person saves or declines.
+ * Older event logs can also contain `timeout` or `cancelled` resolutions.
+ */
+export interface CredentialState {
+  requestId: string;
+  asker: string;
+  /**
+   * `token`: one secret value. `login`: a website username and password
+   * (society/login_tool.py). `plugin` / `cli`: connect a service
+   * (society/connect_tool.py); then `env` is the plugin id or CLI name.
+   */
+  kind: CredentialKind;
+  /** The sign-in page of a `login` card. */
+  url: string;
+  env: string;
+  label: string;
+  description: string;
+  placeholder: string;
+  replace: boolean;
+  /** What a `token` field holds (`api_key`, `private_key` …); "" when the agent did not say. */
+  secretKind: string;
+  expiresMs: number | null;
+  status: string | null;
+}
+
+export type CredentialKind = "token" | "login" | "plugin" | "cli";
+
+/** The tool an agent asks for a credential with — bare or behind an MCP prefix. */
+export const CREDENTIAL_TOOL = "society_request_credential";
+/** The tools that open the same kind of card: a website login, a connection. */
+const CARD_TOOLS = [CREDENTIAL_TOOL, "society_request_login", "society_request_connect"];
+
+export function isCredentialTool(name: string): boolean {
+  return CARD_TOOLS.some((tool) => name === tool || name.endsWith(`__${tool}`));
+}
+
+function credentialKind(raw: unknown): CredentialKind {
+  return raw === "login" || raw === "plugin" || raw === "cli" ? raw : "token";
+}
+
+/** The call shows a card the person answers: a question or a credential field. */
+export function hasPersonCard(block: ToolBlock): boolean {
+  // An open approval is a card of its own too, so it stands off the rail.
+  return Boolean(block.question || block.credential || (block.approval && block.approval.decision === null));
+}
+
+/** The call's card still waits for the person. */
+export function waitsOnCard(block: ToolBlock): boolean {
+  return Boolean((block.question && !block.question.closed) || (block.credential && block.credential.status === null));
+}
+
+/**
+ * A coding agent's plan card (dodaios/agent_chat/turn_prompts.py): the turn
+ * finished in plan mode. `decision` is `build`, `keep`, `superseded` (the
+ * person started another turn instead) or `null` while it waits.
+ */
+export interface PlanState {
+  buildMode: string;
+  decision: string | null;
+}
+
+export interface ToolBlock {
+  kind: "tool";
+  callId: string;
+  name: string;
+  input: unknown;
+  output: string | null;
+  isError: boolean;
+  durationMs: number | null;
+  approval: ApprovalState | null;
+  /** The question card this call shows, when the call is an agent's question. */
+  question?: QuestionState;
+  /** The secure credential field this call shows, when the agent asked for a secret. */
+  credential?: CredentialState;
+  /** When the call was made; a result without its own duration is timed from here. */
+  startedMs: number;
+  /** The sub-agent this call spawned, when the runner reported one (`subagent_*` events). */
+  subagent?: SubagentState;
+  /** The action receipt the gateway attached to a side-effect call (proof, or "no external evidence"). */
+  receipt?: ToolReceipt;
+}
+
+/** Proof that a call's side effect happened; `none` = the tool could not show any. */
+export interface ToolReceipt {
+  id: string;
+  state: "backed" | "none";
+  summary: string;
+  link: string;
+}
+
+/** How a sub-agent stands: still working, or how it ended. */
+export type SubagentStatus = "running" | "done" | "failed" | "stopped";
+
+/**
+ * A sub-agent a coding agent spawned, filed on the call that spawned it. Its
+ * own conversation — text, thoughts, calls, its own sub-agents — folds into
+ * `blocks` from the events that name it (`agent_id`), never into the turn.
+ */
+export interface SubagentState {
+  /** The short task title ("Explore the auth code"). */
+  description: string;
+  /** The vendor's agent kind ("general-purpose", "Explore"); "" when it names none. */
+  agentType: string;
+  /** The model it runs on, as the CLI reports or the spawn call names it; "" when unknown. */
+  model: string;
+  /** The whole task the main agent gave it. */
+  prompt: string;
+  /** It runs beside the main agent; the spawn call's own result is only a receipt. */
+  background: boolean;
+  /** The vendor's thread id for the agent, when it has one (Codex). */
+  threadId: string;
+  status: SubagentStatus;
+  /** Its answer, as the vendor reported it at the end. */
+  summary: string;
+  /** What it is doing now ("Running the tests"). */
+  activity: string;
+  lastTool: string;
+  tokens: number | null;
+  toolUses: number | null;
+  durationMs: number | null;
+  startedMs: number;
+  finishedMs: number | null;
+  blocks: TurnBlock[];
+}
+
+export type TurnBlock = TextBlock | ReasoningBlock | ToolBlock;
+
+export type TurnStatus = "running" | "done" | "cancelled" | "error";
+
+export interface UserItem {
+  /**
+   * Not typed by the person: "control" is a chat command's own turn,
+   * "background" opens the result of an earlier request whose agents
+   * finished after its turn had closed (`text` is that request).
+   */
+  origin?: "control" | "background";
+  type: "user";
+  id: string;
+  /**
+   * What the person WROTE.
+   *
+   * Not always what the turn received: a message with attached files carries
+   * their contents too (the backend composes it — dodaios/agent_chat/
+   * attachments.py), and showing a page of extracted PDF back to the person
+   * who typed one sentence would bury their own words. The full prompt stays
+   * in the event log, which is what the API runner rebuilds history from.
+   */
+  text: string;
+  /** Files that went in with this message; empty on an ordinary one. */
+  attachments: UserAttachment[];
+  toolChoices?: ToolChoice[];
+  /** A Jarvis agent wrote this message into a coding thread on the person's behalf. */
+  author?: { agentId: string; name: string };
+  /**
+   * The team engine woke a team lead with this turn; nobody typed it. `update`
+   * brings members' results, `check` asks for the report, `resumed` continues
+   * a goal the person resumed.
+   */
+  teamEvent?: TeamEvent;
+  tsMs: number;
+}
+
+export type TeamEvent = "update" | "check" | "resumed";
+
+/** One step of setting a turn up on another computer (`setup_step`). */
+export interface SetupStep {
+  /** connect | fetch | send | unpack | start */
+  step: string;
+  /** The computer's name (`connect`). */
+  where: string;
+  /** The code host the server fetched from (`fetch`). */
+  host: string;
+  /** The CLI started there (`start`). */
+  cli: string;
+  atMs: number;
+}
+
+/** The frame the team engine puts on a lead's managing turn (dodaios/society/team_lead.py `_frame`). */
+const TEAM_FRAME = /^\[team (update|goal check|goal resumed) for team /;
+const TEAM_EVENTS: Record<string, TeamEvent> = { update: "update", "goal check": "check", "goal resumed": "resumed" };
+
+function teamEventOf(prompt: string): TeamEvent | undefined {
+  const match = TEAM_FRAME.exec(prompt);
+  return match ? TEAM_EVENTS[match[1]] : undefined;
+}
+
+export interface TurnItem {
+  type: "turn";
+  id: string;
+  provider: string;
+  model: string;
+  effort: string;
+  runner: string;
+  status: TurnStatus;
+  blocks: TurnBlock[];
+  startedMs: number;
+  durationMs: number | null;
+  usage: Record<string, unknown> | null;
+  /** Tokens so far while the turn runs (``usage_delta``); the finished usage replaces it. */
+  liveUsage: Record<string, number> | null;
+  costUsd: number | null;
+  /** Whether the cost was charged to a per-token key (`turn_finished.billed_via_key`); absent when the event does not say. */
+  billedViaKey?: boolean | null;
+  error: string | null;
+  /** The runtime's raw output behind the error, redacted, for "Technical details". */
+  errorDetails?: string | null;
+  /** The plan card of a turn that finished in plan mode. */
+  plan?: PlanState;
+  /**
+   * The runtime's own short titles for runs of tool calls ("Read a.txt"),
+   * keyed by the last call of the run they title (`tool_summary`).
+   */
+  toolTitles?: Readonly<Record<string, string>>;
+  /**
+   * Who still works on this turn's request after it closed: the turn handed
+   * its seat to the next message and the result arrives in a turn of its own.
+   */
+  background?: string[];
+  /**
+   * What a running turn waits on (`background_wait`): the agent ended its
+   * message and the CLI wakes it again once its background tasks finish, or
+   * the turn is held open until the agents it sent out report back.
+   */
+  waitingOn?: string[];
+  /**
+   * The setup steps of a turn placed on another computer (`setup_step`), in
+   * the order they began; shown until the agent's first output.
+   */
+  setup?: SetupStep[];
+  /**
+   * Closed on screen by the person's Stop before the backend confirmed it
+   * (`stopTurnLocally`). The real `turn_finished` still settles it once more.
+   */
+  provisional?: boolean;
+  /**
+   * The coding agents this turn started (`coding_thread` notices). The
+   * answer shows each one as a link that opens its thread, whether or not
+   * the assistant wrote that link into its words.
+   */
+  codingThreads?: CodingThreadRef[];
+}
+
+/** A coding agent a turn started: its thread, and what the notice called it. */
+export interface CodingThreadRef {
+  threadId: string;
+  title: string;
+  agent: string;
+}
+
+export interface ErrorItem {
+  type: "error";
+  id: string;
+  text: string;
+  tsMs: number;
+}
+
+/**
+ * A system line that is not a turn: the agent society posts a delegated
+ * task's result here ("Gmail agent is done: …"), a learned skill, a login
+ * request. Stored server-side as a `notice` event, so a reopened chat still
+ * shows it.
+ */
+export interface NoticeItem {
+  type: "notice";
+  id: string;
+  /** The server's notice kind — "society_result", "learned_skill", … */
+  kind: string;
+  text: string;
+  agentName: string;
+  agentId: string;
+  /** "done" | "blocked" | "" for notices that carry no outcome. */
+  status: string;
+  tsMs: number;
+  /** The raw notice payload — a proposal card reads its kind, summary, reason, payload. */
+  data: Record<string, unknown>;
+  /** A proposal's outcome once the person decided: "applied" | "rejected" | "failed" | "". */
+  resolved: string;
+}
+
+export interface InternalMessageItem {
+  type: "internal";
+  id: string;
+  message: InternalMessage;
+  tsMs: number;
+  /** Board-backed outbound receipt; it is never input to the receiving model. */
+  outgoing?: { recipientId: string; recipientName: string };
+}
+
+export type TimelineItem = UserItem | TurnItem | ErrorItem | NoticeItem | InternalMessageItem;
+
+/**
+ * A message the person sent while the conversation was still working on an
+ * earlier one is answered beside it, in a side thread (a chat session of its
+ * own, `data.side_id`). Its notice is one line of the conversation: opened by
+ * `side_thread_started`, patched in place by `side_thread_finished` with how
+ * it ended (`resolved`: done | stopped | failed | interrupted), the answer and
+ * the messages it wrote, each on its own (`data.messages`).
+ * The kinds are `STARTED` / `FINISHED` in `dodaios/agent_chat/side_threads.py`.
+ */
+export const SIDE_THREAD_STARTED = "side_thread_started";
+export const SIDE_THREAD_FINISHED = "side_thread_finished";
+
+/**
+ * A side question (`/btw <question>` in a Claude Code thread): answered at
+ * once from a copy of the conversation while the agent keeps working, and
+ * never sent to the agent. One card: opened by `aside_asked`, patched in
+ * place by `aside_answered` (`resolved`: done | failed, `data.answer` or
+ * `data.error`), removed by `aside_dismissed`. The kinds are `ASKED` /
+ * `ANSWERED` / `DISMISSED` in `dodaios/agent_chat/aside.py`.
+ */
+export const ASIDE_ASKED = "aside_asked";
+export const ASIDE_ANSWERED = "aside_answered";
+export const ASIDE_DISMISSED = "aside_dismissed";
+
+/** A side thread's line; null for every other item. */
+export function sideThreadOf(item: TimelineItem): { id: string; running: boolean; item: NoticeItem } | null {
+  if (item.type !== "notice" || item.kind !== SIDE_THREAD_STARTED) return null;
+  return { id: str(item.data.side_id), running: item.resolved === "", item };
+}
+
+export interface PendingApproval {
+  approvalId: string;
+  turnId: string;
+  callId: string;
+  name: string;
+  input: unknown;
+  summary: string;
+}
+
+/** How full a coding agent's context window is (`context_usage`, or `usage_delta.context`). */
+export interface ContextReading {
+  /** Tokens the model read for the main agent's newest message, plus its answer. */
+  used: number;
+  /** The model's window; null when the CLI named no size yet. */
+  window: number | null;
+  model: string;
+}
+
+export interface Timeline {
+  control?: ChatControlState;
+  /** The newest context-window reading of the thread's agent; absent until one arrives. */
+  context?: ContextReading;
+  items: TimelineItem[];
+  pendingApprovals: PendingApproval[];
+  /** Highest persisted seq folded so far — the `?after=` for a reconnect. */
+  lastSeq: number;
+  /** Fields a `session_updated` event changed, applied by the store. */
+  sessionPatch: Record<string, unknown> | null;
+}
+
+export const EMPTY_TIMELINE: Timeline = {
+  items: [],
+  pendingApprovals: [],
+  lastSeq: 0,
+  sessionPatch: null,
+};
+
+/** Who wrote a message on the person's behalf (`author` on `user_message`), if anyone. */
+function messageAuthor(raw: unknown): { agentId: string; name: string } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const row = raw as Record<string, unknown>;
+  const name = typeof row.name === "string" ? row.name : "";
+  return name ? { agentId: typeof row.agent_id === "string" ? row.agent_id : "", name } : undefined;
+}
+
+function str(v: unknown, fallback = ""): string {
+  return typeof v === "string" ? v : fallback;
+}
+
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/** A context reading from an event payload, keeping a known window when this one names none. */
+function contextReading(raw: unknown, previous: ContextReading | undefined): ContextReading | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const used = num(row.used);
+  if (used === null || used <= 0) return null;
+  const model = str(row.model);
+  const window = num(row.window);
+  const kept = previous && (!model || previous.model === model) ? previous.window : null;
+  return { used, window: window && window > 0 ? window : kept, model: model || previous?.model || "" };
+}
+
+function withContext(tl: Timeline, raw: unknown): Timeline {
+  const next = contextReading(raw, tl.context);
+  if (!next) return tl;
+  const now = tl.context;
+  if (now && now.used === next.used && now.window === next.window && now.model === next.model) return tl;
+  return { ...tl, context: next };
+}
+
+function findTurn(items: TimelineItem[], turnId: string): number {
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const it = items[i];
+    if (it.type === "turn" && it.id === turnId) return i;
+  }
+  return -1;
+}
+
+function replaceAt<T>(arr: T[], index: number, value: T): T[] {
+  const next = arr.slice();
+  next[index] = value;
+  return next;
+}
+
+/** The coding agent a `coding_thread` notice names, or null without a thread. */
+export function codingThreadRef(data: Record<string, unknown>): CodingThreadRef | null {
+  const threadId = str(data.thread_id).trim();
+  if (!threadId) return null;
+  return { threadId, title: str(data.title).trim(), agent: str(data.agent).trim() };
+}
+
+/**
+ * A coding agent goes onto the turn that started it. The notice carries no
+ * turn id; it is posted while the tool call that started the agent runs, so
+ * that turn is the newest one.
+ */
+function withCodingThread(tl: Timeline, ref: CodingThreadRef | null): Timeline {
+  if (!ref) return tl;
+  for (let i = tl.items.length - 1; i >= 0; i -= 1) {
+    const item = tl.items[i];
+    if (item.type !== "turn") continue;
+    const known = item.codingThreads ?? [];
+    if (known.some((entry) => entry.threadId === ref.threadId)) return tl;
+    return { ...tl, items: replaceAt(tl.items, i, { ...item, codingThreads: [...known, ref] }) };
+  }
+  return tl;
+}
+
+function updateTurn(tl: Timeline, turnId: string, fn: (turn: TurnItem) => TurnItem): Timeline {
+  const idx = findTurn(tl.items, turnId);
+  if (idx < 0) return tl;
+  const turn = tl.items[idx] as TurnItem;
+  const next = fn(turn);
+  if (next === turn) return tl;
+  return { ...tl, items: replaceAt(tl.items, idx, next) };
+}
+
+/**
+ * The turn is open but nobody is writing: it has said what it had to say and
+ * only waits for work it started elsewhere (background tasks, agents it sent
+ * out). Such a turn is not the assistant typing.
+ */
+export function waitsInBackground(turn: Pick<TurnItem, "status" | "waitingOn">): boolean {
+  return turn.status === "running" && (turn.waitingOn?.length ?? 0) > 0;
+}
+
+/** A live reasoning block that text or a tool call is about to follow is over. */
+function closeLiveReasoning(turn: TurnItem, nowMs: number): TurnItem {
+  const i = turn.blocks.findIndex((b) => b.kind === "reasoning" && b.live);
+  if (i < 0) return turn;
+  const block = turn.blocks[i] as ReasoningBlock;
+  return {
+    ...turn,
+    blocks: replaceAt(turn.blocks, i, {
+      ...block,
+      live: false,
+      durationMs: block.durationMs ?? Math.max(0, nowMs - block.startedMs),
+    }),
+  };
+}
+
+function questionOptions(raw: unknown): QuestionOption[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    const label = str(row.label);
+    return label ? [{ label, description: str(row.description) }] : [];
+  });
+}
+
+function questionAnswer(raw: unknown): QuestionAnswerState | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Record<string, unknown>;
+  const answer: QuestionAnswerState = { text: str(row.answer), optionIndex: num(row.option_index), source: str(row.source, "person") };
+  const picks = Array.isArray(row.option_indices) ? row.option_indices.filter((i): i is number => typeof i === "number") : [];
+  return picks.length ? { ...answer, optionIndices: picks } : answer;
+}
+
+const QUESTION_KINDS: readonly QuestionKind[] = ["single", "multi", "text"];
+
+/** One question off a `question_required` payload, or null when it is unusable. */
+function questionItem(entry: unknown): QuestionItem | null {
+  if (!entry || typeof entry !== "object") return null;
+  const row = entry as Record<string, unknown>;
+  const text = str(row.question);
+  const options = questionOptions(row.options);
+  const kind = QUESTION_KINDS.includes(row.kind as QuestionKind) ? (row.kind as QuestionKind) : "single";
+  if (!text || (!options.length && kind !== "text")) return null;
+  return {
+    question: text,
+    options,
+    recommendationReason: str(row.recommendation_reason),
+    kind,
+    allowCustom: kind === "text" || row.allow_custom !== false,
+    // `recommended: null`: the agent recommends nothing, so no option is marked.
+    recommendedCount: row.recommended === null || !options.length ? 0
+      : kind === "multi" ? Math.max(1, Math.min(options.length, num(row.recommended_count) ?? 1)) : 1,
+  };
+}
+
+/** The answer slots off a progress/resolved payload; older events carried one flat answer. */
+function questionAnswers(p: Record<string, unknown>, count: number): (QuestionAnswerState | null)[] {
+  const raw = Array.isArray(p.answers) ? p.answers : "answer" in p ? [p] : [];
+  return Array.from({ length: count }, (_, i) => questionAnswer(raw[i]));
+}
+
+function updateQuestion(
+  tl: Timeline,
+  turnId: string,
+  questionId: string,
+  fn: (q: QuestionState) => QuestionState,
+): Timeline {
+  return updateTurn(tl, turnId, (turn) => {
+    const i = turn.blocks.findIndex((b) => b.kind === "tool" && b.question?.questionId === questionId);
+    if (i < 0) return turn;
+    const block = turn.blocks[i] as ToolBlock;
+    return { ...turn, blocks: replaceAt(turn.blocks, i, { ...block, question: fn(block.question!) }) };
+  });
+}
+
+/** Attach a question to its tool row: the open ask call, else a row of its own. */
+/** A text block whose question block, if any, is hidden behind its card. */
+function textBlock(id: string, raw: string, tsMs?: number): TextBlock {
+  const text = hideMeetingPass(hideAskBlocks(raw));
+  const at = tsMs ? { tsMs } : {};
+  return text === raw ? { kind: "text", id, text, ...at } : { kind: "text", id, text, raw, ...at };
+}
+
+/**
+ * A new turn settles the cards the last one left waiting: an end-of-turn
+ * question nobody answered and a plan nobody approved. The person moved on —
+ * the server no longer takes answers for them either.
+ */
+function settleWaitingCards(items: TimelineItem[]): TimelineItem[] {
+  let changed = false;
+  const next = items.map((item) => {
+    if (item.type !== "turn") return item;
+    const openPlan = item.plan && item.plan.decision === null;
+    const openAsk = item.blocks.some((b) => b.kind === "tool" && b.question?.deferred && !b.question.closed);
+    if (!openPlan && !openAsk) return item;
+    changed = true;
+    return {
+      ...item,
+      ...(openPlan && item.plan ? { plan: { ...item.plan, decision: "superseded" } } : {}),
+      blocks: openAsk
+        ? item.blocks.map((b) =>
+          b.kind === "tool" && b.question?.deferred && !b.question.closed
+            ? {
+              ...b,
+              question: {
+                ...b.question,
+                closed: true,
+                answers: b.question.answers.map((a) => a ?? { text: "", optionIndex: null, source: "closed" }),
+              },
+            }
+            : b)
+        : item.blocks,
+    };
+  });
+  return changed ? next : items;
+}
+
+function updateCredential(
+  tl: Timeline,
+  turnId: string,
+  requestId: string,
+  fn: (c: CredentialState) => CredentialState,
+): Timeline {
+  return updateTurn(tl, turnId, (turn) => {
+    const i = turn.blocks.findIndex((b) => b.kind === "tool" && b.credential?.requestId === requestId);
+    if (i < 0) return turn;
+    const block = turn.blocks[i] as ToolBlock;
+    return { ...turn, blocks: replaceAt(turn.blocks, i, { ...block, credential: fn(block.credential!) }) };
+  });
+}
+
+/** Attach a credential field to its tool row: the open request call, else a row of its own. */
+function withCredential(turn: TurnItem, credential: CredentialState, tsMs: number): TurnItem {
+  let index = -1;
+  for (let i = turn.blocks.length - 1; i >= 0; i -= 1) {
+    const b = turn.blocks[i];
+    if (b.kind !== "tool") continue;
+    if (b.credential?.requestId === credential.requestId) return turn;
+    if (isCredentialTool(b.name) && !b.credential) {
+      index = i;
+      break;
+    }
+  }
+  if (index >= 0) {
+    const block = turn.blocks[index] as ToolBlock;
+    return { ...turn, blocks: replaceAt(turn.blocks, index, { ...block, credential }) };
+  }
+  const closed = closeLiveReasoning(turn, tsMs);
+  return {
+    ...closed,
+    blocks: [
+      ...closed.blocks,
+      {
+        kind: "tool",
+        callId: `cred-${credential.requestId}`,
+        name: CREDENTIAL_TOOL,
+        input: null,
+        output: null,
+        isError: false,
+        durationMs: null,
+        approval: null,
+        credential,
+        startedMs: tsMs,
+      },
+    ],
+  };
+}
+
+function withQuestion(turn: TurnItem, question: QuestionState, tsMs: number): TurnItem {
+  let index = -1;
+  for (let i = turn.blocks.length - 1; i >= 0; i -= 1) {
+    const b = turn.blocks[i];
+    if (b.kind !== "tool") continue;
+    if (b.question?.questionId === question.questionId) return turn;
+    if (isQuestionTool(b.name) && !b.question) {
+      index = i;
+      break;
+    }
+  }
+  if (index >= 0) {
+    const block = turn.blocks[index] as ToolBlock;
+    return { ...turn, blocks: replaceAt(turn.blocks, index, { ...block, question }) };
+  }
+  const closed = closeLiveReasoning(turn, tsMs);
+  return {
+    ...closed,
+    blocks: [
+      ...closed.blocks,
+      {
+        kind: "tool",
+        callId: `q-${question.questionId}`,
+        name: QUESTION_TOOL,
+        input: null,
+        output: null,
+        isError: false,
+        durationMs: null,
+        approval: null,
+        question,
+        startedMs: tsMs,
+      },
+    ],
+  };
+}
+
+function upsertBlock<B extends TurnBlock>(
+  turn: TurnItem,
+  match: (b: TurnBlock) => boolean,
+  make: (existing: B | null) => B,
+): TurnItem {
+  const i = turn.blocks.findIndex(match);
+  if (i < 0) return { ...turn, blocks: [...turn.blocks, make(null)] };
+  const existing = turn.blocks[i] as B;
+  const next = make(existing);
+  if (next === existing) return turn;
+  return { ...turn, blocks: replaceAt(turn.blocks, i, next) };
+}
+
+function emptySubagent(startedMs: number): SubagentState {
+  return {
+    description: "",
+    agentType: "",
+    model: "",
+    prompt: "",
+    background: false,
+    threadId: "",
+    status: "running",
+    summary: "",
+    activity: "",
+    lastTool: "",
+    tokens: null,
+    toolUses: null,
+    durationMs: null,
+    startedMs,
+    finishedMs: null,
+    blocks: [],
+  };
+}
+
+/**
+ * `blocks` with the first tool block `match` picks — at the top or inside
+ * any sub-agent's conversation — replaced by `fn(block)`. Null when none matches.
+ */
+function mapToolDeep(
+  blocks: TurnBlock[],
+  match: (b: ToolBlock) => boolean,
+  fn: (b: ToolBlock) => ToolBlock,
+): TurnBlock[] | null {
+  for (let i = 0; i < blocks.length; i += 1) {
+    const b = blocks[i];
+    if (b.kind !== "tool") continue;
+    if (match(b)) {
+      const next = fn(b);
+      return next === b ? blocks : replaceAt(blocks, i, next);
+    }
+    if (b.subagent) {
+      const inner = mapToolDeep(b.subagent.blocks, match, fn);
+      if (inner) {
+        return inner === b.subagent.blocks ? blocks : replaceAt(blocks, i, { ...b, subagent: { ...b.subagent, blocks: inner } });
+      }
+    }
+  }
+  return null;
+}
+
+function parseEdited(raw: unknown): ApprovalEdits | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: ApprovalEdits = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const row = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+    if (row) out[key] = { before: str(row.before), after: str(row.after) };
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/** A row whose approval was never answered, closed as `expired` — its sub-agent's rows too. */
+function expireOpenApproval(block: TurnBlock): TurnBlock {
+  if (block.kind !== "tool") return block;
+  // A card set aside (the chat moved on) stays open: an Allow later still runs it.
+  const open = block.approval !== null && block.approval.decision === null && !block.approval.deferred;
+  const inner = block.subagent?.blocks.map(expireOpenApproval);
+  const innerChanged = inner !== undefined && inner.some((b, i) => b !== block.subagent?.blocks[i]);
+  if (!open && !innerChanged) return block;
+  return {
+    ...block,
+    approval: open && block.approval ? { ...block.approval, decision: "expired" } : block.approval,
+    ...(innerChanged && block.subagent && inner ? { subagent: { ...block.subagent, blocks: inner } } : {}),
+  };
+}
+
+/**
+ * Record `decision` on approval `approvalId`: its row stops asking and its
+ * card leaves the composer. The `approval_resolved` event lands here, and so
+ * does a decision the backend already confirmed (or reported expired) before
+ * that event arrived — the card must not wait on the socket to go away.
+ */
+export function settleApproval(tl: Timeline, approvalId: string, decision: string, turnId = "", scope?: RuleScope): Timeline {
+  const owner = turnId || tl.pendingApprovals.find((a) => a.approvalId === approvalId)?.turnId || "";
+  const settle = (turn: TurnItem): TurnItem => {
+    const blocks = mapToolDeep(
+      turn.blocks,
+      (b) => b.approval?.approvalId === approvalId,
+      (b) => (b.approval && b.approval.decision === null
+        ? { ...b, approval: { ...b.approval, decision, ...(scope ? { scope } : {}) } }
+        : b),
+    );
+    return blocks && blocks !== turn.blocks ? { ...turn, blocks } : turn;
+  };
+  const withTurn = owner
+    ? updateTurn(tl, owner, settle)
+    : (() => {
+        const items = tl.items.map((item) => (item.type === "turn" ? settle(item) : item));
+        return items.some((item, i) => item !== tl.items[i]) ? { ...tl, items } : tl;
+      })();
+  const pendingApprovals = withTurn.pendingApprovals.filter((a) => a.approvalId !== approvalId);
+  return pendingApprovals.length === withTurn.pendingApprovals.length ? withTurn : { ...withTurn, pendingApprovals };
+}
+
+/**
+ * Runners that answer on a vendor subscription seat, the same set as
+ * `dodaios.costs.model.SUBSCRIPTION_RUNNERS`. Every other CLI (Grok Build,
+ * Hermes, OpenClaw, OpenCode, ...) runs on a key and its cost is real money.
+ */
+const SUBSCRIPTION_RUNNERS: ReadonlySet<string> = new Set(["claude-cli", "codex-cli", "agy-cli", "kimi-cli"]);
+
+/**
+ * Whether a turn's cost was charged per token. A subscription seat reports
+ * what the plan already covers, so its cost is not money spent.
+ */
+export function billedPerToken(turn: Pick<TurnItem, "runner" | "billedViaKey">): boolean {
+  if (typeof turn.billedViaKey === "boolean") return turn.billedViaKey;
+  return !SUBSCRIPTION_RUNNERS.has((turn.runner || "").trim().toLowerCase());
+}
+
+/**
+ * Mark approval `approvalId` as answered here while the answer travels (or
+ * clear the mark when it failed): the turn stops saying it needs the person
+ * at once, while the card keeps its buttons until the decision lands.
+ */
+export function markApprovalAnswering(tl: Timeline, approvalId: string, answering: boolean): Timeline {
+  const patch = (turn: TurnItem): TurnItem => {
+    const blocks = mapToolDeep(
+      turn.blocks,
+      (b) => b.approval?.approvalId === approvalId && b.approval.decision === null && Boolean(b.approval.answering) !== answering,
+      (b) => (b.approval ? { ...b, approval: { ...b.approval, answering } } : b),
+    );
+    return blocks && blocks !== turn.blocks ? { ...turn, blocks } : turn;
+  };
+  const items = tl.items.map((item) => (item.type === "turn" ? patch(item) : item));
+  return items.some((item, i) => item !== tl.items[i]) ? { ...tl, items } : tl;
+}
+
+/** Patch the approval `approvalId` (set aside, edited) on whichever turn holds its card. */
+export function patchApproval(tl: Timeline, approvalId: string, patch: Partial<ApprovalState>, turnId = ""): Timeline {
+  const apply = (turn: TurnItem): TurnItem => {
+    const blocks = mapToolDeep(
+      turn.blocks,
+      (b) => b.approval?.approvalId === approvalId,
+      (b) => (b.approval ? { ...b, approval: { ...b.approval, ...patch } } : b),
+    );
+    return blocks && blocks !== turn.blocks ? { ...turn, blocks } : turn;
+  };
+  if (turnId) return updateTurn(tl, turnId, apply);
+  const items = tl.items.map((item) => (item.type === "turn" ? apply(item) : item));
+  return items.some((item, i) => item !== tl.items[i]) ? { ...tl, items } : tl;
+}
+
+/** Record a standing rule saved from approval `approvalId`'s card, decided or not. */
+export function noteApprovalRule(tl: Timeline, approvalId: string, rule: SavedApprovalRule, turnId = ""): Timeline {
+  const patch = (turn: TurnItem): TurnItem => {
+    const blocks = mapToolDeep(
+      turn.blocks,
+      (b) => b.approval?.approvalId === approvalId,
+      (b) => (b.approval ? { ...b, approval: { ...b.approval, rule } } : b),
+    );
+    return blocks && blocks !== turn.blocks ? { ...turn, blocks } : turn;
+  };
+  if (turnId) return updateTurn(tl, turnId, patch);
+  const items = tl.items.map((item) => (item.type === "turn" ? patch(item) : item));
+  return items.some((item, i) => item !== tl.items[i]) ? { ...tl, items } : tl;
+}
+
+/** Update the sub-agent `agentId` spawned; a spawn call the stream never announced gets a row of its own. */
+function updateSubagent(
+  turn: TurnItem,
+  agentId: string,
+  tsMs: number,
+  fn: (sub: SubagentState) => SubagentState,
+): TurnItem {
+  const apply = (b: ToolBlock): ToolBlock => {
+    const sub = b.subagent ?? emptySubagent(b.startedMs);
+    const next = fn(sub);
+    return next === sub && b.subagent ? b : { ...b, subagent: next };
+  };
+  const blocks = mapToolDeep(turn.blocks, (b) => b.callId === agentId, apply);
+  if (blocks) return blocks === turn.blocks ? turn : { ...turn, blocks };
+  const spawn: ToolBlock = {
+    kind: "tool", callId: agentId, name: "Agent", input: null, output: null,
+    isError: false, durationMs: null, approval: null, startedMs: tsMs,
+  };
+  return { ...turn, blocks: [...turn.blocks, apply(spawn)] };
+}
+
+/**
+ * Fold a block-level step into a sub-agent's own conversation: the same step
+ * the turn would take, taken on the sub-agent's blocks.
+ */
+function updateHost(tl: Timeline, turnId: string, agentId: string, tsMs: number, fn: (turn: TurnItem) => TurnItem): Timeline {
+  if (!agentId) return updateTurn(tl, turnId, fn);
+  return updateTurn(tl, turnId, (turn) =>
+    updateSubagent(turn, agentId, tsMs, (sub) => {
+      const host: TurnItem = { ...turn, blocks: sub.blocks };
+      const next = fn(host);
+      return next === host || next.blocks === sub.blocks ? sub : { ...sub, blocks: next.blocks };
+    }),
+  );
+}
+
+function closeLiveBlocks(blocks: TurnBlock[], nowMs: number): TurnBlock[] {
+  return blocks.some((b) => b.kind === "reasoning" && b.live)
+    ? blocks.map((b) => b.kind === "reasoning" && b.live ? { ...b, live: false, durationMs: b.durationMs ?? Math.max(0, nowMs - b.startedMs) } : b)
+    : blocks;
+}
+
+function finishSubagent(sub: SubagentState, status: SubagentStatus, nowMs: number, summary = ""): SubagentState {
+  return {
+    ...sub,
+    status,
+    summary: summary || sub.summary,
+    activity: "",
+    finishedMs: sub.finishedMs ?? nowMs,
+    durationMs: sub.durationMs ?? Math.max(0, nowMs - sub.startedMs),
+    blocks: closeLiveBlocks(sub.blocks, nowMs),
+  };
+}
+
+/**
+ * A turn's end settles every sub-agent still marked working, however deep: a
+ * foreground one by its call's result, a background one that never reported
+ * its end as stopped — its process is gone.
+ */
+function settleSubagents(blocks: TurnBlock[], nowMs: number): TurnBlock[] {
+  let changed = false;
+  const next = blocks.map((b) => {
+    if (b.kind !== "tool" || !b.subagent) return b;
+    const inner = settleSubagents(b.subagent.blocks, nowMs);
+    let sub = inner === b.subagent.blocks ? b.subagent : { ...b.subagent, blocks: inner };
+    if (sub.status === "running") {
+      const answered = !sub.background && b.output !== null;
+      sub = finishSubagent(sub, answered ? (b.isError ? "failed" : "done") : "stopped", nowMs, answered ? b.output ?? "" : "");
+    }
+    if (sub === b.subagent) return b;
+    changed = true;
+    return { ...b, subagent: sub };
+  });
+  return changed ? next : blocks;
+}
+
+const SUBAGENT_STATUSES: readonly SubagentStatus[] = ["running", "done", "failed", "stopped"];
+
+/**
+ * Persisted events that carry a turn's visible work. One of them whose turn
+ * has no `turn_started` in the log (a damaged or partly restored history)
+ * opens that turn itself, so the work shows instead of being dropped.
+ * Transient live deltas (seq 0) never do.
+ */
+const TURN_CONTENT_KINDS: ReadonlySet<string> = new Set([
+  "assistant_text", "reasoning", "tool_call", "tool_result", "subagent_started",
+  "approval_required", "question_required", "credential_required", "plan_ready",
+]);
+
+function withOrphanTurn(tl: Timeline, ev: AgentChatEvent, seq: number, turnId: string): Timeline {
+  if (seq <= 0 || !turnId || !TURN_CONTENT_KINDS.has(ev.kind) || findTurn(tl.items, turnId) >= 0) return tl;
+  const turn: TurnItem = {
+    type: "turn", id: turnId, provider: "", model: "", effort: "", runner: "",
+    // Its start is unknown, so it is not shown as running: its own
+    // `turn_finished`, when the log still has one, settles it as usual.
+    status: "done",
+    blocks: [], startedMs: ev.ts_ms, durationMs: null,
+    usage: null, liveUsage: null, costUsd: null, error: null,
+  };
+  return { ...tl, items: [...tl.items, turn] };
+}
+
+function receiptOf(raw: unknown): { receipt?: ToolReceipt } {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const id = str(r.id);
+  if (!id || (r.state !== "backed" && r.state !== "none")) return {};
+  return { receipt: { id, state: r.state, summary: str(r.summary), link: str(r.link) } };
+}
+
+/** Fold one event. Pure; returns `tl` itself when nothing changed. */
+export function reduceEvent(tl: Timeline, ev: AgentChatEvent): Timeline {
+  const p = ev.payload ?? {};
+  const seq = typeof ev.seq === "number" ? ev.seq : 0;
+  const turnId = str(p.turn_id);
+  const stamped: Timeline =
+    seq > tl.lastSeq ? { ...tl, lastSeq: seq, sessionPatch: null } : tl.sessionPatch ? { ...tl, sessionPatch: null } : tl;
+  const base = withOrphanTurn(stamped, ev, seq, turnId);
+  // A sub-agent's own step names the agent; it folds into that agent's conversation.
+  const agentId = str(p.agent_id);
+
+  switch (ev.kind) {
+    case "agent_message": {
+      const id = str(p.message_id);
+      if (!id || base.items.some((item) => item.type === "internal" && item.id === id)) return base;
+      return { ...base, items: [...base.items, {
+        type: "internal", id, tsMs: ev.ts_ms,
+        message: {
+          message_id: id, sender_id: str(p.sender_id), sender_name: str(p.sender_name),
+          sender_kind: p.sender_kind === "jarvis" ? "jarvis" : p.sender_kind === "user" ? "user" : "agent",
+          text: str(p.text), prompt: str(p.prompt), trace_id: str(p.trace_id),
+          status: p.status === "delivered" || p.status === "failed" ? p.status : "queued",
+          turn_id: str(p.turn_id), error: str(p.error),
+        },
+      }] };
+    }
+    case "agent_message_status":
+      return { ...base, items: base.items.map((item) =>
+        item.type === "internal" && item.id === str(p.message_id)
+          ? { ...item, message: { ...item.message,
+              status: p.status === "delivered" || p.status === "failed" ? p.status : "queued",
+              turn_id: str(p.turn_id), error: str(p.error),
+            } }
+          : item,
+      ) };
+
+    case "user_message":
+      // A message sent into the running turn (mid-turn steering) lands in that
+      // turn, where the agent received it: a `steer-` text block the thread draws as the person's own line.
+      if (p.steered === true && turnId && findTurn(base.items, turnId) >= 0) {
+        return updateTurn(base, turnId, (turn) => ({
+          ...closeLiveReasoning(turn, ev.ts_ms),
+          blocks: [...closeLiveReasoning(turn, ev.ts_ms).blocks, {
+            // With files, `typed` is the person's own sentence and `text` the composed prompt.
+            kind: "text", id: `${STEER_PREFIX}${seq || ev.ts_ms}`,
+            text: typeof p.typed === "string" ? p.typed : str(p.text),
+            ...(userAttachments(p.attachments).length > 0 ? { attachments: userAttachments(p.attachments) } : {}),
+            ...(ev.ts_ms ? { tsMs: ev.ts_ms } : {}),
+          }],
+        }));
+      }
+      return {
+        ...base,
+        items: [
+          ...base.items,
+          {
+            type: "user",
+            id: `u-${seq || ev.ts_ms}`,
+            ...(p.origin === "control" ? { origin: "control" as const } : {}),
+            ...(p.origin === "background" ? { origin: "background" as const } : {}),
+            ...(messageAuthor(p.author) ? { author: messageAuthor(p.author) } : {}),
+            ...(teamEventOf(str(p.text)) ? { teamEvent: teamEventOf(str(p.text)) } : {}),
+            // `typed` is the person's own sentence; `text` is the composed
+            // prompt, which with files also holds the note and the file blocks
+            // written for the model. Files sent without a sentence leave
+            // `typed` empty: the bubble then shows the files and no text.
+            text: typeof p.typed === "string" && (p.typed || userAttachments(p.attachments).length > 0)
+              ? p.typed
+              : str(p.text),
+            attachments: userAttachments(p.attachments),
+            toolChoices: readToolChoices(p.tool_choices),
+            tsMs: ev.ts_ms,
+          },
+        ],
+      };
+
+    case "turn_started":
+      return {
+        ...base,
+        items: [
+          ...settleWaitingCards(base.items),
+          {
+            type: "turn",
+            id: turnId,
+            provider: str(p.provider),
+            model: str(p.model),
+            effort: str(p.effort),
+            runner: str(p.runner),
+            status: "running",
+            blocks: [],
+            startedMs: ev.ts_ms,
+            durationMs: null,
+            usage: null,
+            liveUsage: null,
+            costUsd: null,
+            error: null,
+          },
+        ],
+      };
+
+    case "text_delta": {
+      const id = str(p.message_id, "live");
+      const delta = str(p.text);
+      if (!delta) return base;
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) =>
+        upsertBlock<TextBlock>(
+          closeLiveReasoning(turn, ev.ts_ms),
+          (b) => b.kind === "text" && b.id === id,
+          (ex) => textBlock(id, (ex?.raw ?? ex?.text ?? "") + delta, ex?.tsMs ?? ev.ts_ms),
+        ),
+      );
+    }
+
+    case "assistant_text": {
+      const id = str(p.message_id, "live");
+      const text = str(p.text);
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) =>
+        upsertBlock<TextBlock>(
+          closeLiveReasoning(turn, ev.ts_ms),
+          (b) => b.kind === "text" && b.id === id,
+          (ex) => (ex && (ex.raw ?? ex.text) === text ? ex : textBlock(id, text, ex?.tsMs ?? ev.ts_ms)),
+        ),
+      );
+    }
+
+    case "reasoning_started":
+      // The model began to think. Its thinking may never stream (Claude Code
+      // redacts it), so this is what the person sees meanwhile: one live
+      // row, "Thinking…", counting the seconds until the finished block.
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) => {
+        const last = turn.blocks[turn.blocks.length - 1];
+        if (last && last.kind === "reasoning" && last.live) return turn;
+        return {
+          ...turn,
+          blocks: [
+            ...turn.blocks,
+            {
+              kind: "reasoning",
+              id: `r-${turn.blocks.length}`,
+              text: "",
+              durationMs: null,
+              live: true,
+              startedMs: ev.ts_ms,
+            },
+          ],
+        };
+      });
+
+    case "reasoning_delta": {
+      const delta = str(p.text);
+      if (!delta) return base;
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) => {
+        // Deltas grow the newest live reasoning block; a finished one starts a new block.
+        const last = turn.blocks[turn.blocks.length - 1];
+        if (last && last.kind === "reasoning" && last.live) {
+          return {
+            ...turn,
+            blocks: replaceAt(turn.blocks, turn.blocks.length - 1, {
+              ...last,
+              text: last.text + delta,
+            }),
+          };
+        }
+        return {
+          ...turn,
+          blocks: [
+            ...turn.blocks,
+            {
+              kind: "reasoning",
+              id: `r-${turn.blocks.length}`,
+              text: delta,
+              durationMs: null,
+              live: true,
+              startedMs: ev.ts_ms,
+            },
+          ],
+        };
+      });
+    }
+
+    case "reasoning": {
+      const text = str(p.text);
+      const durationMs = num(p.duration_ms);
+      const messageId = str(p.message_id) || undefined;
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) => {
+        const last = turn.blocks[turn.blocks.length - 1];
+        // The CLI may open a new live block between two snapshots of the same
+        // message's thinking. That block belongs to the earlier one: drop it
+        // and update the earlier block, so one thought never shows twice.
+        const before = turn.blocks[turn.blocks.length - 2];
+        if (last && last.kind === "reasoning" && last.live && messageId
+          && before && before.kind === "reasoning" && before.messageId === messageId) {
+          return {
+            ...turn,
+            blocks: [...turn.blocks.slice(0, -2), {
+              ...before,
+              text: text || last.text || before.text,
+              durationMs: durationMs ?? before.durationMs,
+            }],
+          };
+        }
+        if (last && last.kind === "reasoning" && last.live) {
+          return {
+            ...turn,
+            blocks: replaceAt(turn.blocks, turn.blocks.length - 1, {
+              ...last,
+              text: text || last.text,
+              durationMs: durationMs ?? Math.max(0, ev.ts_ms - last.startedMs),
+              live: false,
+              ...(messageId ? { messageId } : {}),
+            }),
+          };
+        }
+        // The CLI sends a message's thinking blocks one by one, each event
+        // carrying everything that message thought so far. A later block of
+        // the same message replaces the finished one instead of repeating it.
+        if (messageId && last && last.kind === "reasoning" && last.messageId === messageId) {
+          return {
+            ...turn,
+            blocks: replaceAt(turn.blocks, turn.blocks.length - 1, {
+              ...last,
+              text: text || last.text,
+              durationMs: durationMs ?? last.durationMs,
+            }),
+          };
+        }
+        // A finished block with no text is still a fact worth a row when it
+        // took time ("Thought for 8s") — redacted thinking is thinking too.
+        if (!text && !(durationMs && durationMs > 0)) return turn;
+        return {
+          ...turn,
+          blocks: [
+            ...turn.blocks,
+            {
+              kind: "reasoning",
+              id: `r-${turn.blocks.length}`,
+              text,
+              durationMs,
+              live: false,
+              startedMs: ev.ts_ms - (durationMs ?? 0),
+              ...(messageId ? { messageId } : {}),
+            },
+          ],
+        };
+      });
+    }
+
+    case "tool_call": {
+      const callId = str(p.call_id);
+      return updateHost(base, turnId, agentId, ev.ts_ms, (turn) =>
+        upsertBlock<ToolBlock>(
+          closeLiveReasoning(turn, ev.ts_ms),
+          (b) => b.kind === "tool" && b.callId === callId,
+          (ex) =>
+            ex ?? {
+              kind: "tool",
+              callId,
+              name: str(p.name),
+              input: p.input,
+              output: null,
+              isError: false,
+              durationMs: null,
+              approval: null,
+              startedMs: ev.ts_ms,
+            },
+        ),
+      );
+    }
+
+    case "tool_result": {
+      const callId = str(p.call_id);
+      const answered = updateHost(base, turnId, agentId, ev.ts_ms, (turn) =>
+        upsertBlock<ToolBlock>(
+          turn,
+          (b) => b.kind === "tool" && b.callId === callId,
+          (ex) => ({
+            ...(ex?.question ? { question: ex.question } : {}),
+            ...(ex?.credential ? { credential: ex.credential } : {}),
+            ...(ex?.subagent ? { subagent: ex.subagent } : {}),
+            ...receiptOf(p.receipt),
+            kind: "tool",
+            callId,
+            name: ex?.name ?? str(p.name),
+            input: ex?.input,
+            output: str(p.output, ""),
+            isError: Boolean(p.is_error),
+            // The runner rarely knows how long a call took; the log does —
+            // the result's timestamp minus the call's.
+            durationMs:
+              num(p.duration_ms) ?? (ex ? Math.max(0, ev.ts_ms - ex.startedMs) : null),
+            approval: ex?.approval ?? null,
+            startedMs: ex?.startedMs ?? ev.ts_ms,
+          }),
+        ),
+      );
+      // A foreground sub-agent's answer IS its spawn call's result.
+      return updateTurn(answered, turnId, (turn) => {
+        const blocks = mapToolDeep(
+          turn.blocks,
+          (b) => b.callId === callId && b.subagent?.status === "running" && !b.subagent.background,
+          (b) => ({ ...b, subagent: finishSubagent(b.subagent!, b.isError ? "failed" : "done", ev.ts_ms, b.output ?? "") }),
+        );
+        return blocks && blocks !== turn.blocks ? { ...turn, blocks } : turn;
+      });
+    }
+
+    case "subagent_started": {
+      if (!agentId) return base;
+      return updateTurn(base, turnId, (turn) =>
+        updateSubagent(turn, agentId, ev.ts_ms, (sub) => ({
+          ...sub,
+          description: str(p.description) || sub.description,
+          agentType: str(p.agent_type) || sub.agentType,
+          prompt: str(p.prompt) || sub.prompt,
+          background: Boolean(p.background),
+          threadId: str(p.thread_id) || sub.threadId,
+        })),
+      );
+    }
+
+    case "subagent_progress": {
+      if (!agentId) return base;
+      return updateTurn(base, turnId, (turn) =>
+        updateSubagent(turn, agentId, ev.ts_ms, (sub) => sub.status !== "running" ? { ...sub, model: str(p.model) || sub.model } : {
+          ...sub,
+          model: str(p.model) || sub.model,
+          activity: str(p.activity) || sub.activity,
+          lastTool: str(p.last_tool) || sub.lastTool,
+          tokens: num(p.tokens) ?? sub.tokens,
+          toolUses: num(p.tool_uses) ?? sub.toolUses,
+          durationMs: num(p.duration_ms) ?? sub.durationMs,
+        }),
+      );
+    }
+
+    case "subagent_finished": {
+      if (!agentId) return base;
+      const raw = str(p.status, "done") as SubagentStatus;
+      const status = SUBAGENT_STATUSES.includes(raw) && raw !== "running" ? raw : "done";
+      return updateTurn(base, turnId, (turn) =>
+        updateSubagent(turn, agentId, ev.ts_ms, (sub) => {
+          const ended = finishSubagent({ ...sub, durationMs: num(p.duration_ms) ?? sub.durationMs }, status, ev.ts_ms, str(p.summary));
+          return {
+            ...ended,
+            // A later report (the notification after a status patch) may only add to the first.
+            status: sub.status === "running" ? status : sub.status,
+            tokens: num(p.tokens) ?? sub.tokens,
+            toolUses: num(p.tool_uses) ?? sub.toolUses,
+          };
+        }),
+      );
+    }
+
+    case "compaction": {
+      // Filed as a call of its own, so it sits in the work where it happened.
+      const callId = str(p.call_id);
+      if (!turnId || !callId) return base;
+      const phase = str(p.phase);
+      const called = reduceEvent(tl, {
+        ...ev,
+        kind: "tool_call",
+        payload: { turn_id: turnId, call_id: callId, name: COMPACTION_TOOL, input: {} },
+      });
+      if (phase !== "done" && phase !== "failed") return called;
+      const output = JSON.stringify({
+        trigger: str(p.trigger), tokens_before: num(p.tokens_before), tokens_after: num(p.tokens_after), error: str(p.error),
+      });
+      return reduceEvent(called, {
+        ...ev,
+        kind: "tool_result",
+        payload: { turn_id: turnId, call_id: callId, output, is_error: phase === "failed", duration_ms: p.duration_ms },
+      });
+    }
+
+    case "background_wait": {
+      const tasks = Array.isArray(p.tasks) ? p.tasks.map((task) => str(task)).filter(Boolean) : [];
+      return updateTurn(base, turnId, (turn) => ({ ...turn, waitingOn: tasks }));
+    }
+
+    case "setup_step": {
+      const step = str(p.step);
+      if (!step) return base;
+      const entry: SetupStep = { step, where: str(p.where), host: str(p.host), cli: str(p.cli), atMs: ev.ts_ms };
+      return updateTurn(base, turnId, (turn) => {
+        const steps = turn.setup ?? [];
+        // The same step told twice (a retry) stays one line.
+        if (steps.length > 0 && steps[steps.length - 1].step === step) return turn;
+        return { ...turn, setup: [...steps, entry] };
+      });
+    }
+
+    case "context_usage":
+      return agentId ? base : withContext(base, p);
+
+    case "usage_delta": {
+      // The main agent's newest message also says how full its window is.
+      const counted = !agentId && p.context ? withContext(base, p.context) : base;
+      const usage = p.usage;
+      if (!usage || typeof usage !== "object") return counted;
+      const counts: Record<string, number> = {};
+      for (const [k, v] of Object.entries(usage as Record<string, unknown>)) {
+        const n = num(v);
+        if (n !== null) counts[k] = n;
+      }
+      if (Object.keys(counts).length === 0) return counted;
+      return updateTurn(counted, turnId, (turn) => ({
+        ...turn,
+        liveUsage: counts,
+      }));
+    }
+
+    case "approval_required": {
+      const approvalId = str(p.approval_id);
+      const callId = str(p.call_id);
+      const pending: PendingApproval = {
+        approvalId,
+        turnId,
+        callId,
+        name: str(p.name),
+        input: p.input,
+        summary: str(p.summary),
+      };
+      const withTurn = updateTurn(base, turnId, (turn) => {
+        const card = parseApprovalCard(p as Record<string, unknown>);
+        const approval: ApprovalState = { approvalId, summary: pending.summary, decision: null, ...(card ? { card } : {}) };
+        const nested = mapToolDeep(turn.blocks, (b) => b.callId === callId, (b) => ({ ...b, approval }));
+        if (nested) return nested === turn.blocks ? turn : { ...turn, blocks: nested };
+        return upsertBlock<ToolBlock>(
+          turn,
+          (b) => b.kind === "tool" && b.callId === callId,
+          (ex) => ({
+            kind: "tool",
+            callId,
+            name: ex?.name ?? pending.name,
+            input: ex?.input ?? pending.input,
+            output: ex?.output ?? null,
+            isError: ex?.isError ?? false,
+            durationMs: ex?.durationMs ?? null,
+            approval,
+            startedMs: ex?.startedMs ?? ev.ts_ms,
+          }),
+        );
+      });
+      // The same call asking again (its CLI outlived an app restart) replaces
+      // the older card: nothing waits on that one any more.
+      const replaced = (a: PendingApproval) =>
+        a.approvalId === approvalId || (callId !== "" && a.turnId === turnId && a.callId === callId);
+      return {
+        ...withTurn,
+        pendingApprovals: [...withTurn.pendingApprovals.filter((a) => !replaced(a)), pending],
+      };
+    }
+
+    case "approval_resolved": {
+      const scope = str(p.scope);
+      const edited = parseEdited(p.edited);
+      const approvalId = str(p.approval_id);
+      const withEdits = edited ? patchApproval(base, approvalId, { edited }, turnId) : base;
+      return settleApproval(withEdits, approvalId, str(p.decision), turnId,
+        scope === "agent" || scope === "chat" ? scope : undefined);
+    }
+
+    case "approval_deferred": {
+      // The person wrote on while the card waited: it stays open on its row, but
+      // nothing in the composer waits on it any more.
+      const approvalId = str(p.approval_id);
+      const marked = patchApproval(base, approvalId, { deferred: true }, turnId);
+      return { ...marked, pendingApprovals: marked.pendingApprovals.filter((a) => a.approvalId !== approvalId) };
+    }
+
+    case "question_required": {
+      const questionId = str(p.question_id);
+      if (!questionId) return base;
+      // Older events carried a single question's fields at the top level.
+      const raw = Array.isArray(p.questions) ? p.questions : [p];
+      const questions: QuestionItem[] = raw.flatMap((entry) => {
+        const item = questionItem(entry);
+        return item ? [item] : [];
+      });
+      if (!questions.length) return base;
+      const question: QuestionState = {
+        questionId,
+        asker: str(p.asker),
+        questions,
+        answers: questions.map(() => null),
+        expiresMs: num(p.expires_ms),
+        closed: false,
+        ...(p.deferred ? { deferred: true } : {}),
+      };
+      return updateTurn(base, turnId, (turn) => withQuestion(turn, question, ev.ts_ms));
+    }
+
+    case "question_progress": {
+      return updateQuestion(base, turnId, str(p.question_id), (q) => ({
+        ...q,
+        answers: questionAnswers(p, q.questions.length).map((a, i) => a ?? q.answers[i]),
+        expiresMs: num(p.expires_ms) ?? q.expiresMs,
+      }));
+    }
+
+    case "question_resolved": {
+      return updateQuestion(base, turnId, str(p.question_id), (q) => ({
+        ...q,
+        answers: questionAnswers(p, q.questions.length).map((a, i) => a ?? q.answers[i]),
+        closed: true,
+      }));
+    }
+
+    case "credential_required": {
+      const requestId = str(p.request_id);
+      const env = str(p.env);
+      if (!requestId || !env) return base;
+      const credential: CredentialState = {
+        requestId,
+        asker: str(p.asker),
+        kind: credentialKind(p.kind),
+        url: str(p.url),
+        env,
+        label: str(p.label) || env,
+        description: str(p.description),
+        placeholder: str(p.placeholder),
+        replace: Boolean(p.replace),
+        secretKind: str(p.secret_kind),
+        expiresMs: num(p.expires_ms),
+        status: null,
+      };
+      return updateTurn(base, turnId, (turn) => withCredential(turn, credential, ev.ts_ms));
+    }
+
+    case "credential_resolved": {
+      return updateCredential(base, turnId, str(p.request_id), (c) => ({ ...c, status: str(p.status, "cancelled") }));
+    }
+
+    case "turn_finished": {
+      // Older event logs can contain a stale reader's timeout after the real
+      // process completed. Only a terminal event settles a turn, and it does
+      // so once; streamed text alone never suppresses a genuine timeout.
+      // A Stop closed on screen first (`provisional`) is the exception: the
+      // backend's own end replaces it with the real status, duration and usage.
+      const existing = base.items[findTurn(base.items, turnId)];
+      if (existing?.type === "turn" && existing.durationMs !== null && !existing.provisional) return base;
+      const status = str(p.status, "done") as TurnStatus;
+      const provisional = p.provisional === true;
+      const finished = updateTurn(base, turnId, (prior) => {
+        const turn = { ...prior };
+        delete turn.provisional;
+        if (provisional) turn.provisional = true;
+        return {
+        ...turn,
+        status: status === "running" ? "done" : status,
+        // A turn that ended mid-stream closes its live reasoning block, and
+        // a question nobody can answer any more stops asking.
+        blocks: settleSubagents(turn.blocks, ev.ts_ms).map((b) =>
+          b.kind === "reasoning" && b.live
+            ? {
+                ...b,
+                live: false,
+                durationMs: b.durationMs ?? Math.max(0, ev.ts_ms - b.startedMs),
+              }
+            : b.kind === "tool" && b.question && !b.question.closed
+              ? {
+                  ...b,
+                  question: {
+                    ...b.question,
+                    closed: true,
+                    answers: b.question.answers.map((a) => a ?? { text: "", optionIndex: null, source: "closed" }),
+                  },
+                }
+              // Credential entry belongs to the person, not the turn's lifetime.
+              : b,
+        // An approval nobody answered stops offering buttons nothing listens to.
+        ).map(expireOpenApproval),
+        durationMs: num(p.duration_ms) ?? Math.max(0, ev.ts_ms - turn.startedMs),
+        usage:
+          p.usage && typeof p.usage === "object" && Object.keys(p.usage as object).length > 0
+            ? (p.usage as Record<string, unknown>)
+            : turn.liveUsage,
+        costUsd: num(p.cost_usd),
+        ...(typeof p.billed_via_key === "boolean" ? { billedViaKey: p.billed_via_key } : {}),
+        // A runtime's own error event earlier in the turn stays its reason
+        // when the end of the turn names none.
+        error: str(p.error, "") || turn.error || null,
+        errorDetails: str(p.error_details, "") || (str(p.error, "") ? null : turn.errorDetails ?? null),
+        ...(Array.isArray(p.background) && p.background.length > 0
+          ? { background: (p.background as unknown[]).map((name) => str(name)) }
+          : {}),
+        };
+      });
+      return {
+        ...finished,
+        pendingApprovals: finished.pendingApprovals.filter((a) => a.turnId !== turnId),
+      };
+    }
+
+    case "plan_ready":
+      return updateTurn(base, turnId, (turn) => ({
+        ...turn,
+        plan: { buildMode: str(p.build_mode), decision: null },
+      }));
+
+    case "tool_summary": {
+      const ids = Array.isArray(p.call_ids) ? p.call_ids.map(String).filter(Boolean) : [];
+      const title = str(p.summary).trim();
+      const last = ids[ids.length - 1];
+      if (!title || !last) return base;
+      return updateTurn(base, turnId, (turn) => ({ ...turn, toolTitles: { ...turn.toolTitles, [last]: title } }));
+    }
+
+    case "plan_resolved":
+      return updateTurn(base, turnId, (turn) =>
+        turn.plan ? { ...turn, plan: { ...turn.plan, decision: str(p.decision) || "keep" } } : turn,
+      );
+
+    case "session_updated":
+      return { ...base, sessionPatch: { ...p } };
+
+    case "error": {
+      const text = str(p.message);
+      if (!text) return base;
+      if (turnId && findTurn(base.items, turnId) >= 0) {
+        return updateTurn(base, turnId, (turn) => ({ ...turn, error: text, errorDetails: str(p.error_details, "") || null }));
+      }
+      return {
+        ...base,
+        items: [...base.items, { type: "error", id: `e-${seq || ev.ts_ms}`, text, tsMs: ev.ts_ms }],
+      };
+    }
+
+    case "notice": {
+      if (p.kind === "chat_control" && p.state && typeof p.state === "object") {
+        return { ...base, control: p.state as ChatControlState };
+      }
+      const text = str(p.text);
+      const kind = str(p.kind);
+      if (!text && !kind) return base;
+      if (kind === "approval_rule") {
+        // A rule saved from an approval card patches that card, never a row of its own.
+        const rule = parseSavedRule(p as Record<string, unknown>);
+        return rule ? noteApprovalRule(base, str(p.approval_id), rule, turnId) : base;
+      }
+      if (kind === "undo_available") {
+        // A reversible action's undo offer shows nowhere: a "Done: …" pop-up
+        // after every calendar entry or archived mail was noise.
+        return base;
+      }
+      if (kind === "coding_thread") {
+        // The agent handed work to a coding thread. No row of its own: the
+        // turn that started it shows the agent as a link in its answer.
+        return withCodingThread(base, codingThreadRef(p as Record<string, unknown>));
+      }
+      if (kind === "message_queued" && p.edited) {
+        // The person rewrote a waiting message: its line takes the new words in place.
+        const queueId = str(p.queue_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === "message_queued" && str(item.data.queue_id) === queueId,
+        );
+        if (index < 0) return base;
+        const line = base.items[index] as NoticeItem;
+        return { ...base, items: replaceAt(base.items, index, { ...line, text, data: { ...line.data, text } }) };
+      }
+      if (kind === "message_dequeued") {
+        // A waiting message started (or could not): its waiting line goes.
+        const queueId = str(p.queue_id);
+        const items = base.items.filter(
+          (item) => !(item.type === "notice" && item.kind === "message_queued" && str(item.data.queue_id) === queueId),
+        );
+        if (str(p.status) !== "failed") return { ...base, items };
+        const failed: NoticeItem = {
+          type: "notice", id: `n-${seq || ev.ts_ms}`, kind, text, agentName: str(p.agent_name),
+          agentId: str(p.agent_id), status: "failed", tsMs: ev.ts_ms,
+          data: p as Record<string, unknown>, resolved: "",
+        };
+        return { ...base, items: [...items, failed] };
+      }
+      if (kind === SIDE_THREAD_FINISHED) {
+        // A side thread ended: its line takes the outcome and the answer in
+        // place. One moved into the main thread leaves; its message shows there.
+        const sideId = str(p.side_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === SIDE_THREAD_STARTED && str(item.data.side_id) === sideId,
+        );
+        const status = str(p.status) || "done";
+        if (status === "moved") {
+          return index < 0 ? base : { ...base, items: base.items.filter((_, i) => i !== index) };
+        }
+        const { kind: _kind, ...outcome } = p as Record<string, unknown>;
+        if (index < 0) {
+          // Its opening line is outside what was loaded: the outcome stands alone.
+          const alone: NoticeItem = {
+            type: "notice", id: `n-${seq || ev.ts_ms}`, kind: SIDE_THREAD_STARTED, text, agentName: "",
+            agentId: "", status, tsMs: ev.ts_ms, data: { ...outcome, finished_ms: ev.ts_ms }, resolved: status,
+          };
+          return { ...base, items: [...base.items, alone] };
+        }
+        const line = base.items[index] as NoticeItem;
+        return {
+          ...base,
+          // When it ended: its answer stands in the conversation at that moment.
+          items: replaceAt(base.items, index, { ...line, status, resolved: status, data: { ...line.data, ...outcome, finished_ms: ev.ts_ms } }),
+        };
+      }
+      if (kind === ASIDE_ANSWERED || kind === ASIDE_DISMISSED) {
+        const asideId = str(p.aside_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === ASIDE_ASKED && str(item.data.aside_id) === asideId,
+        );
+        if (index < 0) return base;
+        if (kind === ASIDE_DISMISSED) return { ...base, items: base.items.filter((_, i) => i !== index) };
+        const card = base.items[index] as NoticeItem;
+        const status = str(p.status) || "done";
+        const { kind: _kind, ...outcome } = p as Record<string, unknown>;
+        return { ...base, items: replaceAt(base.items, index, { ...card, status, resolved: status, data: { ...card.data, ...outcome } }) };
+      }
+      if (kind === "browser_takeover_done") {
+        // The owner handed the browser back (or the ask lapsed): the card says so, no row of its own.
+        const requestId = str(p.request_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === "browser_takeover" && str(item.data.request_id) === requestId,
+        );
+        if (index < 0) return base;
+        const card = base.items[index] as NoticeItem;
+        return { ...base, items: replaceAt(base.items, index, { ...card, resolved: str(p.status) || "handed_back", status: str(p.status) }) };
+      }
+      if (kind === "approval_request_done") {
+        // The person answered (or nobody did): the card says how it ended, no row of its own.
+        const approvalId = str(p.approval_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === "approval_request" && str(item.data.approval_id) === approvalId,
+        );
+        if (index < 0) return base;
+        const card = base.items[index] as NoticeItem;
+        return { ...base, items: replaceAt(base.items, index, { ...card, resolved: str(p.status) || "expired", status: str(p.status) }) };
+      }
+      if (kind === "proposal_resolved") {
+        // The outcome of a proposal patches the card it answers, never a second row.
+        const proposalId = str(p.proposal_id);
+        const index = base.items.findIndex(
+          (item) => item.type === "notice" && item.kind === "proposal" && str(item.data.proposal_id) === proposalId,
+        );
+        if (index >= 0) {
+          const card = base.items[index] as NoticeItem;
+          return {
+            ...base,
+            items: replaceAt(base.items, index, {
+              ...card,
+              resolved: str(p.status) || "applied",
+              status: str(p.status),
+              text: text ? `${card.text}\n${text}` : card.text,
+              // An applied identity carries what an undo restores.
+              data: p.previous ? { ...card.data, previous: p.previous } : card.data,
+            }),
+          };
+        }
+      }
+      return {
+        ...base,
+        items: [
+          ...base.items,
+          {
+            type: "notice",
+            id: `n-${seq || ev.ts_ms}`,
+            kind,
+            text,
+            agentName: str(p.agent_name),
+            agentId: str(p.agent_id),
+            status: str(p.status),
+            tsMs: ev.ts_ms,
+            data: p as Record<string, unknown>,
+            resolved: "",
+          },
+        ],
+      };
+    }
+
+    default:
+      return base;
+  }
+}
+
+export function reduceEvents(tl: Timeline, events: AgentChatEvent[]): Timeline {
+  let cur = tl;
+  for (const ev of events) cur = reduceEvent(cur, ev);
+  return cur;
+}
+
+/**
+ * Close the running turn on screen the moment the person presses Stop. The
+ * backend can take seconds to confirm (an ACP runtime gets a grace period to
+ * acknowledge the cancel before it is killed); until then the turn reads as
+ * stopped, and the real `turn_finished` replaces this provisional end.
+ */
+export function localStopEvent(turnId: string, nowMs: number): AgentChatEvent {
+  // seq 0: a local event never moves the replay cursor the socket resumes from.
+  return { seq: 0, ts_ms: nowMs, kind: "turn_finished", payload: { turn_id: turnId, status: "cancelled", provisional: true } };
+}
+
+export function stopTurnLocally(tl: Timeline, turnId: string, nowMs: number): Timeline {
+  return reduceEvent(tl, localStopEvent(turnId, nowMs));
+}
+
+/** The turn still running, if any. */
+export function runningTurn(tl: Timeline): TurnItem | null {
+  for (let i = tl.items.length - 1; i >= 0; i -= 1) {
+    const it = tl.items[i];
+    if (it.type === "turn") return it.status === "running" ? it : null;
+  }
+  return null;
+}

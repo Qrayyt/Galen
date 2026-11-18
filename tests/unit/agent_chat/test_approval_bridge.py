@@ -1,0 +1,500 @@
+"""The chat's approval card answers the executor's ticket — with the REAL executor.
+
+No mocks: a real ``EventBus``, ``ToolExecutor``, ``ApprovalWorkflow`` and
+``RiskTierEvaluator``, the chat's folder tools, and the bridge in between.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from dodaios.agent_chat import folder_tools as ft
+from dodaios.agent_chat.approval_bridge import ChatApprovalBridge, ChatGrant, approval_ref
+from dodaios.core.bus import EventBus
+from dodaios.core.config import SafetyConfig
+from dodaios.core.events import ActionApprovalRequired, ActionApproved, ActionDenied
+from dodaios.core.protocols import ToolResult
+from dodaios.safety.approval import ApprovalWorkflow
+from dodaios.safety.risk_tier import RiskTierEvaluator
+from dodaios.safety.tool_executor import APPROVAL_DENIED_PREFIX, ToolExecutor
+
+SESSION = "sess-1"
+REF = approval_ref(SESSION)
+
+
+class _Card:
+    """The chat's card, scripted: records what it was asked, answers what it is told."""
+
+    def __init__(self, answer: str = "allow") -> None:
+        self.answer = answer
+        self.asked: list[tuple[str, str, dict[str, Any], str]] = []
+        self.release = asyncio.Event()
+        self.release.set()
+
+    async def __call__(self, call_id: str, name: str, args: dict[str, Any], summary: str) -> str:
+        self.asked.append((call_id, name, dict(args), summary))
+        await self.release.wait()
+        return self.answer
+
+
+def _stack(
+    *, timeout_s: float = 5.0, safety: SafetyConfig | None = None
+) -> tuple[ToolExecutor, ChatApprovalBridge, EventBus]:
+    bus = EventBus()
+    executor = ToolExecutor(
+        bus,
+        RiskTierEvaluator(safety or SafetyConfig()),
+        ApprovalWorkflow(bus, timeout_s=timeout_s),
+        default_timeout_s=timeout_s,
+    )
+    return executor, ChatApprovalBridge(bus), bus
+
+
+def _snapshot(timeout_s: float = 600.0) -> dict[str, Any]:
+    return {
+        "approval_surface": "interactive",
+        "approval_ref": REF,
+        "approval_timeout_s": timeout_s,
+    }
+
+
+def _grant(card: _Card, stance: str, always: set[str] | None = None) -> ChatGrant:
+    return ChatGrant(
+        session_id=SESSION,
+        turn_id="turn-1",
+        stance=stance,
+        always_allowed=always if always is not None else set(),
+        ask=card,
+        call_id_for=lambda name: f"row-{name}",
+    )
+
+
+def _denials(bus: EventBus) -> list[ActionDenied]:
+    seen: list[ActionDenied] = []
+
+    async def _capture(event: ActionDenied) -> None:
+        seen.append(event)
+
+    bus.subscribe(ActionDenied, _capture)
+    return seen
+
+
+# ------------------------------------------------------------------ ask
+
+
+async def test_ask_stance_runs_the_tool_only_after_the_card_allows(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("allow")
+    bridge.arm(REF, _grant(card, "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    result = await executor.execute(
+        write, {"file_path": "a.txt", "content": "hi"}, config_snapshot=_snapshot()
+    )
+
+    assert result.success, result.error
+    assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "hi"
+    assert card.asked == [("row-Write", "Write", {"file_path": "a.txt", "content": "hi"}, "a.txt")]
+
+
+async def test_deny_on_the_card_yields_approval_denied(tmp_path: Path):
+    executor, bridge, bus = _stack()
+    denials = _denials(bus)
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    result = await executor.execute(
+        write, {"file_path": "a.txt", "content": "hi"}, config_snapshot=_snapshot()
+    )
+
+    assert not result.success
+    assert result.error and result.error.startswith(APPROVAL_DENIED_PREFIX)
+    assert not (tmp_path / "a.txt").exists()
+    assert denials and denials[-1].reason == "declined by the person"
+
+
+class _OpenCard(_Card):
+    """A card nobody clicks; records whether it was closed under it."""
+
+    def __init__(self) -> None:
+        super().__init__("allow")
+        self.release.clear()
+        self.closed = False
+
+    async def __call__(self, call_id: str, name: str, args: dict[str, Any], summary: str) -> str:
+        try:
+            return await super().__call__(call_id, name, args, summary)
+        except asyncio.CancelledError:
+            self.closed = True
+            raise
+
+
+def _approvals(bus: EventBus) -> list[ActionApproved]:
+    seen: list[ActionApproved] = []
+
+    async def _capture(event: ActionApproved) -> None:
+        seen.append(event)
+
+    bus.subscribe(ActionApproved, _capture)
+    return seen
+
+
+async def test_an_expired_ticket_closes_its_card(tmp_path: Path):
+    """A click after the executor gave up must not read as an approval."""
+    executor, bridge, bus = _stack(timeout_s=0.05)
+    approvals = _approvals(bus)
+    card = _OpenCard()
+    bridge.arm(REF, _grant(card, "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    result = await executor.execute(
+        write, {"file_path": "a.txt", "content": "hi"}, config_snapshot=_snapshot(0.05)
+    )
+    await asyncio.sleep(0.01)
+
+    assert not result.success and not (tmp_path / "a.txt").exists()
+    assert card.asked and card.closed
+    card.release.set()
+    await asyncio.sleep(0.01)
+    assert approvals == []
+
+
+async def test_a_ticket_answered_elsewhere_closes_its_card(tmp_path: Path):
+    executor, bridge, bus = _stack()
+    card = _OpenCard()
+    bridge.arm(REF, _grant(card, "ask"))
+    tickets: list[ActionApprovalRequired] = []
+
+    async def _answer_elsewhere(event: ActionApprovalRequired) -> None:
+        tickets.append(event)
+
+    bus.subscribe(ActionApprovalRequired, _answer_elsewhere)
+    write = ft.folder_tools(tmp_path)["Write"]
+    running = asyncio.create_task(
+        executor.execute(write, {"file_path": "b.txt", "content": "x"}, config_snapshot=_snapshot())
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert card.asked and tickets
+    await bus.publish(
+        ActionApproved(trace_id=tickets[0].trace_id, tool_name="Write", approved_by="user")
+    )
+    result = await asyncio.wait_for(running, timeout=5.0)
+    await asyncio.sleep(0.01)
+
+    assert result.success
+    assert card.closed
+
+
+async def test_the_cards_own_answer_does_not_close_it_twice(tmp_path: Path):
+    executor, bridge, bus = _stack()
+    denials = _denials(bus)
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    await executor.execute(
+        write, {"file_path": "c.txt", "content": "x"}, config_snapshot=_snapshot()
+    )
+
+    assert [d.reason for d in denials][0] == "declined by the person"
+    assert bridge._asking == {}  # noqa: SLF001 - nothing left open
+
+
+async def test_reads_never_ask(tmp_path: Path):
+    (tmp_path / "r.txt").write_text("x", encoding="utf-8")
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "ask"))
+    read = ft.folder_tools(tmp_path)["Read"]
+    result = await executor.execute(read, {"file_path": "r.txt"}, config_snapshot=_snapshot())
+    assert result.success and card.asked == []
+
+
+async def test_the_bridge_never_blocks_the_executors_publish(tmp_path: Path):
+    """The card may take minutes; the executor's publish must return at once."""
+    executor, bridge, _ = _stack()
+    card = _Card("allow")
+    card.release.clear()  # the person has not clicked yet
+    bridge.arm(REF, _grant(card, "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    running = asyncio.create_task(
+        executor.execute(write, {"file_path": "b.txt", "content": "x"}, config_snapshot=_snapshot())
+    )
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert card.asked, "the card is open while the executor waits on its ticket"
+    assert not running.done()
+    card.release.set()
+    result = await asyncio.wait_for(running, timeout=5.0)
+    assert result.success
+
+
+# --------------------------------------------------------------- stances
+
+
+async def test_accept_edits_waves_writes_through_but_cards_commands(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "accept-edits"))
+    tools = ft.folder_tools(tmp_path)
+
+    written = await executor.execute(
+        tools["Write"], {"file_path": "c.txt", "content": "x"}, config_snapshot=_snapshot()
+    )
+    assert written.success and card.asked == []
+
+    ran = await executor.execute(
+        tools["RunCommand"], {"command": "echo hi"}, config_snapshot=_snapshot()
+    )
+    assert not ran.success and ran.error and ran.error.startswith(APPROVAL_DENIED_PREFIX)
+    assert [a[1] for a in card.asked] == ["RunCommand"]
+
+
+async def test_bypass_asks_nothing(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "bypass"))
+    tools = ft.folder_tools(tmp_path)
+    ran = await executor.execute(
+        tools["RunCommand"], {"command": "echo hi"}, config_snapshot=_snapshot()
+    )
+    assert ran.success, ran.error
+    assert card.asked == []
+
+
+async def test_bypass_ignores_an_explicit_require_approval_rule(tmp_path: Path):
+    """Bypass means nothing asks: not even Society's require-approval rules."""
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    grant = _grant(card, "bypass")
+    grant.force_ask = lambda _name, _args: True
+    bridge.arm(REF, grant)
+    run = ft.folder_tools(tmp_path)["RunCommand"]
+
+    ran = await executor.execute(run, {"command": "echo hi"}, config_snapshot=_snapshot())
+    assert ran.success, ran.error
+    assert card.asked == []
+
+
+async def test_bypass_sends_the_first_mail_to_a_new_recipient_without_a_card():
+    """A hard limit (here: a recipient never written to) asks in Ask, not in Bypass."""
+
+    class _Mail:
+        name = "gmail"
+        description = "mail"
+        risk_tier = "monitor"
+        schema: dict[str, Any] = {
+            "type": "object",
+            "properties": {"action": {}, "to": {}, "body": {}},
+        }
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def execute(self, args: dict[str, Any], ctx: Any) -> ToolResult:
+            self.calls.append(dict(args))
+            return ToolResult(success=True, output={"id": "m"})
+
+    args = {"action": "send_message", "to": "first@new.example", "body": "hi"}
+    # Ask first: a mail that went out makes its recipient known.
+    for stance, runs in (("ask", False), ("bypass", True)):
+        executor, bridge, _ = _stack(timeout_s=2.0)
+        card = _Card("deny")
+        bridge.arm(REF, _grant(card, stance, {"gmail"}))
+        mail = _Mail()
+        result = await executor.execute(mail, dict(args), config_snapshot=_snapshot())
+        assert result.success is runs, stance
+        assert (card.asked == []) is runs, stance
+
+
+async def test_require_approval_overrides_remembered_grants_in_every_stance(tmp_path: Path):
+    """An agent's explicit rule still asks after an earlier Always allow."""
+    for stance in ("ask", "accept-edits"):
+        executor, bridge, _ = _stack()
+        card = _Card("deny")
+        grant = _grant(card, stance, {"RunCommand"})
+        grant.pre_approved.add("RunCommand")
+        grant.force_ask = lambda _name, _args: True
+        bridge.arm(REF, grant)
+
+        run = ft.folder_tools(tmp_path)["RunCommand"]
+        result = await executor.execute(
+            run, {"command": "echo hi"}, config_snapshot=_snapshot()
+        )
+
+        assert not result.success and result.error, stance
+        assert result.error.startswith(APPROVAL_DENIED_PREFIX), stance
+        assert [asked[1] for asked in card.asked] == ["RunCommand"], stance
+
+
+async def test_always_ask_cards_even_a_remembered_tool(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "always_ask", {"RunCommand"}))
+    run = ft.folder_tools(tmp_path)["RunCommand"]
+    result = await executor.execute(run, {"command": "echo hi"}, config_snapshot=_snapshot())
+    assert not result.success and result.error
+    assert result.error.startswith(APPROVAL_DENIED_PREFIX)
+    assert [a[1] for a in card.asked] == ["RunCommand"]
+
+
+async def test_blacklist_wins_in_every_stance(tmp_path: Path):
+    safety = SafetyConfig()
+    safety.blacklist.commands = ["*forbidden-thing*"]  # fnmatch, as in jarvis.toml
+    for stance in ("ask", "accept-edits", "bypass", "always_ask"):
+        executor, bridge, _ = _stack(safety=safety)
+        card = _Card("allow")
+        bridge.arm(REF, _grant(card, stance))
+        run = ft.folder_tools(tmp_path)["RunCommand"]
+        result = await executor.execute(
+            run, {"command": "echo forbidden-thing"}, config_snapshot=_snapshot()
+        )
+        assert not result.success, stance
+        assert card.asked == [], f"{stance}: a blacklisted call must never reach a card"
+
+
+async def test_always_allow_remembers_the_tool_for_the_session(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    always: set[str] = set()
+    card = _Card("allow_always")
+    bridge.arm(REF, _grant(card, "ask", always))
+    write = ft.folder_tools(tmp_path)["Write"]
+
+    first = await executor.execute(
+        write, {"file_path": "d.txt", "content": "1"}, config_snapshot=_snapshot()
+    )
+    second = await executor.execute(
+        write, {"file_path": "e.txt", "content": "2"}, config_snapshot=_snapshot()
+    )
+    assert first.success and second.success
+    assert always == {"Write"}
+    assert len(card.asked) == 1, "the second write was waved through"
+
+
+async def test_a_cli_approval_pre_answers_the_executor_gate(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "ask"))
+    bridge.note_cli_approval(REF, "mcp__jarvis__Write")
+    write = ft.folder_tools(tmp_path)["Write"]
+    result = await executor.execute(
+        write, {"file_path": "f.txt", "content": "x"}, config_snapshot=_snapshot()
+    )
+    assert result.success and card.asked == []
+
+
+async def test_another_sessions_calls_are_not_answered(tmp_path: Path):
+    """A grant answers ITS session's calls only; an unarmed ref is left to the executor."""
+    executor, bridge, _ = _stack(timeout_s=0.2)
+    card = _Card("allow")
+    bridge.arm(approval_ref("other"), _grant(card, "bypass"))
+    write = ft.folder_tools(tmp_path)["Write"]
+    result = await executor.execute(
+        write, {"file_path": "g.txt", "content": "x"}, config_snapshot=_snapshot(timeout_s=0.2)
+    )
+    assert not result.success and card.asked == []
+
+
+# --------------------------------------------------------------- executor
+
+
+async def test_the_surface_declares_the_timeout_within_the_cap():
+    executor, _, _ = _stack(timeout_s=5.0)
+    assert executor._approval_timeout(None) == 5.0
+    assert executor._approval_timeout({}) == 5.0
+    assert executor._approval_timeout({"approval_timeout_s": 600}) == 600.0
+    assert executor._approval_timeout({"approval_timeout_s": 2}) == 5.0, "never below the default"
+    assert executor._approval_timeout({"approval_timeout_s": 5000}) == 900.0, "never above the cap"
+    assert executor._approval_timeout({"approval_timeout_s": "nonsense"}) == 5.0
+
+
+async def test_the_approval_event_carries_the_chat_ref(tmp_path: Path):
+    executor, bridge, bus = _stack()
+    seen: list[ActionApprovalRequired] = []
+
+    async def _capture(event: ActionApprovalRequired) -> None:
+        seen.append(event)
+
+    bus.subscribe(ActionApprovalRequired, _capture)
+    bridge.arm(REF, _grant(_Card("allow"), "ask"))
+    write = ft.folder_tools(tmp_path)["Write"]
+    await executor.execute(
+        write, {"file_path": "h.txt", "content": "x"}, config_snapshot=_snapshot()
+    )
+    assert seen and seen[0].approval_ref == REF
+    assert seen[0].expires_at_ns > 0
+
+
+def test_a_vendor_cli_on_its_top_rung_takes_the_bypass_stance():
+    """Bypass / Full access on a coding agent: Dodaios' own tools ask nothing either."""
+    from types import SimpleNamespace
+
+    from dodaios.agent_chat.runner_cli import bridge_stance
+
+    cases = [
+        ("claude-cli", "bypassPermissions", "bypass"),
+        ("codex-cli", "full-access", "bypass"),
+        ("claude-cli", "default", "ask"),
+        ("claude-cli", "acceptEdits", "ask"),
+        ("claude-cli", "auto", "ask"),
+        ("codex-cli", "auto", "ask"),
+        ("claude-cli", "", "ask"),
+    ]
+    for runner, mode, want in cases:
+        assert bridge_stance(runner, SimpleNamespace(permission_mode=mode)) == want, (runner, mode)
+
+
+class _Pay:
+    """A tool that pays (``trust.hard_limits`` "money")."""
+
+    name = "stripe"
+    description = "payments"
+    risk_tier = "monitor"
+    schema: dict[str, Any] = {"type": "object", "properties": {"action": {}, "amount": {}}}
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def execute(self, args: dict[str, Any], ctx: Any) -> ToolResult:
+        self.calls.append(dict(args))
+        return ToolResult(success=True, output={"id": "p"})
+
+
+async def test_bypass_still_asks_before_moving_money():
+    """The person, 2026-11-18: paying asks in every mode, Bypass too."""
+    executor, bridge, _ = _stack(timeout_s=2.0)
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "bypass", {"stripe"}))
+    pay = _Pay()
+    result = await executor.execute(
+        pay, {"action": "charge", "amount": 4999}, config_snapshot=_snapshot()
+    )
+    assert not result.success and pay.calls == []
+    assert [a[1] for a in card.asked] == ["stripe"]
+
+
+async def test_bypass_still_asks_before_wiping_the_home_folder(tmp_path: Path):
+    executor, bridge, _ = _stack(timeout_s=2.0)
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "bypass"))
+    run = ft.folder_tools(tmp_path)["RunCommand"]
+    result = await executor.execute(run, {"command": "rm -rf ~"}, config_snapshot=_snapshot())
+    assert not result.success
+    assert [a[1] for a in card.asked] == ["RunCommand"]
+
+
+async def test_bypass_runs_ordinary_commands_without_a_card(tmp_path: Path):
+    executor, bridge, _ = _stack()
+    card = _Card("deny")
+    bridge.arm(REF, _grant(card, "bypass"))
+    run = ft.folder_tools(tmp_path)["RunCommand"]
+    result = await executor.execute(
+        run, {"command": "echo build"}, config_snapshot=_snapshot()
+    )
+    assert result.success, result.error
+    assert card.asked == []

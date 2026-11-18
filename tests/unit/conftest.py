@@ -1,0 +1,127 @@
+"""Keep every unit test away from the developer's real polish credentials.
+
+``[dictation].polish`` ships ON, and the pass resolves its provider chain from
+whatever keys the HOST holds. That combination is fine in production and
+poisonous in a test suite: the moment the dictation delivery path grew a polish
+hook, every test that finishes a dictation with a default ``DictationConfig``
+started making a live model call on a machine that happens to have a Groq or
+Gemini key — billing the developer, taking up to the full latency ceiling per
+test, and returning text that is legitimately different every run. On CI, which
+holds no keys at all, the same tests take the empty-chain path and pass
+instantly. A suite whose behaviour depends on who is running it is the AP-23
+inversion in miniature.
+
+So the CONSUMER's view of the chain is emptied for every unit test: the pass
+resolves no family, reports ``unavailable``, and hands back the raw transcript —
+byte-identical to the behaviour before the feature existed, which is exactly
+what the vast majority of these tests are asserting about.
+
+Two things this deliberately does NOT do:
+
+* It does not touch ``dodaios.dictation.polish_client.resolve_polish_chain``.
+  That function is itself under test (key-aware ordering, one entry per family,
+  the pin), and neutralising it would make those tests assert against this
+  fixture instead of against the code.
+* It does not stop a test from polishing. A test that wants the pass to run
+  patches the same attribute in its own body, which happens after this fixture
+  and therefore wins — the pattern the polish-pipeline tests already use.
+
+This lives at the ``tests/unit`` level rather than in the dictation folder on
+purpose: the delivery path is reached from the speech suite and from the REST
+route suite as well, and a guarantee that only covers the tests somebody
+remembered is not a guarantee (the same reasoning as the root conftest's
+history redirect).
+"""
+from __future__ import annotations
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_trust_stores(tmp_path_factory: pytest.TempPathFactory):
+    """Every test starts with empty trust stores (dodaios/trust).
+
+    The standing rules and the known recipients persist under the data dir on
+    purpose; between tests that persistence would leak one test's "always
+    allow" or "already wrote to a@b.c" into the next one's approval card.
+    """
+    from dodaios.trust.audit import AuditLog, set_audit_log
+    from dodaios.trust.recipients import KnownRecipients, set_known_recipients
+    from dodaios.trust.rules import TrustRules, set_trust_rules
+    from dodaios.trust.undo import undo_ledger
+
+    root = tmp_path_factory.mktemp("trust")
+    set_trust_rules(TrustRules(root / "rules.json"))
+    set_known_recipients(KnownRecipients(root / "recipients.json"))
+    audit = AuditLog(root / "audit.db")
+    set_audit_log(audit)
+    undo_ledger()._reset_for_tests()
+    from dodaios.safety.stop_hold import StopHolds, set_stop_holds
+
+    set_stop_holds(StopHolds(root / "stop_holds.json"))
+    yield
+    audit.close()
+    set_audit_log(None)
+    set_stop_holds(None)
+    set_trust_rules(None)
+    set_known_recipients(None)
+    undo_ledger()._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _polish_pass_holds_no_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the polish pass see an empty provider chain, as a keyless host does."""
+    from dodaios.dictation import polish
+
+    monkeypatch.setattr(polish, "resolve_polish_chain", lambda cfg: ())
+
+
+@pytest.fixture(autouse=True)
+def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never ask the developer's real macOS Keychain for a Claude login.
+
+    On a Mac every ``claude_login_in`` without a credentials file probes the
+    Keychain through ``/usr/bin/security``. A test that wants an item patches
+    the probe in its own body, after this fixture.
+    """
+    from dodaios import claude_credentials
+
+    monkeypatch.setattr(claude_credentials, "_keychain_item_exists", lambda _service: False)
+    monkeypatch.setattr(claude_credentials, "_keychain_secret", lambda _service: None)
+
+
+@pytest.fixture
+def speech_by_loudness(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the dictation's speech map judge by loudness instead of its model.
+
+    The recordings unit tests build are tones and constant signals. The speech
+    model rightly hears no speech in those, and a recording without speech is
+    never sent to a recognizer. With the loudness detector a loud stretch
+    counts as speech and digital silence does not, which is what such a test
+    means to say.
+    """
+    from dodaios.dictation import speech_map
+
+    def _no_model(self: object) -> bool:
+        self._model_failed = True  # type: ignore[attr-defined]
+        return False
+
+    monkeypatch.setattr(speech_map.SpeechMapper, "_ensure_model", _no_model)
+
+
+@pytest.fixture(autouse=True)
+def _proactive_voice_without_a_model():
+    """A notice the assistant tells on its own is worded without a real model call.
+
+    ``agent_chat/proactive_voice.py`` asks a connected subscription for the
+    words; a test that posts a reminder into the lead's chat must neither wait
+    for the batching pause nor reach a CLI. The written sentence is used.
+    """
+    from dodaios.agent_chat import proactive_voice
+
+    async def no_model(prompt: str) -> None:
+        return None
+
+    proactive_voice.set_desk(proactive_voice.VoiceDesk(write=no_model, settle_s=0.0))
+    yield
+    proactive_voice.set_desk(None)

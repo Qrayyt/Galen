@@ -1,0 +1,454 @@
+"""Files dropped, pasted or picked into a chat composer.
+
+Covers the whole path the composer uses: the attach route stores the bytes and
+returns what was read from them, and the message that follows carries those
+contents into the turn while the timeline still shows the person's own
+sentence.
+
+The vision layer is faked throughout. What is under test is the wiring — that a
+chat can take a file at all, which is what it could not do — not whether a
+model describes a picture well.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from dodaios.agent_chat import attachments as chat_attachments
+from dodaios.agent_chat.events import make_event, shown_text
+from dodaios.agent_chat.service import AgentChatService
+from dodaios.agent_chat.store import AgentChatStore
+from dodaios.agentic_ide import drop_analysis
+from dodaios.ui.web.agent_chat_routes import router
+
+# A one-pixel PNG — real bytes, so the store and the mime guess behave.
+PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6360000002000100" + "05fe02fe" + "0000000049454e44ae426082"
+)
+
+
+def _app(tmp_path: Path) -> FastAPI:
+    app = FastAPI()
+    app.include_router(router)
+    app.state.agent_chat = None
+    app.state.agent_chat_factory = lambda: AgentChatService(
+        AgentChatStore(tmp_path / "db.sqlite"), default_cwd=lambda: str(tmp_path)
+    )
+    return app
+
+
+@pytest.fixture
+def described(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every image comes back described, without a provider being involved."""
+
+    async def fake_analyze(items, **_kwargs):  # noqa: ANN001, ANN202
+        return [
+            drop_analysis.DropAnalysis(
+                name=item.name,
+                reference=reference,
+                kind="image",
+                detail="A screenshot of a chat composer with no attach button.",
+                described_by=drop_analysis.BY_VISION,
+            )
+            for item, reference in items
+        ]
+
+    monkeypatch.setattr(drop_analysis, "analyze", fake_analyze)
+
+
+# ---------------------------------------------------------------- the route
+
+
+def test_attach_stores_the_bytes_and_returns_what_was_read(tmp_path: Path, described) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            files=[("files", ("shot.png", PNG, "image/png"))],
+            data={"cwd": str(tmp_path), "surface": "jarvis"},
+        )
+        assert res.status_code == 200, res.text
+        body = res.json()
+
+    (row,) = body["attachments"]
+    assert row["name"].endswith(".png")
+    assert row["described_by"] == "vision"
+    assert "composer" in row["detail"]
+    # The copy landed in the chat's own folder, where the agent can open it.
+    copies = list((tmp_path / ".jarvis" / "drops").glob("*.png"))
+    assert len(copies) == 1
+    assert copies[0].read_bytes() == PNG
+
+
+def test_attach_falls_back_to_the_surface_folder_when_the_cwd_is_gone(
+    tmp_path: Path, described
+) -> None:
+    """A remembered folder that no longer exists must not refuse the file."""
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            files=[("files", ("shot.png", PNG, "image/png"))],
+            data={"cwd": str(tmp_path / "moved-away"), "surface": "agent"},
+        )
+    assert res.status_code == 200, res.text
+    assert res.json()["cwd"] == str(tmp_path)
+
+
+def test_attach_refuses_an_empty_drop(tmp_path: Path) -> None:
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            data={"cwd": str(tmp_path), "paths": "   \n  "},
+        )
+    assert res.status_code == 422
+    assert "nothing" in res.json()["detail"].lower()
+
+
+def test_a_recording_too_large_to_read_still_comes_back(
+    tmp_path: Path, described, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 60 MB screen recording is never analysed, but it is still attached.
+
+    An empty answer made the composer say the drop carried nothing usable.
+    """
+    from dodaios.agentic_ide import drops
+
+    monkeypatch.setattr(drops, "read_for_analysis", lambda _source, **_kw: None)
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            files=[("files", ("recording.mp4", b"0" * 4096, "video/mp4"))],
+            data={"cwd": str(tmp_path), "surface": "jarvis"},
+        )
+    assert res.status_code == 200, res.text
+    (row,) = res.json()["attachments"]
+    assert row["name"].endswith(".mp4")
+    assert row["reference"]
+    assert row["kind"] == "other"
+    assert len(list((tmp_path / ".jarvis" / "drops").glob("*.mp4"))) == 1
+
+
+def test_every_file_comes_back_when_only_some_are_read(
+    tmp_path: Path, described, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A picture next to a large video: both come back, in drop order."""
+    from dodaios.agentic_ide import drops
+
+    real = drops.read_for_analysis
+    monkeypatch.setattr(
+        drops, "read_for_analysis",
+        lambda source, **kw: None if drops.size_of(source) > 1000 else real(source, **kw),
+    )
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            files=[
+                ("files", ("recording.mp4", b"0" * 4096, "video/mp4")),
+                ("files", ("shot.png", PNG, "image/png")),
+            ],
+            data={"cwd": str(tmp_path), "surface": "jarvis"},
+        )
+    assert res.status_code == 200, res.text
+    video, picture = res.json()["attachments"]
+    assert video["name"].endswith(".mp4") and video["described_by"] == "none"
+    assert picture["name"].endswith(".png") and picture["described_by"] == "vision"
+
+
+def test_files_still_come_back_when_the_analysis_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def broken(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(drop_analysis, "analyze", broken)
+    found = asyncio.run(
+        chat_attachments.ingest(tmp_path, uploads=[("shot.png", PNG)], always_copy=True)
+    )
+    (item,) = found
+    assert item.kind == "image"
+    assert item.reference
+
+
+def test_a_path_inside_the_folder_is_referenced_where_it_lies(
+    tmp_path: Path, described
+) -> None:
+    """Nothing is copied for a file the agent can already open."""
+    existing = tmp_path / "notes.png"
+    existing.write_bytes(PNG)
+
+    with TestClient(_app(tmp_path)) as client:
+        res = client.post(
+            "/api/agent-chat/attachments",
+            data={"cwd": str(tmp_path), "paths": str(existing)},
+        )
+    assert res.status_code == 200, res.text
+    (row,) = res.json()["attachments"]
+    assert "notes.png" in row["reference"]
+    assert not (tmp_path / ".jarvis" / "drops").exists()
+
+
+def test_live_call_copies_an_in_folder_path_into_its_verified_drop_store(
+    tmp_path: Path, described, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live input endpoint accepts only the existing upload receipt."""
+    from dodaios.live import runtime
+
+    class Call:
+        session_id = "live-call"
+        is_active = True
+        composer_available = True
+        _composer_cwd = str(tmp_path)
+
+    monkeypatch.setattr(runtime, "_active", {})
+    monkeypatch.setattr(runtime, "_owners", {})
+    source = tmp_path / "notes.png"
+    source.write_bytes(PNG)
+    with TestClient(_app(tmp_path)) as client:
+        client.portal.call(runtime.register, Call())
+        response = client.post(
+            "/api/agent-chat/attachments",
+            data={"voice_session_id": "live-call", "paths": str(source)},
+        )
+        client.portal.call(runtime.unregister, "live-call")
+    assert response.status_code == 200, response.text
+    (row,) = response.json()["attachments"]
+    assert ".jarvis/drops/" in row["reference"]
+    from dodaios.agentic_ide.drops import dereference
+
+    assert (tmp_path / dereference(row["reference"])).read_bytes() == PNG
+
+
+def test_an_attached_picture_is_served_back_for_its_thumbnail(
+    tmp_path: Path, described
+) -> None:
+    """A file attached by path has no bytes in the window; the route draws it."""
+    outside = tmp_path / "gallery"
+    outside.mkdir()
+    shot = outside / "appshot.png"
+    shot.write_bytes(PNG)
+    folder = tmp_path / "project"
+    folder.mkdir()
+
+    with TestClient(_app(tmp_path)) as client:
+        attached = client.post(
+            "/api/agent-chat/attachments",
+            data={"cwd": str(folder), "paths": str(shot)},
+        ).json()
+        (row,) = attached["attachments"]
+        res = client.get(
+            "/api/agent-chat/attachments/file",
+            params={"cwd": attached["cwd"], "reference": row["reference"]},
+        )
+    assert res.status_code == 200, res.text
+    assert res.headers["content-type"] == "image/png"
+    assert res.content == PNG
+
+
+def test_the_thumbnail_route_serves_nothing_outside_the_folder(tmp_path: Path) -> None:
+    folder = tmp_path / "project"
+    folder.mkdir()
+    (tmp_path / "secret.png").write_bytes(PNG)
+    (folder / "notes.txt").write_text("not a picture", encoding="utf-8")
+    (folder / "logo.svg").write_text("<svg/>", encoding="utf-8")
+
+    with TestClient(_app(tmp_path)) as client:
+        refused = [
+            '"../secret.png"',
+            f'"{tmp_path / "secret.png"}"',
+            '"notes.txt"',
+            '"logo.svg"',
+            '""',
+        ]
+        for reference in refused:
+            res = client.get(
+                "/api/agent-chat/attachments/file",
+                params={"cwd": str(folder), "reference": reference},
+            )
+            assert res.status_code == 404, reference
+
+
+# ------------------------------------------------------------- composition
+
+
+def test_compose_leaves_an_ordinary_message_alone() -> None:
+    assert chat_attachments.compose("what is this", []) == "what is this"
+    assert chat_attachments.compose("  spaced  ", None) == "spaced"
+
+
+def test_compose_carries_the_contents_into_the_message() -> None:
+    item = drop_analysis.DropAnalysis(
+        name="shot.png",
+        reference='"shot.png"',
+        kind="image",
+        detail="A red error banner over the login form.",
+        described_by=drop_analysis.BY_VISION,
+    )
+    out = chat_attachments.compose("fix this", [item])
+
+    assert out.startswith("fix this")
+    # The description is what makes the drop useful to a model that cannot open
+    # the file, so it must be IN the message, not merely referenced.
+    assert "A red error banner over the login form." in out
+    assert "shot.png" in out
+
+
+def test_to_analysis_survives_a_malformed_row() -> None:
+    """The rows come back from a browser, so no shape may be assumed.
+
+    A message somebody is waiting to send must not 500 over a stray field:
+    anything that is not an object is dropped, and a row with a missing or
+    mistyped field degrades to a named, empty-detail attachment.
+    """
+    rows = [
+        {"name": "ok.png", "kind": "image", "detail": "d", "described_by": "vision"},
+        {"kind": "image"},  # no name — kept under a placeholder, not dropped
+        "not a dict",  # not an object at all — dropped
+        {"name": "odd.txt", "detail": 42},  # wrong type — degrades to empty
+    ]
+    out = chat_attachments.to_analysis(rows)  # type: ignore[arg-type]
+    assert [item.name for item in out] == ["ok.png", "file", "odd.txt"]
+    assert out[2].detail == ""
+
+
+# ------------------------------------------------------ the message it rides
+
+
+def test_a_message_with_files_shows_the_sentence_and_sends_the_contents(
+    tmp_path: Path,
+) -> None:
+    """The event log holds both halves, and each is used for its own job."""
+    svc = AgentChatService(
+        AgentChatStore(tmp_path / "db.sqlite"), default_cwd=lambda: str(tmp_path)
+    )
+    session = svc.store.create_session(
+        provider="fakeprov", model="", effort="", cwd=str(tmp_path)
+    )
+
+    async def run() -> None:
+        # No runner is reachable for "fakeprov" here, so the turn fails after
+        # the user message is persisted — which is the part under test.
+        await svc.send(
+            session.session_id,
+            "what is wrong here",
+            [
+                {
+                    "name": "shot.png",
+                    "reference": '"shot.png"',
+                    "kind": "image",
+                    "detail": "A red error banner.",
+                    "described_by": "vision",
+                    "note": "",
+                }
+            ],
+        )
+        await svc.cancel(session.session_id)
+
+    asyncio.run(run())
+
+    events = svc.store.list_events(session.session_id)
+    user = next(e for e in events if e["kind"] == "user_message")
+    payload = user["payload"]
+    # What the person typed — the timeline shows this.
+    assert payload["typed"] == "what is wrong here"
+    # What the turn received — history rebuilds from this.
+    assert "A red error banner." in payload["text"]
+    assert payload["text"].startswith("what is wrong here")
+    # The receipt the timeline draws under the message.
+    assert payload["attachments"] == [
+        {"name": "shot.png", "kind": "image", "described_by": "vision", "note": ""}
+    ]
+    # The thread's name and preview are the person's words, not the file note.
+    stored = svc.store.get_session(session.session_id)
+    assert stored is not None
+    assert stored.title == "what is wrong here"
+    assert stored.preview == "what is wrong here"
+
+
+def test_files_alone_are_a_complete_message(tmp_path: Path) -> None:
+    """Dropping a picture and pressing Enter says enough."""
+    svc = AgentChatService(
+        AgentChatStore(tmp_path / "db.sqlite"), default_cwd=lambda: str(tmp_path)
+    )
+    session = svc.store.create_session(
+        provider="fakeprov", model="", effort="", cwd=str(tmp_path)
+    )
+
+    async def run() -> None:
+        await svc.send(
+            session.session_id,
+            "",
+            [{"name": "shot.png", "reference": "x", "kind": "image", "detail": "A chart."}],
+        )
+        await svc.cancel(session.session_id)
+
+    asyncio.run(run())
+    user = next(
+        e for e in svc.store.list_events(session.session_id) if e["kind"] == "user_message"
+    )
+    assert "A chart." in user["payload"]["text"]
+    # Nothing was typed, so no chat may show the prompt as the person's words:
+    # the sentence is empty and the file's name stands for the message.
+    assert user["payload"]["typed"] == ""
+    assert shown_text(user["payload"]) == "shot.png"
+    stored = svc.store.get_session(session.session_id)
+    assert stored is not None
+    assert stored.title == "shot.png"
+    assert stored.preview == "shot.png"
+    assert svc.store.title_is_automatic(stored)
+
+
+def test_shown_text_is_the_sentence_and_never_the_file_note() -> None:
+    prompt = chat_attachments.compose(
+        "look", chat_attachments.to_analysis([{"name": "a.png", "kind": "image"}])
+    )
+    assert "Files the user attached" in prompt
+    files = [{"name": "a.png", "kind": "image"}, {"name": "b.pdf", "kind": "document"}]
+    assert shown_text({"text": prompt, "typed": "look", "attachments": files}) == "look"
+    assert shown_text({"text": prompt, "typed": "", "attachments": files}) == "a.png, b.pdf"
+    # No files and no separate display text: the message is its text.
+    assert shown_text({"text": "plain"}) == "plain"
+    assert shown_text({"text": "the prompt", "typed": ""}) == "the prompt"
+    assert shown_text({}) == ""
+
+
+def test_a_title_from_before_the_fix_still_counts_as_automatic(tmp_path: Path) -> None:
+    """A thread named after the composed prompt may still be renamed for the person."""
+    store = AgentChatStore(tmp_path / "db.sqlite")
+    prompt = chat_attachments.compose(
+        "", chat_attachments.to_analysis([{"name": "a.png", "kind": "image"}])
+    )
+    old_title = " ".join(prompt.split())[:79].rstrip() + "…"
+    session = store.create_session(
+        provider="fakeprov", model="", effort="", cwd=str(tmp_path), title=old_title
+    )
+    store.append_event(
+        session.session_id,
+        make_event(
+            "user_message",
+            {"text": prompt, "typed": "", "attachments": [{"name": "a.png", "kind": "image"}]},
+        ),
+    )
+    stored = store.get_session(session.session_id)
+    assert stored is not None
+    assert stored.title == old_title
+    assert store.title_is_automatic(stored)
+
+
+def test_an_empty_message_with_nothing_attached_is_still_refused(tmp_path: Path) -> None:
+    svc = AgentChatService(
+        AgentChatStore(tmp_path / "db.sqlite"), default_cwd=lambda: str(tmp_path)
+    )
+    session = svc.store.create_session(
+        provider="fakeprov", model="", effort="", cwd=str(tmp_path)
+    )
+
+    async def run() -> None:
+        with pytest.raises(ValueError):
+            await svc.send(session.session_id, "   ", [])
+
+    asyncio.run(run())

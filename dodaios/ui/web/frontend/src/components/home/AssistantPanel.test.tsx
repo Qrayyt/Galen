@@ -1,0 +1,603 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EMPTY_TIMELINE, type TimelineItem } from "@/components/agentchat/reduce";
+import { takePluginFocus } from "@/lib/customConnector";
+import { RITUAL_LIMITS, ritual, ritualDay } from "@/lib/ritualsApi.testkit";
+import { useAgentChatStore } from "@/store/agentChat";
+import { useEventStore } from "@/store/events";
+import { useIdeThreadsStore } from "@/store/ideThreads";
+import { useNodePeek } from "@/store/nodePeek";
+import { useSettingsJump } from "@/store/settingsJump";
+
+const chats = vi.hoisted(() => ({
+  rows: [] as { kind: "voice" | "agent"; id: string; title: string; preview: string; updatedMs: number; messageCount: number; provider: string; raw: null }[],
+  active: "",
+  open: vi.fn(),
+}));
+vi.mock("@/components/home/chatRows", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/home/chatRows")>()),
+  useChatRows: () => ({ rows: chats.rows, isActive: (row: { id: string }) => row.id === chats.active, open: chats.open, remove: vi.fn() }),
+}));
+vi.mock("@/components/home/AssistantRoutineDialog", () => ({
+  default: ({ routineId, onClose }: { routineId: string; onClose: () => void }) => (
+    <div data-testid="routine-dialog">{routineId}<button onClick={onClose}>Close routine</button></div>
+  ),
+}));
+vi.mock("@/components/home/AssistantFileDialog", () => ({
+  default: ({ fileId }: { fileId: string }) => <div data-testid="file-dialog">{fileId}</div>,
+}));
+vi.mock("@/components/home/RitualDialog", () => ({
+  default: ({ ritualId, onClose }: { ritualId: string | null; onClose: () => void }) => (
+    <div data-testid="ritual-dialog">{ritualId ?? "a new one"}<button onClick={onClose}>Close ritual</button></div>
+  ),
+}));
+vi.mock("@/components/pets/PetMark", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/pets/PetMark")>()),
+  PetMark: ({ state }: { state?: string }) => <span data-testid="pet" data-state={state} />,
+}));
+vi.mock("@/hooks/useVoiceEngineDisplay", () => ({
+  useVoiceEngineDisplay: () => ({ tier: "realtime", providerId: "test", providerLabel: "Test Voice", model: "m1" }),
+}));
+vi.mock("@/views/assistant/api", () => ({
+  useSoulProfile: () => ({ isLoading: false, data: { name: "Nova", wake_phrase: "Hey Nova", learning: true, files: [
+    { id: "soul", filename: "SOUL.md" }, { id: "instructions", filename: "Nova.md" },
+    { id: "memory", filename: "MEMORY.md" }, { id: "user", filename: "USER.md" },
+  ] } }),
+}));
+const skills = vi.hoisted(() => ({ list: [] as { name: string; state: string }[], set: vi.fn() }));
+vi.mock("@/hooks/useSkills", () => ({
+  useSkillsList: () => ({ isLoading: false, data: { skills: skills.list } }),
+  useSetSkillEnabled: () => ({ isPending: false, mutate: skills.set }),
+}));
+const tasks = vi.hoisted(() => ({ setTaskEnabled: vi.fn(async () => undefined) }));
+vi.mock("@/lib/tasksApi", () => ({ setTaskEnabled: tasks.setTaskEnabled }));
+const call = vi.hoisted(() => ({ live: false, busy: false, toggle: vi.fn() }));
+vi.mock("@/components/home/assistantStatus", () => ({
+  useVoiceModeSwitch: () => ({ on: call.live, live: call.live, busy: call.busy, enter: call.toggle, exit: call.toggle, toggle: call.toggle }),
+}));
+vi.mock("@/lib/voiceApi", () => ({ warmVoiceCall: vi.fn() }));
+const external = vi.hoisted(() => ({ open: vi.fn(async () => true) }));
+vi.mock("@/lib/openExternal", () => ({ openExternalUrl: external.open }));
+const local = vi.hoisted(() => ({ open: vi.fn(async () => true) }));
+vi.mock("@/lib/openLocalPath", () => ({ openLocalPath: local.open }));
+
+import AssistantPanel from "./AssistantPanel";
+
+function chat(id: string, title: string, updatedMs: number) {
+  return { kind: "agent" as const, id, title, preview: "", updatedMs, messageCount: 2, provider: "", raw: null };
+}
+
+/** What the backend answers, by path; a test overrides the paths it is about. */
+type Backend = Record<string, unknown>;
+
+function mount(routines: unknown[], backend: Backend = {}) {
+  const answers: Backend = {
+    "/api/agent-chat/lead": { session_id: "lead", computer_id: "" },
+    "/api/society/agents/jarvis/routines": { routines },
+    "/api/computers": { computers: [] },
+    "/api/computers/this": { name: "Adas-MacBook-Pro.local", os_id: "macos" },
+    "/api/agent-chat/lead/threads": { threads: [] },
+    "/api/agent-chat/lead/channels": { channels: [] },
+    "/api/agent-chat/lead/files": { files: [] },
+    "/api/agent-chat/lead/rituals": { available: true, rituals: [], limits: RITUAL_LIMITS },
+    "/api/outputs": [],
+    ...backend,
+  };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const path = String(url).split("?")[0];
+    return path in answers
+      ? new Response(JSON.stringify(answers[path]), { status: 200 })
+      : new Response("{}", { status: 404 });
+  }));
+  const onConversation = vi.fn();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(<QueryClientProvider client={client}><AssistantPanel onConversation={onConversation} /></QueryClientProvider>);
+  return onConversation;
+}
+
+function library() {
+  fireEvent.click(screen.getByTestId("assistant-panel-tab-library"));
+}
+
+function computer(id: string, name: string, status = "online") {
+  return { id, name, kind: "server", provider: "generic", host: `${id}.example`, port: 22, username: "root", auth: "key",
+    provider_ref: null, region: null, plan: null, host_key: null, host_fingerprint: null, created_at: 1, facts: null,
+    health: { status, checked_at: 1, latency_ms: 20, message: null, load_1m: null, mem_used_pct: null, disk_used_pct: null, uptime_s: null },
+    enabled: true, busy: false };
+}
+
+function thread(id: string, title: string, more: Record<string, unknown> = {}) {
+  return { session_id: id, title, cli_title: "", provider: "claude", cwd: "/work", briefed_ms: 100, updated_ms: 100, running: false, waiting: false, ...more };
+}
+
+function turn(status: "running" | "done" | "error" | "cancelled", blocks: unknown[] = [], more: Record<string, unknown> = {}): TimelineItem {
+  return { type: "turn", id: `t-${status}`, provider: "", model: "", effort: "", runner: "", status, blocks, startedMs: 1,
+    durationMs: null, usage: null, liveUsage: null, costUsd: null, error: null, ...more } as unknown as TimelineItem;
+}
+
+/** Put the conversation on stage with these items. */
+function onStage(items: TimelineItem[]) {
+  act(() => useAgentChatStore.setState({ activeSessionId: "lead", timeline: { ...EMPTY_TIMELINE, items } }));
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  chats.rows = [];
+  chats.active = "";
+  chats.open.mockReset();
+  skills.list = [];
+  skills.set.mockReset();
+  tasks.setTaskEnabled.mockClear();
+  call.live = false;
+  call.busy = false;
+  call.toggle.mockReset();
+  external.open.mockClear();
+  local.open.mockClear();
+  takePluginFocus();
+  useEventStore.setState({ activeSection: "chats", connected: true, visualStage: null, assistantName: "Nova" });
+  useAgentChatStore.setState({ activeSessionId: null, timeline: EMPTY_TIMELINE, sessions: [] });
+  useIdeThreadsStore.setState({ seen: {} });
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe("AssistantPanel", () => {
+  it("shows the person's pet and the name they gave the assistant, and they lead back to the conversation", () => {
+    const onConversation = mount([]);
+    const face = screen.getByTestId("assistant-panel-conversation");
+    expect(face.textContent).toContain("Nova");
+    expect(face.textContent).not.toContain("Dodaios");
+    expect(face.querySelector('[data-testid="pet"]')).toBeTruthy();
+    fireEvent.click(face);
+    expect(onConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to the product's name while the assistant has none of its own", () => {
+    useEventStore.setState({ assistantName: "Assistant" });
+    mount([]);
+    expect(screen.getByTestId("assistant-panel-conversation").textContent).toContain("Dodaios");
+  });
+
+  it("lists the routines with a switch each, without the scheduler's name tag, and none in the library", async () => {
+    mount([
+      { id: "r1", title: "[agent:Dodaios] Morning mail", state: "scheduled" },
+      { id: "r2", title: "Weekly review", state: "paused" },
+    ]);
+    const first = await screen.findByTestId("assistant-routine-r1");
+    expect(first.textContent).toContain("Morning mail");
+    expect(first.textContent).not.toContain("[agent:");
+    expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/society/agents/jarvis/routines");
+    expect(screen.getByTestId("assistant-routine-switch-r1").getAttribute("aria-checked")).toBe("true");
+    const paused = screen.getByTestId("assistant-routine-switch-r2");
+    expect(paused.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(paused);
+    await waitFor(() => expect(tasks.setTaskEnabled).toHaveBeenCalledWith("r2", true));
+    // The library no longer repeats them.
+    library();
+    expect(screen.queryByTestId("assistant-panel-automations")).toBeNull();
+    expect(screen.queryByTestId("assistant-routine-r1")).toBeNull();
+  });
+
+  it("names the voice model and the wake word, and each leads to its settings", () => {
+    mount([]);
+    library();
+    expect(screen.getByTestId("assistant-voice-model").textContent).toContain("Test Voice");
+    const wake = screen.getByTestId("assistant-voice-wake");
+    expect(wake.textContent).toContain("Hey Nova");
+    fireEvent.click(wake);
+    expect(useSettingsJump.getState().take()).toBe("wake-word");
+    expect(useEventStore.getState().activeSection).toBe("settings");
+  });
+
+  it("lists the newest earlier chats without the conversation itself", async () => {
+    chats.rows = [chat("lead", "The one conversation", 9), ...Array.from({ length: 6 }, (_, index) => chat(`c${index}`, `Chat ${index}`, 8 - index))];
+    mount([]);
+    library();
+    await waitFor(() => expect(screen.queryByTestId("assistant-recent-lead")).toBeNull());
+    expect(screen.getAllByTestId(/^assistant-recent-c\d$/)).toHaveLength(4);
+    fireEvent.click(screen.getByTestId("assistant-recent-c2"));
+    expect(chats.open).toHaveBeenCalledWith(chats.rows[3]);
+    expect(screen.getByTestId("earlier-chats")).toBeTruthy();
+  });
+
+  it("keeps the files and the skills in the library, and remembers the tab", async () => {
+    skills.list = [{ name: "zeta", state: "disabled" }, { name: "alpha", state: "active" }, { name: "draft-one", state: "draft" }];
+    mount([]);
+    expect(screen.queryByTestId("assistant-file-user")).toBeNull();
+    fireEvent.click(screen.getByTestId("assistant-panel-tab-library"));
+    expect(localStorage.getItem("jarvis.sidebar.assistantTab.v1")).toBe("library");
+    expect(["soul", "instructions", "memory", "user"].map((id) => screen.getByTestId(`assistant-file-${id}`).textContent))
+      .toEqual(["SOUL.md", "Nova.md", "MEMORY.md", "USER.md"]);
+    fireEvent.click(screen.getByTestId("assistant-file-user"));
+    expect((await screen.findByTestId("file-dialog")).textContent).toBe("user");
+    // Active skills lead; a draft has no switch to flip.
+    const switches = screen.getAllByTestId(/^assistant-skill-switch-/).map((node) => node.getAttribute("data-testid"));
+    expect(switches).toEqual(["assistant-skill-switch-alpha", "assistant-skill-switch-zeta"]);
+    fireEvent.click(screen.getByTestId("assistant-skill-switch-zeta"));
+    expect(skills.set).toHaveBeenCalledWith({ name: "zeta", enabled: true });
+    fireEvent.click(screen.getByTestId("assistant-skills-all"));
+    expect(useEventStore.getState().activeSection).toBe("skills");
+  });
+
+  it("keeps the rituals in the library, between how it is spoken to and its files, and opens one in its dialog", async () => {
+    mount([], { "/api/agent-chat/lead/rituals": { available: true, limits: RITUAL_LIMITS, rituals: [
+      ritual("rit_1", { name: "Good morning", phrases: ["Good morning"], today: ritualDay({ prep_state: "ready", prepared_ms: 1 }) }),
+    ] } });
+    // A ritual is something the assistant has, not work it is doing.
+    expect(screen.queryByTestId("assistant-panel-rituals")).toBeNull();
+
+    library();
+    const block = screen.getByTestId("assistant-panel-rituals");
+    expect(block.querySelector("h2")?.textContent).toBe("Rituals");
+    const voice = screen.getByTestId("assistant-panel-voice");
+    const files = screen.getByTestId("assistant-panel-files");
+    expect(voice.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(block.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const row = await screen.findByTestId("assistant-ritual-rit_1");
+    expect(row.textContent).toBe("Good morning“Good morning” · Ready");
+    fireEvent.click(row);
+    expect((await screen.findByTestId("ritual-dialog")).textContent).toContain("rit_1");
+    fireEvent.click(screen.getByText("Close ritual"));
+    expect(screen.queryByTestId("ritual-dialog")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("assistant-ritual-new"));
+    expect((await screen.findByTestId("ritual-dialog")).textContent).toContain("a new one");
+
+    fireEvent.click(screen.getByTestId("assistant-panel-tab-activity"));
+    expect(screen.queryByTestId("assistant-panel-rituals")).toBeNull();
+    expect(screen.queryByTestId("assistant-ritual-rit_1")).toBeNull();
+  });
+
+  it("says what the assistant is doing right now, under its name", async () => {
+    mount([]);
+    const status = () => screen.getByTestId("assistant-panel-status");
+    expect(status().getAttribute("data-state")).toBe("idle");
+    expect(status().textContent).toBe("Ready");
+
+    // A turn that answers: the activity line's own words.
+    onStage([turn("running")]);
+    await waitFor(() => expect(status().getAttribute("data-state")).toBe("working"));
+    // The phrase is paced like the activity line: it settles within its hold.
+    await waitFor(
+      () => expect(status().textContent).toMatch(/Thinking|Planning the next step|Weighing it up|Connecting the dots/),
+      { timeout: 2000 },
+    );
+
+    // A card that waits for the person comes first.
+    onStage([turn("running", [{ kind: "tool", callId: "c1", name: "shell", output: null, approval: { summary: "Run it?", decision: null } }])]);
+    await waitFor(() => expect(status().textContent).toBe("Needs you"));
+
+    // Work handed off still runs after its turn closed.
+    onStage([turn("done", [], { background: ["Scout", "Atlas"] })]);
+    await waitFor(() => expect(status().textContent).toBe("2 agents at work"));
+
+    // A turn that has answered and is held open only for the agent it sent out is not thinking.
+    onStage([turn("running", [{ kind: "text", text: "An agent is on it." }], { waitingOn: ["Gmail subject"] })]);
+    await waitFor(() => expect(status().getAttribute("data-state")).toBe("background"));
+    expect(status().textContent).toBe("1 agent at work");
+  });
+
+  it("lets the pet play what the line says, and rests it when nothing happens", async () => {
+    mount([]);
+    const pet = () => screen.getByTestId("pet").getAttribute("data-state");
+    expect(pet()).toBe("idle");
+
+    // A turn that has only just started thinks about its answer.
+    onStage([turn("running")]);
+    await waitFor(() => expect(pet()).toBe("thinking"));
+
+    // A lookup plays the searching row, any other tool the working row.
+    onStage([turn("running", [{ kind: "tool", callId: "s1", name: "web_search", input: { query: "rain" }, output: null }])]);
+    await waitFor(() => expect(pet()).toBe("searching"), { timeout: 2000 });
+    onStage([turn("running", [{ kind: "tool", callId: "b1", name: "Bash", input: { command: "npm test" }, output: null }])]);
+    await waitFor(() => expect(pet()).toBe("working"), { timeout: 2000 });
+
+    // A card that waits for the person: the pet waits for them too.
+    onStage([turn("running", [{ kind: "tool", callId: "c1", name: "shell", output: null, approval: { summary: "Run it?", decision: null } }])]);
+    await waitFor(() => expect(pet()).toBe("listening"));
+
+    // Agents sent out still work after the turn answered.
+    onStage([turn("running", [{ kind: "text", text: "An agent is on it." }], { waitingOn: ["Gmail subject"] })]);
+    await waitFor(() => expect(pet()).toBe("working"));
+  });
+
+  it("plays success once when the turn it watched ends well, and error only when it fails", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      mount([]);
+      const pet = () => screen.getByTestId("pet").getAttribute("data-state");
+      // One turn, seen as it runs and as it ends.
+      const same = { id: "t1" };
+
+      onStage([turn("running", [], same)]);
+      onStage([turn("done", [], same)]);
+      expect(pet()).toBe("success");
+      act(() => { vi.advanceTimersByTime(1600); });
+      expect(pet()).toBe("idle");
+
+      onStage([turn("running", [], same)]);
+      onStage([turn("error", [], same)]);
+      expect(pet()).toBe("error");
+      act(() => { vi.advanceTimersByTime(2100); });
+      expect(pet()).toBe("idle");
+
+      // Stopped by the person: neither a success nor a failure.
+      onStage([turn("running", [], same)]);
+      onStage([turn("cancelled", [], same)]);
+      expect(pet()).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("plays nothing for a turn that was already over when the chat came on stage", () => {
+    mount([]);
+    onStage([turn("done")]);
+    expect(screen.getByTestId("pet").getAttribute("data-state")).toBe("idle");
+    onStage([turn("error")]);
+    expect(screen.getByTestId("pet").getAttribute("data-state")).toBe("idle");
+  });
+
+  it("follows the chat list while an earlier chat is on stage, and says when the app is not connected", async () => {
+    mount([]);
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledWith("/api/agent-chat/lead"));
+    // Another chat's running turn is not the assistant's.
+    act(() => useAgentChatStore.setState({ activeSessionId: "earlier", timeline: { ...EMPTY_TIMELINE, items: [turn("running")] } }));
+    await waitFor(() => expect(screen.getByTestId("assistant-panel-status").textContent).toBe("Ready"));
+    act(() => useAgentChatStore.setState({ sessions: [{ session_id: "lead", running: true }] as never }));
+    await waitFor(() => expect(screen.getByTestId("assistant-panel-status").textContent).toBe("Working"));
+    expect(screen.getByTestId("pet").getAttribute("data-state")).toBe("working");
+    act(() => useEventStore.setState({ connected: false, wsWarming: false }));
+    await waitFor(() => expect(screen.getByTestId("assistant-panel-status").textContent).toBe("Offline"));
+    expect(screen.getByTestId("pet").getAttribute("data-state")).toBe("sleeping");
+  });
+
+  it("starts and ends a call from its button", () => {
+    mount([]);
+    const button = screen.getByTestId("assistant-panel-call");
+    expect(button.textContent).toBe("Call");
+    fireEvent.click(button);
+    expect(call.toggle).toHaveBeenCalledTimes(1);
+    cleanup();
+    call.live = true;
+    mount([]);
+    expect(screen.getByTestId("assistant-panel-call").textContent).toBe("Hang up");
+    expect(screen.getByTestId("assistant-panel-status").textContent).toBe("On a call");
+    // On a call the pet follows the voice: it talks while the assistant speaks.
+    act(() => useEventStore.setState({ voiceState: "speaking" }));
+    expect(screen.getByTestId("pet").getAttribute("data-state")).toBe("talking");
+  });
+
+  it("opens a connected channel where it lives, and leads an unconnected one to its setup", async () => {
+    mount([], { "/api/agent-chat/lead/channels": { channels: [
+      { id: "slack", kind: "tool", connected: false, handle: "", url: "" },
+      { id: "telegram", kind: "chat", connected: true, handle: "@nova_bot", url: "https://t.me/nova_bot" },
+    ] } });
+    const telegram = screen.getByTestId("assistant-panel-channel-telegram");
+    await waitFor(() => expect(telegram.getAttribute("data-connected")).toBe("true"));
+    expect(telegram.textContent).toBe("@nova_bot");
+    expect(telegram.getAttribute("title")).toBe("Open the chat with Nova in Telegram");
+    fireEvent.click(telegram);
+    expect(external.open).toHaveBeenCalledWith("https://t.me/nova_bot");
+    expect(useEventStore.getState().activeSection).toBe("chats");
+
+    const slack = screen.getByTestId("assistant-panel-channel-slack");
+    expect(slack.textContent).toBe("Slack");
+    expect(slack.getAttribute("title")).toBe("Connect Slack");
+    fireEvent.click(slack);
+    expect(external.open).toHaveBeenCalledTimes(1);
+    expect(takePluginFocus()).toBe("slack");
+    expect(useEventStore.getState().activeSection).toBe("plugins");
+  });
+
+  it("names a connected Slack workspace and opens it", async () => {
+    mount([], { "/api/agent-chat/lead/channels": { channels: [
+      { id: "slack", kind: "tool", connected: true, handle: "Acme", url: "https://app.slack.com/client/T024BE7LD" },
+    ] } });
+    const slack = screen.getByTestId("assistant-panel-channel-slack");
+    await waitFor(() => expect(slack.textContent).toBe("Acme"));
+    expect(slack.getAttribute("title")).toBe("Open Acme in Slack");
+    fireEvent.click(slack);
+    expect(external.open).toHaveBeenCalledWith("https://app.slack.com/client/T024BE7LD");
+  });
+
+  it("leads its work with two routines and folds the rest away", async () => {
+    mount([
+      { id: "r-once", title: "[agent:Jarvis] Comments: Travel notes", state: "failed", trigger: { type: "after_delay", delay_seconds: 1 } },
+      { id: "r-paused", title: "[agent:Jarvis] Weekly report", state: "paused", trigger: { type: "every", interval_seconds: 604800 } },
+      { id: "r-pr", title: "[agent:Jarvis] Daily PR check", state: "scheduled", trigger: { type: "calendar", local_time: "09:00", weekdays: [] } },
+      { id: "r-run", title: "[agent:Jarvis] Inbox sweep", state: "running", trigger: { type: "every", interval_seconds: 3600 } },
+    ]);
+    const block = await screen.findByTestId("assistant-panel-routines");
+    expect(block.querySelector("h2")?.textContent).toBe("Routines");
+    const shown = () => Array.from(block.querySelectorAll("[data-testid^='assistant-routine-r']")).map((row) => row.getAttribute("data-testid"));
+    // What runs comes first, then what waits for its time; the name tag is gone.
+    await waitFor(() => expect(shown()).toEqual(["assistant-routine-r-run", "assistant-routine-r-pr"]));
+    expect(screen.getByTestId("assistant-routine-r-pr").textContent).toMatch(/^Daily PR check/);
+    const more = screen.getByTestId("assistant-routines-more");
+    fireEvent.click(more);
+    // Every routine is there, the one-time job that already ran last.
+    expect(shown()).toEqual(["assistant-routine-r-run", "assistant-routine-r-pr", "assistant-routine-r-paused", "assistant-routine-r-once"]);
+    // A one-time job that ran says how it ended, not a time that has passed, and has nothing left to switch.
+    expect(screen.getByTestId("assistant-routine-r-once").textContent).toContain("Failed");
+    expect(screen.getByTestId("assistant-routine-r-once").textContent).not.toMatch(/second/);
+    const done = screen.getByTestId("assistant-routine-switch-r-once");
+    expect(done.getAttribute("aria-checked")).toBe("false");
+    expect(done.hasAttribute("disabled")).toBe(true);
+    // A running routine finishes its run before it can be paused.
+    expect(screen.getByTestId("assistant-routine-switch-r-run").hasAttribute("disabled")).toBe(true);
+    fireEvent.click(more);
+    expect(shown()).toHaveLength(2);
+    // It comes before the computers, the chats and the files.
+    const computers = screen.getByTestId("assistant-panel-computers");
+    expect(block.compareDocumentPosition(computers) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The standing tasks no longer have a block here.
+    expect(screen.queryByTestId("assistant-panel-standing")).toBeNull();
+  });
+
+  it("opens a routine from the activity tab, and says so when there is none", async () => {
+    mount([{ id: "r1", title: "Daily PR check", state: "scheduled", trigger: { type: "calendar", local_time: "09:00", weekdays: [] } }]);
+    fireEvent.click(await screen.findByTestId("assistant-routine-r1"));
+    expect((await screen.findByTestId("routine-dialog")).textContent).toContain("r1");
+    expect(screen.queryByTestId("assistant-routines-more")).toBeNull();
+    cleanup();
+
+    mount([]);
+    await waitFor(() => expect(screen.getByTestId("assistant-routines-empty").textContent).toMatch(/None yet/));
+  });
+
+  it("lists this computer first with the green dot while the conversation runs on it, and folds the rest", async () => {
+    mount([], { "/api/computers": { computers: [computer("c1", "Build box"), computer("c2", "Mac mini", "offline"),
+      { ...computer("c3", "Switched off"), enabled: false }] } });
+    await screen.findByTestId("assistant-computer-c1");
+    const shown = () => screen.getAllByTestId(/^assistant-computer-(this|c\d)$/).map((row) => row.getAttribute("data-testid"));
+    expect(shown()).toEqual(["assistant-computer-this", "assistant-computer-c1"]);
+    const own = screen.getByTestId("assistant-computer-this");
+    await waitFor(() => expect(own.textContent).toContain("Adas-MacBook-Pro.local"));
+    expect(own.textContent).toContain("Your computer");
+    expect(own.getAttribute("data-home")).toBe("true");
+    expect(screen.getAllByTestId("assistant-computer-home")).toHaveLength(1);
+    expect(screen.getByTestId("assistant-computer-home").getAttribute("aria-label")).toBe("Nova runs here");
+
+    // A computer that is switched off is not offered; the third one unfolds.
+    fireEvent.click(screen.getByTestId("assistant-computers-more"));
+    expect(shown()).toEqual(["assistant-computer-this", "assistant-computer-c1", "assistant-computer-c2"]);
+    fireEvent.click(screen.getByTestId("assistant-computer-c2"));
+    expect(useEventStore.getState().activeSection).toBe("computers");
+  });
+
+  it("puts the computer the conversation runs on first", async () => {
+    mount([], {
+      "/api/agent-chat/lead": { session_id: "lead", computer_id: "c2" },
+      "/api/computers": { computers: [computer("c1", "Build box"), computer("c2", "Mac mini")] },
+    });
+    await waitFor(() => expect(screen.getByTestId("assistant-computer-c2").getAttribute("data-home")).toBe("true"));
+    expect(screen.getAllByTestId(/^assistant-computer-(this|c\d)$/).map((row) => row.getAttribute("data-testid")))
+      .toEqual(["assistant-computer-c2", "assistant-computer-this"]);
+    expect(screen.getByTestId("assistant-computer-this").getAttribute("data-home")).toBe("false");
+    expect(screen.queryByTestId("assistant-computers-more")).toBeTruthy();
+  });
+
+  it("lists the IDE chats the assistant sent a task to, with their state, and opens one in the IDE", async () => {
+    useIdeThreadsStore.setState({ seen: { seen: 500 } });
+    mount([], { "/api/agent-chat/lead/threads": { threads: [
+      thread("busy", "Fix the login", { running: true, agent: "codex", agent_label: "Codex" }),
+      thread("asks", "Deploy the site", { waiting: true, running: true, agent: "kimi", agent_label: "Kimi Code" }),
+      thread("news", "Write the docs", { briefed_ms: 100, updated_ms: 300, agent: "claude", agent_label: "Claude Code" }),
+      thread("seen", "Rename the module", { updated_ms: 500, provider: "openai" }),
+      thread("old", "", { cli_title: "Tidy the tests" }),
+    ] } });
+    await screen.findByTestId("assistant-activity-busy");
+    // Each row leads with the logo of the coding agent that got the task; a
+    // provider with no coding CLI behind it keeps the plain chat glyph.
+    const row = (id: string) => screen.getByTestId(`assistant-activity-${id}`);
+    expect(row("busy").querySelector("[data-testid='agent-mark-codex']")).toBeTruthy();
+    expect(row("asks").querySelector("[data-testid='agent-mark-kimi']")).toBeTruthy();
+    expect(row("news").querySelector("[data-testid='agent-mark-claude']")).toBeTruthy();
+    expect(row("seen").querySelector("[data-testid^='agent-mark-']")).toBeNull();
+    const state = (id: string) => screen.getByTestId(`assistant-activity-${id}`).getAttribute("data-state");
+    expect([state("busy"), state("asks"), state("news"), state("seen")]).toEqual(["running", "waiting", "unseen", "idle"]);
+    expect(screen.getByTestId("assistant-activity-asks").textContent).toContain("Needs your approval");
+    // Four show; the fifth unfolds and wears the name its CLI gave it.
+    expect(screen.queryByTestId("assistant-activity-old")).toBeNull();
+    fireEvent.click(screen.getByTestId("assistant-activity-more"));
+    expect(screen.getByTestId("assistant-activity-old").textContent).toBe("Tidy the tests");
+
+    fireEvent.click(screen.getByTestId("assistant-activity-news"));
+    expect(useEventStore.getState().activeSection).toBe("agentic-ide");
+    expect(useIdeThreadsStore.getState().layout).toBe("threads");
+    expect(useIdeThreadsStore.getState().selection).toMatchObject({ sessionId: "news" });
+  });
+
+  it("says so while no chat was handed a task and nothing was made yet", async () => {
+    mount([]);
+    await waitFor(() => expect(screen.getByTestId("assistant-activity-empty").textContent)
+      .toBe("Nothing yet. Chats in the Agentic IDE that Nova hands a task to show up here."));
+    await waitFor(() => expect(screen.getByTestId("assistant-outputs-empty").textContent)
+      .toBe("Nothing yet. Files Nova makes show up here."));
+  });
+
+  it("lists what the newest finished runs made, newest file first, and opens one in the node window", async () => {
+    const file = (path: string, mtime: number, title: string | null = null) =>
+      ({ path: `tasks/t1/artifacts/files/${path}`, size: 10, mtime, is_text: false, preview: null, title });
+    mount([], {
+      "/api/outputs": [{ slug: "run-b", status: "success" }, { slug: "run-live", status: "running" }, { slug: "run-a", status: "success" }],
+      "/api/outputs/run-a/artifacts": { files: [file("index.html", 10, "Sales dashboard"), file("clip.mp4", 40)] },
+      "/api/outputs/run-b/artifacts": { files: [file("cover.png", 30), file("marketing.mjs", 20)] },
+    });
+    await waitFor(() => expect(screen.getAllByTestId("assistant-output")).toHaveLength(4));
+    const rows = screen.getAllByTestId("assistant-output");
+    expect(rows.map((row) => row.textContent)).toEqual(["clip.mp4", "cover.png", "marketing.mjs", "Sales dashboard"]);
+    expect(rows.map((row) => row.getAttribute("data-kind"))).toEqual(["motion", "docs", "code", "docs"]);
+    // A run that still builds is not read.
+    expect(vi.mocked(fetch)).not.toHaveBeenCalledWith("/api/outputs/run-live/artifacts");
+
+    const section = useEventStore.getState().activeSection;
+    fireEvent.click(rows[3]);
+    // Beside the lead conversation (no chat named), and the page stays put.
+    expect(useNodePeek.getState().peek).toMatchObject({
+      ref: "run-a::tasks/t1/artifacts/files/index.html",
+      title: "Sales dashboard",
+      chat: null,
+    });
+    expect(useEventStore.getState().activeSection).toBe(section);
+    useNodePeek.setState({ peek: null, touched: {} });
+  });
+
+  it("marks a run's file with the type the library gives it, and its icon", async () => {
+    const page = (name: string, mtime: number, title: string) =>
+      ({ path: `tasks/node/artifacts/files/${name}`, size: 10, mtime, is_text: false, preview: null, title });
+    mount([], {
+      "/api/outputs": [{ slug: "deck", status: "success" }, { slug: "trip", status: "success" }, { slug: "costs", status: "success" }],
+      "/api/outputs/deck/artifacts": { files: [page("untitled-deck.html", 30, "Untitled deck")] },
+      "/api/outputs/trip/artifacts": { files: [page("trip.html", 20, "Trip")] },
+      "/api/outputs/costs/artifacts": { files: [page("costs.html", 10, "Costs")] },
+      "/api/nodes": { nodes: [
+        { key: "deck::tasks/node/artifacts/files/untitled-deck.html", type: "slides" },
+        { key: "trip::tasks/node/artifacts/files/trip.html", type: "docs" },
+        { key: "costs::tasks/node/artifacts/files/costs.html", type: "sheets" },
+      ], scanned_runs: 3, skipped_runs: 0 },
+    });
+    await waitFor(() => expect(screen.getAllByTestId("assistant-output").map((row) => row.getAttribute("data-kind")))
+      .toEqual(["slides", "docs", "sheets"]));
+    const icons = screen.getAllByTestId("assistant-output").map((row) => row.querySelector("[data-node-type-icon]")?.getAttribute("data-node-type-icon"));
+    expect(icons).toEqual(["slides", "docs", "sheets"]);
+  });
+
+  it("lists the files handed over in the conversation among the runs' files, and opens one on this computer", async () => {
+    const file = (path: string, mtime: number) =>
+      ({ path: `tasks/t1/artifacts/files/${path}`, size: 10, mtime, is_text: false, preview: null, title: null });
+    mount([], {
+      "/api/outputs": [{ slug: "run-a", status: "success" }],
+      "/api/outputs/run-a/artifacts": { files: [file("cover.png", 30)] },
+      "/api/agent-chat/lead/files": { files: [
+        { path: "/Users/ada/work/Nvidia.xlsx", name: "Nvidia.xlsx", size: 7871, mtime: 40, linked_ms: 1 },
+        { path: "/Users/ada/Desktop/notes.md", name: "notes.md", size: 12, mtime: 20, linked_ms: 2 },
+      ] },
+    });
+    await waitFor(() => expect(screen.getAllByTestId("assistant-output")).toHaveLength(3));
+    const rows = screen.getAllByTestId("assistant-output");
+    expect(rows.map((row) => row.textContent)).toEqual(["Nvidia.xlsx", "cover.png", "notes.md"]);
+    expect(rows.map((row) => row.getAttribute("data-source"))).toEqual(["chat", "run", "chat"]);
+    expect(rows.map((row) => row.getAttribute("data-kind"))).toEqual(["sheets", "docs", "docs"]);
+    expect(rows[0].getAttribute("title")).toBe("/Users/ada/work/Nvidia.xlsx");
+
+    fireEvent.click(rows[0]);
+    expect(local.open).toHaveBeenCalledWith("/Users/ada/work/Nvidia.xlsx");
+    // It opens with the system's program; the page stays where it is.
+    expect(useEventStore.getState().visualStage).toBeNull();
+    expect(useEventStore.getState().activeSection).toBe("chats");
+  });
+
+  it("shows a conversation's file even when no run has made anything", async () => {
+    mount([], { "/api/agent-chat/lead/files": { files: [
+      { path: "/Users/ada/work/Nvidia.xlsx", name: "Nvidia.xlsx", size: 7871, mtime: 40, linked_ms: 1 },
+    ] } });
+    await waitFor(() => expect(screen.getAllByTestId("assistant-output").map((row) => row.textContent)).toEqual(["Nvidia.xlsx"]));
+    expect(screen.queryByTestId("assistant-outputs-empty")).toBeNull();
+  });
+});

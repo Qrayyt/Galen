@@ -1,0 +1,484 @@
+"""Authenticated live browser view and automatic session preparation."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import math
+import sys
+from collections import deque
+from typing import Any
+from uuid import uuid4
+
+from fastapi import APIRouter, HTTPException, Request, WebSocket
+from pydantic import BaseModel, Field
+
+from .society_routes import _runtime
+from .surface_security import credentials_valid
+
+log = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/society", tags=["society"])
+OPERATIONS = {
+    "takeover",
+    "cancel",
+    "navigate",
+    "back",
+    "forward",
+    "reload",
+    "tab",
+    "click",
+    "move",
+    "scroll",
+    "text",
+    "key",
+    "dialog",
+    "viewport",
+}
+
+
+#: A viewer's input: the operation, its arguments, the browser generation it was made for.
+Control = tuple[str, dict, str]
+_MAX_QUEUED_CONTROLS = 256
+_SCROLL_DISTANCE = ("dx", "dy")
+_SCROLL_PLACE = ("x", "y")
+
+
+class ControlQueue:
+    """A viewer's inputs in the order they came, with motion folded together.
+
+    The browser takes one input at a time. Wheel events and hover motion come
+    faster than that: a trackpad sends 60 to 120 wheel events a second, a
+    moving pointer 30 positions. Queued one by one they played out seconds
+    after the hand had stopped, and then overflowed the queue. So wheel events
+    that wait behind each other become one with the summed distance, and only
+    the newest hover position waits, behind every real input.
+    """
+
+    def __init__(self, maxsize: int = _MAX_QUEUED_CONTROLS) -> None:
+        self._inputs: deque[Control] = deque()
+        self._hover: Control | None = None
+        self._ready = asyncio.Event()
+        self._maxsize = maxsize
+
+    def put(self, op: str, args: dict, generation: str) -> None:
+        """Queue one input; raises ``asyncio.QueueFull`` when the browser is too far behind."""
+        if op == "click" and args.get("move_only") is True:
+            self._hover = (op, args, generation)
+        else:
+            # Motion recorded before this input is older than it.
+            self._hover = None
+            if not self._joins_waiting_scroll(op, args, generation):
+                if len(self._inputs) >= self._maxsize:
+                    raise asyncio.QueueFull
+                self._inputs.append((op, args, generation))
+        self._ready.set()
+
+    def _joins_waiting_scroll(self, op: str, args: dict, generation: str) -> bool:
+        if op != "scroll" or not self._inputs:
+            return False
+        last_op, last, last_generation = self._inputs[-1]
+        if last_op != "scroll" or last_generation != generation:
+            return False
+
+        def rest(values: dict) -> dict:
+            return {
+                key: value
+                for key, value in values.items()
+                if key not in _SCROLL_DISTANCE and key not in _SCROLL_PLACE
+            }
+
+        if rest(last) != rest(args):
+            return False
+        joined = {**last, **args}
+        for key in _SCROLL_DISTANCE:
+            joined[key] = last.get(key, 0) + args.get(key, 0)
+        self._inputs[-1] = (op, joined, generation)
+        return True
+
+    async def get(self) -> Control:
+        while True:
+            if self._inputs:
+                return self._inputs.popleft()
+            if self._hover is not None:
+                item, self._hover = self._hover, None
+                return item
+            self._ready.clear()
+            await self._ready.wait()
+
+
+async def _subscribe_with_progress(live: Any, agent: Any, send: Any) -> Any:
+    """Keep the viewer alive during provisioning and cold Chromium startup."""
+    await send({"kind": "starting"})
+    task = asyncio.create_task(live.subscribe(agent))
+    try:
+        while not task.done():
+            done, _ = await asyncio.wait({task}, timeout=2)
+            if not done:
+                await send({"kind": "starting"})
+        return await task
+    except BaseException:
+        task.cancel()
+        result = (await asyncio.gather(task, return_exceptions=True))[0]
+        if isinstance(result, tuple):
+            session, queue = result
+            await live.unsubscribe(session, queue, "")
+        raise
+
+
+def validate_control(value: Any) -> tuple[str, dict]:
+    if not isinstance(value, dict) or value.get("op") not in OPERATIONS:
+        raise ValueError("Unsupported browser control")
+    op = value["op"]
+    args = value.get("args") or {}
+    if not isinstance(args, dict):
+        raise ValueError("Invalid browser control arguments")
+    if op == "takeover" and not isinstance(args.get("enabled"), bool):
+        raise ValueError("Browser control needs an explicit enabled state")
+    if "login" in args and (
+        op != "takeover"
+        or type(args["login"]) is not bool
+        or args.get("enabled") is not args["login"]
+    ):
+        raise ValueError("Chrome sign-in needs an explicit manual takeover")
+    for key in ("x", "y", "dx", "dy"):
+        if key in args and (
+            not isinstance(args[key], (int, float))
+            or not math.isfinite(args[key])
+            or abs(args[key]) > 10000
+        ):
+            raise ValueError("Invalid browser coordinates")
+    for key in ("width", "height"):
+        if key in args and (type(args[key]) is not int or not 1 <= args[key] <= 10000):
+            raise ValueError("Invalid browser page size")
+    if ("width" in args) != ("height" in args) or ("width" in args and op != "viewport"):
+        raise ValueError("Invalid browser page size")
+    if op in {"click", "move"} and not all(k in args for k in ("x", "y")):
+        raise ValueError("Click needs coordinates")
+    if "button" in args and (
+        not isinstance(args["button"], str) or args["button"] not in {"left", "right", "middle"}
+    ):
+        raise ValueError("Unsupported browser mouse button")
+    if "move_only" in args and type(args["move_only"]) is not bool:
+        raise ValueError("Invalid browser pointer motion")
+    if "count" in args and (type(args["count"]) is not int or args["count"] not in {1, 2}):
+        raise ValueError("Unsupported browser click count")
+    if "geometry_id" in args and (
+        not isinstance(args["geometry_id"], str) or len(args["geometry_id"]) > 128
+    ):
+        raise ValueError("Invalid browser frame geometry")
+    for key in ("text", "key", "url", "target", "generation"):
+        if key in args and (not isinstance(args[key], str) or len(args[key]) > 8192):
+            raise ValueError("Browser input is too large")
+    return op, args
+
+
+@router.post("/agents/{agent_id}/browser/session", openapi_extra={"x-jarvis-dangerous": True})
+async def ensure_agent_browser(agent_id: str, request: Request) -> dict[str, Any]:
+    """Prepare the managed environment automatically when opening an agent."""
+    from dodaios.society.browser import install
+
+    rt = await _runtime(request)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    status = await asyncio.to_thread(rt.browser.status_for, agent)
+    if status.get("mode") in {"chrome", "unavailable"}:
+        return status
+    install.start_install(rt.data_dir)
+    return install.snapshot(rt.data_dir)
+
+
+@router.get("/agents/{agent_id}/browser/open")
+async def agent_browser_open(agent_id: str, request: Request) -> dict[str, Any]:
+    """Whether this agent's browser is running — a read that never launches one."""
+    rt = await _runtime(request)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    session = rt.browser.live.sessions.get(agent.agent_id)
+    is_open = session is not None and not session.closed
+    status = await asyncio.to_thread(rt.browser.status_for, agent)
+    login_source = await asyncio.to_thread(rt.browser.live.login_source_for, agent)
+    return {
+        **status,
+        "open": is_open,
+        "running": is_open and session.run_lock.locked(),
+        "login_source": _public_login_source(login_source),
+    }
+
+
+def _public_login_source(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not record:
+        return None
+    return {
+        key: record.get(key)
+        for key in ("browser", "profile", "imported_at", "imported", "sites", "status")
+    }
+
+
+# The response lists sites by name with a count; a long tail is cut, not the total.
+_MAX_SITES_LISTED = 1000
+_IMPORT_ERROR_STATUS = {
+    "keychain_denied": 403,
+    "keychain_unavailable": 503,
+    "key_unavailable": 503,
+    "source_locked": 409,
+    "source_unreadable": 409,
+    "unsupported": 422,
+}
+
+
+class LoginImportBody(BaseModel):
+    browser: str = Field(min_length=1, max_length=40)
+    profile: str = Field(min_length=1, max_length=300)
+
+
+@router.get("/browser/login-sources")
+async def browser_login_sources() -> dict[str, Any]:
+    """Installed browsers whose logins can be imported. Reads no key and no cookie."""
+    from dodaios.society.browser import login_import
+
+    sources = await asyncio.to_thread(login_import.detect_sources)
+    return {"sources": [source.public(sys.platform) for source in sources]}
+
+
+@router.post("/agents/{agent_id}/browser/import-logins", openapi_extra={"x-jarvis-dangerous": True})
+async def import_agent_browser_logins(
+    agent_id: str, body: LoginImportBody, request: Request
+) -> dict[str, Any]:
+    """Copy one browser profile's website logins into this agent's browser.
+
+    Returns counts and per-site totals only; cookie values never leave the
+    local worker pipe.
+    """
+    from dodaios.society.browser.live import BrowserProfileBusy
+    from dodaios.society.browser.login_import import LoginImportError
+
+    rt = await _runtime(request)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    try:
+        result = await rt.browser.live.import_logins(agent, body.browser, body.profile)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from None
+    except LoginImportError as exc:
+        raise HTTPException(_IMPORT_ERROR_STATUS.get(exc.code, 503), str(exc)) from None
+    except BrowserProfileBusy as exc:
+        raise HTTPException(409, str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)[:300]) from None
+    except (RuntimeError, TimeoutError) as exc:
+        log.warning("Login import failed for %s: %s", agent_id, type(exc).__name__)
+        raise HTTPException(
+            503, "The Dodaios browser could not take the logins. Open it and try again."
+        ) from None
+    sites = result.get("sites") or {}
+    return {
+        "imported": int(result.get("imported") or 0),
+        "failed": int(result.get("failed") or 0),
+        "expired": int(result.get("expired") or 0),
+        "skipped": int(result.get("skipped") or 0),
+        "site_count": len(sites),
+        "sites": dict(list(sites.items())[:_MAX_SITES_LISTED]),
+        "browser": result.get("browser"),
+        "browser_name": result.get("browser_name"),
+        "profile": result.get("profile"),
+        "imported_at": result.get("imported_at"),
+        "started": bool(result.get("started")),
+    }
+
+
+@router.post("/browser/repair", openapi_extra={"x-jarvis-dangerous": True})
+async def repair_browser(request: Request) -> dict[str, Any]:
+    """Rebuild and verify the managed browser environment."""
+    from dodaios.society.browser import install
+
+    rt = await _runtime(request)
+    install.start_install(rt.data_dir, repair=True)
+    return install.snapshot(rt.data_dir)
+
+
+@router.post("/agents/{agent_id}/browser/restart", openapi_extra={"x-jarvis-dangerous": True})
+async def restart_agent_browser(agent_id: str, request: Request) -> dict[str, bool]:
+    """Restart this agent's managed browser with its saved profile."""
+    from dodaios.society.browser.recovery import restart_browser
+
+    rt = await _runtime(request)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    try:
+        await restart_browser(rt.browser.live, agent)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    except (RuntimeError, TimeoutError):
+        log.warning("Browser restart failed for %s", agent_id, exc_info=True)
+        raise HTTPException(
+            503, "Browser restart failed. Try again in the browser panel."
+        ) from None
+    return {"restarted": True}
+
+
+@router.post("/agents/{agent_id}/browser/cancel", openapi_extra={"x-jarvis-dangerous": True})
+async def cancel_agent_browser(agent_id: str, request: Request) -> dict[str, Any]:
+    """Stop a browser task even while a viewer is waiting to take control."""
+    rt = await _runtime(request)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        raise HTTPException(404, "Agent not found")
+    session = rt.browser.live.sessions.get(agent.agent_id)
+    if session is None or session.closed:
+        return {"cancelled": False}
+    running = session.run_lock.locked()
+    # The viewer Stop button ends the planner too. A bare POST only releases
+    # the browser: the agent calls that URL when a tool client has already
+    # given up, and ending the chat there is the turn dying mid-task.
+    # The desktop fetch sets Sec-Fetch-Site; a shell call does not.
+    headers = getattr(request, "headers", None)
+    stop_chat = bool(
+        headers
+        and (
+            headers.get("x-jarvis-stop-chat") == "1"
+            or str(headers.get("sec-fetch-site") or "").lower() == "same-origin"
+        )
+    )
+    await rt.browser.live.cancel(session, end_turn=stop_chat)
+    chat = getattr(request.app.state, "agent_chat", None)
+    if running and stop_chat and chat is not None:
+        chat_session_id = getattr(session, "active_chat", "") or f"society:{agent.agent_id}"
+        await chat.cancel(chat_session_id)
+    return {"cancelled": running}
+
+
+@router.websocket("/agents/{agent_id}/browser/live")
+async def agent_browser_live(websocket: WebSocket, agent_id: str) -> None:
+    if not credentials_valid(websocket.scope):
+        await websocket.close(code=4401)
+        return
+    rt = await _runtime(websocket)
+    agent = await rt.roster.resolve(agent_id)
+    if agent is None:
+        await websocket.close(code=4404)
+        return
+    await websocket.accept()
+    owner = uuid4().hex
+    live = rt.browser.live
+    session = None
+    queue = None
+    sender = None
+    receive = None
+    pending = None
+    write_lock = asyncio.Lock()
+
+    async def send(value: dict) -> None:
+        if "manual" in value and session is not None:
+            value = {**value, "manual": session.control_owner == owner}
+        async with write_lock:
+            async with asyncio.timeout(10):
+                await websocket.send_json(value)
+
+    try:
+        session, queue = await _subscribe_with_progress(live, agent, send)
+
+        async def frames() -> None:
+            while True:
+                event = await queue.get()
+                await send(event)
+                if event["kind"] == "disconnected":
+                    await websocket.close(code=1012)
+                    return
+
+        sender = asyncio.create_task(frames())
+        inputs = ControlQueue()
+
+        async def controls() -> None:
+            while True:
+                op, args, generation = await inputs.get()
+                # A hover and a panel size are not answered: neither is an
+                # input the viewer waits for, and a new one replaces a failed one.
+                motion = op == "viewport" or (op == "click" and args.get("move_only") is True)
+                try:
+                    current = session.state.get("generation", session.generation)
+                    if op not in {"takeover", "cancel"} and generation != current:
+                        raise ValueError("The browser changed; wait for its new image")
+                    result = await live.control(session, owner, op, args)
+                    if not motion:
+                        await send({"kind": "control", "op": op, "ok": True, **result})
+                except (ValueError, RuntimeError) as exc:
+                    if motion:
+                        # The next motion replaces a stale one; a hover error
+                        # must not overwrite the viewer's visible state.
+                        log.debug("Browser %s skipped: %s", op, exc)
+                        continue
+                    # Control errors are returned to the requesting viewer.
+                    await send({"kind": "control", "op": op, "ok": False, "error": str(exc)[:500]})
+
+        pending = asyncio.create_task(controls())
+        receive = asyncio.create_task(websocket.receive_json())
+        while True:
+            done, _ = await asyncio.wait(
+                {receive, sender, pending}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if sender in done:
+                receive.cancel()
+                await asyncio.gather(receive, return_exceptions=True)
+                await sender
+                break
+            if pending in done:
+                await pending
+                break
+            value = receive.result()  # any receive error terminates this socket
+            receive = asyncio.create_task(websocket.receive_json())
+            try:
+                op, args = validate_control(value)
+                inputs.put(op, args, session.state.get("generation", session.generation))
+            except asyncio.QueueFull:  # the client is told below that the input was dropped
+                await send(
+                    {
+                        "kind": "control",
+                        "ok": False,
+                        "error": "The browser is still catching up; try that again in a moment.",
+                    }
+                )
+            except (ValueError, RuntimeError) as exc:
+                # Invalid controls are visibly rejected without closing a healthy stream.
+                await send({"kind": "control", "ok": False, "error": str(exc)[:500]})
+    except Exception as exc:
+        log.debug("Browser view disconnected for %s", agent_id, exc_info=True)
+        with contextlib.suppress(Exception):
+            if session is None:
+                payload = {
+                    "kind": "error",
+                    "error": str(exc)[:300]
+                    if isinstance(exc, (RuntimeError, ValueError))
+                    else "Browser startup failed. Retry or repair the installation.",
+                }
+                from dodaios.society.browser.live import BrowserProfileBusy
+
+                if isinstance(exc, BrowserProfileBusy):
+                    # The panel names who holds the shared browser and waits.
+                    payload.update(
+                        code="profile_busy",
+                        holder_id=exc.holder_id,
+                        holder_name=exc.holder_name[:120],
+                        running=exc.running,
+                    )
+                await send(payload)
+            await websocket.close(code=1011)
+    finally:
+        for task in (receive, pending):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (receive, pending) if task is not None), return_exceptions=True
+        )
+        if sender:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+        if session and queue is not None:
+            try:
+                await live.unsubscribe(session, queue, owner)
+            except Exception:
+                log.debug("Browser viewer cleanup after disconnect", exc_info=True)

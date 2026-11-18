@@ -1,0 +1,824 @@
+"""The turn host — a small process that owns the coding CLIs of thread turns.
+
+Run as ``python -m dodaios.agent_chat.turn_host --state <file> --spool <dir>``
+(a frozen build: ``<app executable> --turn-host --state ...``, routed by
+``dodaios/__main__.py``). Started on demand by
+:mod:`dodaios.agent_chat.turn_host_client`, never by hand.
+
+## Why a thread's CLI lives in its own process
+
+A thread in the Agentic IDE (agent-chat surface ``agent``) is answered by a
+coding CLI in print mode (``runner_cli``). That CLI used to be a child of the
+app: a restart to load a fix, an update or a crash closed its pipes and the
+turn ended as "Jarvis restarted while this turn was running" — while the
+agent was in the middle of its work.
+
+The terminal grid solved the same problem with the PTY host
+(:mod:`dodaios.terminal.pty_host`): a long-lived server owns the processes and
+the app is a client that attaches to them. This is the same design for pipe
+processes. The host starts the CLI, keeps every line it prints, and streams
+them to the attached app. When the app goes away the CLI keeps working and
+its lines keep collecting here; the next app start attaches again, replays
+what it already handled into a fresh translator (without emitting it twice)
+and carries the turn on from the first line it has not seen.
+
+Everything that is policy — prompts, translation, approvals, the event log —
+stays in the app. The host knows turn ids, argv, the lines and an opaque
+``meta`` dict the client attached at spawn.
+
+## Lifetime
+
+The kill-on-close container (a Job Object on Windows, process groups on
+POSIX) belongs to THIS process, so the CLIs live exactly as long as the host
+does. With no CLI running and no client attached for :data:`IDLE_EXIT_S` the
+host exits. Turns that ended while nobody was attached are written to the
+spool folder first (one JSON file each), so the next app start can still
+collect their answer.
+
+## Wire protocol
+
+Newline-delimited JSON over one loopback TCP connection, authenticated by a
+random token the client handed over in the environment. One client at a time;
+a new authenticated client replaces the old one (an app restart).
+
+Requests carry ``rid`` and are answered ``{"rid", "ok", ...}``. Unprompted
+events carry ``ev``: ``line`` (one stdout line, numbered by ``seq`` from 1),
+``err`` (one stderr line), ``exit``, and ``replaced`` (another client took
+over; the old one hands its turns over without ending them). A client acknowledges every stdout
+line it has fully handled (``ack``); after a reconnect, ``attach`` answers
+with the acknowledged ``seq`` and then replays all lines in order before
+streaming live ones, so translator state can be rebuilt exactly.
+
+## Stdin after the answer
+
+Claude Code keeps reading stdin after its ``result`` line, and it can still be
+waiting for background tasks then. While an app reads the turn, stdin stays
+open so a message the person writes meanwhile reaches the agent; the app
+closes it once the turn is over. A turn nobody has read for
+:data:`UNWATCHED_STDIN_S` gets its stdin closed here, so the CLI ends by
+itself with no app to do it.
+
+## Builds
+
+The host outlives the app, so it can run older code than the app that attaches
+to it. ``hello`` answers with :data:`BUILD`; an app that finds another build
+holding no turn replaces the host (``turn_host_client``).
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import hashlib
+import hmac
+import json
+import os
+import sys
+import time
+import uuid
+from collections import deque
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+#: Bumped only for an incompatible change; a client leaves a host speaking
+#: another version alone (it may hold turns from before an update).
+PROTOCOL_VERSION = 1
+
+#: How a frozen build re-enters its own executable as the turn host.
+FROZEN_FLAG = "--turn-host"
+
+#: Environment variable carrying the auth token. Never on the command line.
+TOKEN_ENV = "JARVIS_TURN_HOST_TOKEN"  # noqa: S105 - a variable name, not a secret
+
+#: With no CLI running and no client attached for this long, the host exits.
+IDLE_EXIT_S = 60.0
+
+_IDLE_POLL_S = 5.0
+
+#: Largest frame a client may send (a spawn carries the prompt and the env).
+MAX_FRAME_BYTES = 64 * 1024 * 1024
+
+#: Longest stdout line read from a CLI (a large tool result is one JSON line).
+LINE_LIMIT = 16 * 1024 * 1024
+
+#: Total stdout a turn may keep for replay. Lines past it still stream live
+#: but are not kept, so a runaway CLI cannot exhaust memory.
+MAX_KEPT_BYTES = 256 * 1024 * 1024
+
+#: A turn past its result line whose lines no app has read for this long gets
+#: its stdin closed: the CLI then ends once its own work is done. Long enough
+#: for an app restart to attach again first.
+UNWATCHED_STDIN_S = 120.0
+
+
+def _build_id() -> str:
+    """What tells this host's code from another build's: its source, else the version."""
+    try:
+        return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+    except OSError:  # no readable source (a frozen build): the release names it
+        from dodaios import __version__
+
+        return f"v{__version__}"
+
+
+#: Sent in the ``hello`` reply. A host from before this field sends none.
+BUILD = _build_id()
+
+_STDERR_TAIL = 40
+#: After a CLI exited, its pipes get this long without a new line before the
+#: host stops reading and reports the exit. A grandchild that inherited them
+#: (Windows: the ``py.exe`` launcher killed, ``python.exe`` still running)
+#: otherwise kept the turn open until it ended — 1.5 h, once.
+PIPE_DRAIN_S = 1.5
+_EXIT_POLL_S = 0.05
+
+
+@dataclass(slots=True)
+class HostedTurn:
+    """One CLI process the host owns."""
+
+    turn_id: str
+    proc: asyncio.subprocess.Process
+    meta: dict[str, Any]
+    started_at: float
+    lines: list[str] = field(default_factory=list)
+    kept_bytes: int = 0
+    truncated: bool = False
+    #: Stdout lines read so far, the next line's ``seq`` minus one. Equals
+    #: ``len(lines)`` until the cap; past it lines are numbered on, not kept.
+    seq: int = 0
+    stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=_STDERR_TAIL))
+    acked: int = 0
+    exit_code: int | None = None
+    streaming: bool = False
+    pumps: list[asyncio.Task[None]] = field(default_factory=list)
+    #: A stdout JSON line of this ``type`` is the turn's answer (Claude Code's
+    #: ``result``). The CLI reads stdin on after it and never exits while
+    #: stdin is open: the reading app closes it, or the host does once nobody
+    #: has read the turn for ``UNWATCHED_STDIN_S``.
+    close_stdin_on: str = ""
+    #: A Claude Code task notice came before the first ``result``: the empty
+    #: ``result`` that answers it is not the turn's answer
+    #: (``claude_result_without_model_turn``).
+    notice_pending: bool = False
+    #: The answer line was read; later lines change nothing.
+    answered: bool = False
+    #: Since when no app has been reading this turn's lines (monotonic).
+    unwatched_since: float | None = None
+    #: Lines read from either pipe so far: the drain after exit counts them.
+    reads: int = 0
+    #: Lines a pump read and is still storing or sending.
+    in_flight: int = 0
+
+    @property
+    def alive(self) -> bool:
+        return self.exit_code is None
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "id": self.turn_id,
+            "pid": self.proc.pid,
+            "meta": self.meta,
+            "started_at": self.started_at,
+            "alive": self.alive,
+            "code": self.exit_code,
+            "lines": len(self.lines),
+            "acked": self.acked,
+        }
+
+    def spool_record(self) -> dict[str, Any]:
+        return {
+            **self.summary(),
+            "stdout": self.lines,
+            "stderr": list(self.stderr_tail),
+            "truncated": self.truncated,
+        }
+
+
+@dataclass
+class _Client:
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    closed: bool = False
+
+    async def send(self, frame: dict[str, Any]) -> None:
+        if self.closed:
+            return
+        data = (json.dumps(frame, ensure_ascii=False) + "\n").encode("utf-8")
+        async with self.send_lock:
+            if self.closed:
+                return
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except (ConnectionError, OSError, RuntimeError) as exc:
+                # The client went away mid-send; its turns keep running and
+                # keep collecting lines for the next client.
+                logger.info("Turn host: client connection lost while sending: {}", exc)
+                self.closed = True
+
+    def close(self) -> None:
+        self.closed = True
+        try:
+            self.writer.close()
+        except Exception as exc:  # noqa: BLE001 - already closed is the goal
+            logger.debug("Turn host: closing a client socket failed: {}", exc)
+
+
+class TurnHost:
+    """The server: CLI processes, their kept output, and one client."""
+
+    def __init__(
+        self,
+        token: str,
+        spool_dir: Path,
+        *,
+        idle_exit_s: float = IDLE_EXIT_S,
+        unwatched_stdin_s: float = UNWATCHED_STDIN_S,
+    ) -> None:
+        from dodaios.core.process_tree import make_process_tree
+
+        self._token = token
+        self._spool_dir = spool_dir
+        self._turns: dict[str, HostedTurn] = {}
+        self._client: _Client | None = None
+        self._idle_exit_s = idle_exit_s
+        self._unwatched_stdin_s = unwatched_stdin_s
+        self._idle_since: float | None = time.monotonic()
+        self._stop = asyncio.Event()
+        # One kill-on-close container for every CLI: if the host dies, its
+        # CLIs die with it instead of running on with nobody to read them.
+        self._tree = make_process_tree("jarvis-turn-host")
+
+    # ------------------------------------------------------------ lifecycle
+    async def serve(self, state_path: Path) -> None:
+        server = await asyncio.start_server(
+            self._on_connect, host="127.0.0.1", port=0, limit=MAX_FRAME_BYTES
+        )
+        port = int(server.sockets[0].getsockname()[1])
+        _write_state(
+            state_path,
+            {
+                "pid": os.getpid(),
+                "port": port,
+                "token": self._token,
+                "proto": PROTOCOL_VERSION,
+                "started_at": time.time(),
+                "boot_time": _boot_time(),
+            },
+        )
+        logger.info("Turn host listening on 127.0.0.1:{} (pid {})", port, os.getpid())
+        idle = asyncio.create_task(self._idle_watch(), name="turn-host-idle")
+        try:
+            async with server:
+                await self._stop.wait()
+        finally:
+            idle.cancel()
+            self._spool_unclaimed()
+            _remove_state(state_path, os.getpid())
+            for turn in self._turns.values():
+                _kill(turn.proc)
+            self._tree.close()
+            logger.info("Turn host stopped")
+
+    async def _idle_watch(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(_IDLE_POLL_S)
+            running = any(turn.alive for turn in self._turns.values())
+            attached = self._client is not None and not self._client.closed
+            now = time.monotonic()
+            self._close_unwatched_stdin(now, attached)
+            if running or attached:
+                self._idle_since = None
+                continue
+            if self._idle_since is None:
+                self._idle_since = now
+            elif now - self._idle_since >= self._idle_exit_s:
+                logger.info("Turn host idle for {:.0f} s — exiting", now - self._idle_since)
+                self._stop.set()
+
+    def _close_unwatched_stdin(self, now: float, attached: bool) -> None:
+        """Close stdin of answered turns no app has read for a while.
+
+        Claude Code waits on an open stdin for ever. With an app reading, the
+        app decides when the turn is over; without one the CLI must still end.
+        """
+        for turn in self._turns.values():
+            if not turn.alive or not turn.answered:
+                continue
+            if attached and turn.streaming:
+                turn.unwatched_since = None
+            elif turn.unwatched_since is None:
+                turn.unwatched_since = now
+            elif now - turn.unwatched_since >= self._unwatched_stdin_s:
+                _close_stdin(turn)
+
+    def _spool_unclaimed(self) -> None:
+        """Write every ended turn nobody collected to disk for the next app start."""
+        for turn in list(self._turns.values()):
+            if turn.alive:
+                continue
+            try:
+                self._spool_dir.mkdir(parents=True, exist_ok=True)
+                target = self._spool_dir / f"{turn.turn_id}.json"
+                tmp = target.with_name(target.name + ".tmp")
+                tmp.write_text(json.dumps(turn.spool_record(), ensure_ascii=False), "utf-8")
+                os.replace(tmp, target)
+                logger.info("Turn host: spooled ended turn {} for the next app start", turn.turn_id)
+            except OSError as exc:
+                logger.warning("Turn host: could not spool turn {}: {}", turn.turn_id, exc)
+
+    # ----------------------------------------------------------- connection
+    async def _on_connect(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        client = _Client(reader, writer)
+        try:
+            hello = await asyncio.wait_for(_read_frame(reader), timeout=10.0)
+        except (TimeoutError, ValueError, ConnectionError, OSError) as exc:
+            logger.info("Turn host: connection dropped before hello: {}", exc)
+            client.close()
+            return
+        if (
+            not isinstance(hello, dict)
+            or hello.get("op") != "hello"
+            or not hmac.compare_digest(str(hello.get("token", "")), self._token)
+        ):
+            logger.warning("Turn host: refused a connection with a bad hello")
+            client.close()
+            return
+        if hello.get("proto") != PROTOCOL_VERSION:
+            await client.send(
+                {
+                    "rid": hello.get("rid"),
+                    "ok": False,
+                    "error": "protocol",
+                    "proto": PROTOCOL_VERSION,
+                }
+            )
+            client.close()
+            return
+        previous = self._client
+        if previous is not None and not previous.closed:
+            logger.info("Turn host: a new client replaces the attached one")
+            # Told first, so the old app hands its turns over instead of
+            # reporting them as failed when its connection drops.
+            await previous.send({"ev": "replaced"})
+            previous.close()
+        for turn in self._turns.values():
+            turn.streaming = False
+        self._client = client
+        await client.send(
+            {
+                "rid": hello.get("rid"),
+                "ok": True,
+                "pid": os.getpid(),
+                "proto": PROTOCOL_VERSION,
+                "build": BUILD,
+                "turns": [turn.summary() for turn in self._turns.values()],
+            }
+        )
+        try:
+            while not client.closed:
+                try:
+                    frame = await _read_frame(reader)
+                except (ValueError, ConnectionError, OSError) as exc:
+                    logger.info("Turn host: client disconnected: {}", exc)
+                    break
+                if frame is None:
+                    break
+                await self._handle(client, frame)
+        finally:
+            client.close()
+            if self._client is client:
+                self._client = None
+                for turn in self._turns.values():
+                    turn.streaming = False
+            logger.info(
+                "Turn host: client detached — {} CLI(s) keep running",
+                sum(1 for turn in self._turns.values() if turn.alive),
+            )
+
+    async def _handle(self, client: _Client, frame: dict[str, Any]) -> None:
+        op = frame.get("op")
+        rid = frame.get("rid")
+        turn = self._turns.get(str(frame.get("id", "")))
+        reply: dict[str, Any] | None
+        try:
+            if op == "spawn":
+                reply = await self._spawn(frame)
+            elif op == "attach":
+                # Answers itself: the reply must precede the replayed lines.
+                await self._attach(client, rid, turn)
+                return
+            elif op == "write":
+                if turn is not None:
+                    await _write_stdin(turn, str(frame.get("d", "")))
+                reply = {}
+            elif op == "close_stdin":
+                if turn is not None:
+                    _close_stdin(turn)
+                reply = {}
+            elif op == "kill":
+                if turn is not None:
+                    _kill(turn.proc)
+                reply = {}
+            elif op == "ack":
+                if turn is not None:
+                    turn.acked = max(turn.acked, int(frame.get("seq") or 0))
+                reply = None
+            elif op == "release":
+                if turn is not None and not turn.alive:
+                    self._turns.pop(turn.turn_id, None)
+                reply = {}
+            elif op == "list":
+                reply = {"turns": [t.summary() for t in self._turns.values()]}
+            elif op == "ping":
+                reply = {}
+            else:
+                reply = {"ok": False, "error": f"unknown op {op!r}"}
+        except Exception as exc:  # noqa: BLE001 - one bad request must not end the host
+            logger.warning("Turn host: {} failed: {}", op, exc)
+            reply = {"ok": False, "error": str(exc)}
+        if rid is not None and reply is not None:
+            reply.setdefault("ok", True)
+            reply["rid"] = rid
+            await client.send(reply)
+
+    # ------------------------------------------------------------ requests
+    async def _spawn(self, frame: dict[str, Any]) -> dict[str, Any]:
+        from dodaios.core.path_augment import ensure_cli_paths
+        from dodaios.core.process_utils import NO_WINDOW_CREATIONFLAGS
+
+        argv = [str(part) for part in frame.get("argv") or ()]
+        if not argv:
+            return {"ok": False, "error": "empty argv"}
+        # A turn host can outlive and be reattached by the desktop process that
+        # created it.  In particular, an older host may still carry the PATH it
+        # inherited before the Windows length guard was added.  Repair the
+        # caller's PATH immediately before CreateProcess: changing only the
+        # child environment is too late for WinError 8.
+        ensure_cli_paths()
+        env = frame.get("env")
+        stdin_data = frame.get("stdin")
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=frame.get("cwd") or None,
+            env=dict(env) if isinstance(env, dict) else None,
+            stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=NO_WINDOW_CREATIONFLAGS,
+            # Its own process group on POSIX: the container reaps by group,
+            # and the host's own group must never be the one it signals.
+            start_new_session=os.name != "nt",
+            limit=LINE_LIMIT,
+        )
+        try:
+            self._tree.assign(proc.pid)
+        except Exception as exc:  # noqa: BLE001 - containment is best effort, the turn runs
+            logger.debug("Turn host: could not contain pid {}: {}", proc.pid, exc)
+        turn = HostedTurn(
+            turn_id=uuid.uuid4().hex,
+            proc=proc,
+            meta=dict(frame.get("meta") or {}),
+            started_at=time.time(),
+            # The spawning client reads from the first line on.
+            streaming=True,
+            close_stdin_on=str(frame.get("close_stdin_on") or ""),
+        )
+        self._turns[turn.turn_id] = turn
+        if stdin_data is not None:
+            await _write_stdin(turn, str(stdin_data))
+            if not frame.get("keep_stdin"):
+                _close_stdin(turn)
+        turn.pumps = [
+            asyncio.create_task(self._pump_stdout(turn), name=f"turn-out-{turn.turn_id[:8]}"),
+            asyncio.create_task(self._pump_stderr(turn), name=f"turn-err-{turn.turn_id[:8]}"),
+        ]
+        asyncio.create_task(self._reap(turn), name=f"turn-reap-{turn.turn_id[:8]}")
+        logger.info("Turn host: started turn {} (pid {})", turn.turn_id, proc.pid)
+        # ``stdin_after_result``: this host leaves stdin open past the answer.
+        return {"id": turn.turn_id, "pid": proc.pid, "stdin_after_result": True}
+
+    async def _attach(self, client: _Client, rid: Any, turn: HostedTurn | None) -> None:
+        if turn is None:
+            await client.send({"rid": rid, "ok": True, "known": False})
+            return
+        turn.streaming = False
+        await client.send(
+            {
+                "rid": rid,
+                "ok": True,
+                "known": True,
+                "pid": turn.proc.pid,
+                "meta": turn.meta,
+                "acked": turn.acked,
+                "stderr": list(turn.stderr_tail),
+                "truncated": turn.truncated,
+                "stdin_open": _stdin_open(turn),
+            }
+        )
+        # Replay every kept line in order, then switch to live streaming with
+        # no await in between: a line the pump appends while a send is in
+        # flight is picked up by the next round of this loop, never lost.
+        sent = 0
+        while sent < len(turn.lines):
+            seq = sent + 1
+            await client.send(
+                {"ev": "line", "id": turn.turn_id, "seq": seq, "d": turn.lines[sent]}
+            )
+            sent = seq
+            if client.closed:
+                return
+        turn.streaming = True
+        if not turn.alive:
+            await client.send({"ev": "exit", "id": turn.turn_id, "code": turn.exit_code})
+
+    # --------------------------------------------------------------- pumps
+    async def _pump_stdout(self, turn: HostedTurn) -> None:
+        stream = turn.proc.stdout
+        assert stream is not None
+        while True:
+            try:
+                raw = await stream.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                turn.reads += 1
+                # A line past LINE_LIMIT: drop it, keep reading.
+                logger.warning("Turn host: dropped an over-long line of turn {}", turn.turn_id)
+                continue
+            if not raw:
+                return
+            turn.reads += 1
+            text = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            turn.seq += 1
+            # Once over the cap nothing more is kept, so the kept lines stay
+            # exactly seq 1..len(lines) for a replay. The line itself still
+            # goes on below: skipping it lost the final answer and hung the turn.
+            if turn.truncated or turn.kept_bytes + len(raw) > MAX_KEPT_BYTES:
+                turn.truncated = True
+            else:
+                turn.lines.append(text)
+                turn.kept_bytes += len(raw)
+            if turn.close_stdin_on and not turn.answered and _is_answer(turn, text):
+                turn.answered = True
+            client = self._client
+            if turn.streaming and client is not None and not client.closed:
+                turn.in_flight += 1
+                try:
+                    await client.send(
+                        {"ev": "line", "id": turn.turn_id, "seq": turn.seq, "d": text}
+                    )
+                finally:
+                    turn.in_flight -= 1
+
+    async def _pump_stderr(self, turn: HostedTurn) -> None:
+        stream = turn.proc.stderr
+        assert stream is not None
+        while True:
+            try:
+                raw = await stream.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                # an over-long stderr line is dropped; readline already cleared it
+                turn.reads += 1
+                continue
+            if not raw:
+                return
+            turn.reads += 1
+            text = raw.decode("utf-8", errors="replace").rstrip()
+            if not text:
+                continue
+            turn.stderr_tail.append(text)
+            client = self._client
+            if turn.streaming and client is not None and not client.closed:
+                turn.in_flight += 1
+                try:
+                    await client.send({"ev": "err", "id": turn.turn_id, "d": text})
+                finally:
+                    turn.in_flight -= 1
+
+    async def _reap(self, turn: HostedTurn) -> None:
+        proc = turn.proc
+        # The process's own exit, not its pipes' EOF (``Process.wait`` may
+        # wait for both, and a grandchild can hold them open for hours).
+        while proc.returncode is None:  # noqa: ASYNC110 — no awaitable for exit alone
+            await asyncio.sleep(_EXIT_POLL_S)
+        code = proc.returncode
+        # Every line first: the exit must never overtake the answer. Lines
+        # still coming are read on; the pipes are let go after a whole
+        # PIPE_DRAIN_S window with no line read and nothing buffered —
+        # counted, not clocked, so a stalled loop never drops a line.
+        while True:
+            pending = [t for t in turn.pumps if not t.done()]
+            if not pending:
+                break
+            seen = turn.reads
+            await asyncio.wait(pending, timeout=PIPE_DRAIN_S)
+            for _ in range(3):  # completions that arrived during a stall run first
+                await asyncio.sleep(0)
+            if turn.reads == seen and not turn.in_flight and not _unread(proc):
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                logger.info(
+                    "Turn host: turn {} exited; a process it left holds its pipes", turn.turn_id
+                )
+                transport = getattr(proc, "_transport", None)
+                if transport is not None:
+                    with contextlib.suppress(Exception):
+                        transport.close()
+                break
+        turn.exit_code = int(code)
+        logger.info("Turn host: turn {} ended (exit {})", turn.turn_id, code)
+        client = self._client
+        if turn.streaming and client is not None and not client.closed:
+            await client.send({"ev": "exit", "id": turn.turn_id, "code": turn.exit_code})
+
+
+# ---------------------------------------------------------------- helpers
+async def _write_stdin(turn: HostedTurn, text: str) -> None:
+    stdin = turn.proc.stdin
+    if stdin is None or stdin.is_closing():
+        return
+    try:
+        stdin.write(text.encode("utf-8"))
+        await stdin.drain()
+    except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+        logger.debug("Turn host: stdin write for {} failed: {}", turn.turn_id, exc)
+
+
+def _line_object(text: str) -> dict[str, Any]:
+    """A JSON stdout line as an object, or {} for anything else."""
+    if '"type"' not in text:
+        return {}
+    try:
+        obj = json.loads(text)
+    except ValueError:  # a non-JSON line simply has no type
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def claude_result_without_model_turn(obj: dict[str, Any]) -> bool:
+    """A Claude Code ``result`` line that answered no prompt of the person.
+
+    Resumed with the notice of a task the previous process left unfinished
+    (a background agent it stopped on exit), Claude Code runs that notice as
+    an input of its own first. It answers it with an empty ``result`` — no
+    model turn, no API time — and only then runs the prompt it was given.
+    Taken as the turn's end, that line closed stdin under the running prompt
+    (its question card failed with "Stream closed") and the thread read
+    "Finished without an answer" while the agent was still working.
+    """
+    return (
+        obj.get("type") == "result"
+        and not obj.get("is_error")
+        and obj.get("num_turns") == 0
+    )
+
+
+def _is_answer(turn: HostedTurn, text: str) -> bool:
+    """Whether this stdout line is the turn's answer (``close_stdin_on``).
+
+    From it on, stdin is closed once no app reads the turn any more.
+    """
+    obj = _line_object(text)
+    kind = str(obj.get("type") or "")
+    if kind == "system" and obj.get("subtype") == "task_notification":
+        turn.notice_pending = True
+        return False
+    if kind != turn.close_stdin_on:
+        return False
+    notice, turn.notice_pending = turn.notice_pending, False
+    return not (notice and claude_result_without_model_turn(obj))
+
+
+def _stdin_open(turn: HostedTurn) -> bool:
+    stdin = turn.proc.stdin
+    return stdin is not None and not stdin.is_closing()
+
+
+def _close_stdin(turn: HostedTurn) -> None:
+    stdin = turn.proc.stdin
+    if stdin is None or stdin.is_closing():
+        return
+    try:
+        stdin.close()
+    except OSError as exc:
+        logger.debug("Turn host: stdin close for {} failed: {}", turn.turn_id, exc)
+
+
+def _unread(proc: asyncio.subprocess.Process) -> int:
+    """Bytes already on the process's pipes that no pump took yet."""
+    return sum(
+        len(getattr(stream, "_buffer", b"") or b"") for stream in (proc.stdout, proc.stderr)
+    )
+
+
+def _kill(proc: asyncio.subprocess.Process) -> None:
+    # The whole tree: a wrapper (node codex.js, claude.cmd) keeps the real
+    # agent in a child that a plain kill would leave working after Stop.
+    from dodaios.core.process_tree import kill_with_descendants
+
+    kill_with_descendants(proc)
+
+
+async def _read_frame(reader: asyncio.StreamReader) -> dict[str, Any] | None:
+    line = await reader.readline()
+    if not line:
+        return None
+    frame = json.loads(line.decode("utf-8"))
+    if not isinstance(frame, dict):
+        raise ValueError("frame is not an object")
+    return frame
+
+
+def _write_state(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError as exc:
+        # Windows keeps per-user ACLs on the data dir; chmod is a POSIX nicety.
+        logger.debug("Turn host: could not restrict the state file: {}", exc)
+    os.replace(tmp, path)
+
+
+def _remove_state(path: Path, pid: int) -> None:
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # gone or rewritten by a newer host: not ours
+        return
+    if isinstance(current, dict) and current.get("pid") == pid:
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.debug("Turn host: state file not removed: {}", exc)
+
+
+def _boot_time() -> float:
+    try:
+        import psutil
+
+        return float(psutil.boot_time())
+    except Exception as exc:  # noqa: BLE001 - optional evidence, never fatal
+        logger.debug("Turn host: boot time unavailable: {}", exc)
+        return 0.0
+
+
+def _configure_logging(log_path: Path | None) -> None:
+    logger.remove()
+    if log_path is None:
+        return
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        str(log_path),
+        level="INFO",
+        rotation="2 MB",
+        retention=2,
+        encoding="utf-8",
+        diagnose=False,  # never dump frame locals (tokens, keys) into the log
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="dodaios.agent_chat.turn_host")
+    parser.add_argument("--state", required=True, help="Where to publish the port and token.")
+    parser.add_argument("--spool", required=True, help="Where ended, uncollected turns go.")
+    parser.add_argument("--log", default=None, help="Log file (none when omitted).")
+    parser.add_argument("--idle-exit", type=float, default=IDLE_EXIT_S)
+    parser.add_argument("--token-file", default=None, help="Read the token from this file.")
+    args = parser.parse_args(argv)
+
+    token = os.environ.pop(TOKEN_ENV, "")
+    if not token and args.token_file:
+        token_path = Path(args.token_file)
+        try:
+            token = token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            print(f"Turn host: token file unreadable: {exc}", file=sys.stderr)
+        finally:
+            try:
+                token_path.unlink()
+            except OSError as exc:  # already gone is fine; anything else is reported
+                print(f"Turn host: token file not removed: {exc}", file=sys.stderr)
+    if not token:
+        print("Turn host: no token — refusing to start.", file=sys.stderr)
+        return 2
+    _configure_logging(Path(args.log) if args.log else None)
+    host = TurnHost(token, Path(args.spool), idle_exit_s=args.idle_exit)
+    try:
+        asyncio.run(host.serve(Path(args.state)))
+    except KeyboardInterrupt:
+        # Ctrl+C is the normal way to stop the host by hand.
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

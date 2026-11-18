@@ -1,0 +1,846 @@
+"""Folder picking + cheap project profiling for the Agentic IDE.
+
+Two jobs:
+
+*Picking* — the wizard's first step lets the user choose ANY folder on the
+machine, so this module lists directories the way a file dialog would, but over
+REST (the desktop app is a web UI; a native folder dialog would exist on one OS
+and not the others). Start points are discovered per platform: drive letters on
+Windows, ``/`` plus the mounted volumes on macOS/Linux, always the home folder
+and a handful of conventional code directories.
+
+*Profiling* — once a folder is chosen, Jarvis needs to be able to answer "what
+is this codebase?" without reading it file by file. ``probe_project`` collects a
+compact profile from a SINGLE shallow directory scan plus a few file-existence
+checks: git branch, detected stacks, the agent instruction files that are
+actually present, and the skills the repo defines. Deliberately shallow — no
+recursive walk — because this runs when a session starts and its result is what
+gets folded into the voice turn's context (AP-9: awareness work stays off the
+hot path; here it is computed once and cached in the session).
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import stat
+import sys
+from collections import deque
+from dataclasses import asdict, dataclass, field
+from pathlib import Path, PurePosixPath
+
+# Directory names that are never interesting as a project root and would bury
+# the real folders in the picker.
+_SKIP_DIRS = frozenset(
+    {
+        "node_modules",
+        "__pycache__",
+        ".git",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "dist",
+        "build",
+        ".next",
+        ".turbo",
+        "target",
+        ".idea",
+        ".vscode-test",
+        "$RECYCLE.BIN",
+        "System Volume Information",
+    }
+)
+#: The same set for other listers (the chat composer's ``@`` typeahead), so
+#: "what a folder walk skips" is decided once.
+SKIP_DIRS = _SKIP_DIRS
+
+# macOS answers a read of another app's data with a consent dialog ("... would
+# like to access data from other apps") that it does not remember across
+# launches. Every app keeps that data under the account's ``Library``, in
+# ``Containers`` and ``Group Containers``, so a recursive walk rooted at or
+# above them raised the dialog each time a restored workspace was indexed
+# (field report 2026-11-12: workspace folder ``~/Library``, one dialog per
+# launch, three launches in a row). ``Library`` holds application data, never
+# a project: a walk that starts at or above it leaves the tree out. A walk
+# that starts inside it (an iCloud Drive folder under ``Library/Mobile
+# Documents``) is the person's own choice and runs, short of the two container
+# parents. Spelled relative to the home folder.
+_MACOS_GUARDED_DIRS: tuple[tuple[str, ...], ...] = (
+    ("Library",),
+    ("Library", "Containers"),
+    ("Library", "Group Containers"),
+)
+
+
+def consent_guarded_dirs(
+    root: str | os.PathLike[str],
+    *,
+    home: str | os.PathLike[str] | None = None,
+    platform: str | None = None,
+) -> frozenset[str]:
+    """Directories at or below ``root`` that a recursive walk must not enter.
+
+    Each path is spelled the way a walk from ``root`` spells it
+    (``os.path.join`` from ``root``), so a walker compares an entry's path
+    directly. ``root`` itself is in the set when it is one of them, and the
+    walk then lists nothing. Empty on every system but macOS.
+
+    ``home`` and ``platform`` default to this machine's; they are parameters so
+    the rule is checked on all three operating systems.
+    """
+    if (platform or sys.platform) != "darwin":
+        return frozenset()
+    base = Path(root)
+    try:
+        resolved = Path(os.path.realpath(base))
+        account = Path(os.path.realpath(home if home is not None else Path.home()))
+    except (OSError, RuntimeError):  # no home folder to reason about
+        return frozenset()
+    guarded: set[str] = set()
+    for parts in _MACOS_GUARDED_DIRS:
+        try:
+            below = account.joinpath(*parts).relative_to(resolved)
+        except ValueError:  # not under this root: the walk never reaches it
+            continue
+        guarded.add(str(base / below))
+    return frozenset(guarded)
+
+
+# marker file/dir -> stack label. Order is irrelevant; all matches are reported.
+_STACK_MARKERS: tuple[tuple[str, str], ...] = (
+    ("pyproject.toml", "Python"),
+    ("requirements.txt", "Python"),
+    ("setup.py", "Python"),
+    ("package.json", "Node / JavaScript"),
+    ("tsconfig.json", "TypeScript"),
+    ("Cargo.toml", "Rust"),
+    ("go.mod", "Go"),
+    ("pom.xml", "Java / Maven"),
+    ("build.gradle", "Java / Gradle"),
+    ("Gemfile", "Ruby"),
+    ("composer.json", "PHP"),
+    ("Dockerfile", "Docker"),
+    ("docker-compose.yml", "Docker Compose"),
+    ("pubspec.yaml", "Dart / Flutter"),
+    ("*.csproj", ".NET"),
+)
+
+# Files a coding agent reads as its standing instructions. Which of these exist
+# tells the user (and Jarvis) how well-briefed an agent in this folder will be.
+_INSTRUCTION_FILES: tuple[str, ...] = (
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".cursorrules",
+    "CONTRIBUTING.md",
+    "README.md",
+)
+
+_MAX_ENTRIES = 1_000
+_MAX_WORKSPACE_ENTRIES = 2_000
+_MAX_SKILLS = 60
+
+
+@dataclass(frozen=True, slots=True)
+class FolderEntry:
+    """One directory in the picker."""
+
+    name: str
+    path: str
+    is_project: bool
+    is_repo: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceEntry:
+    """One direct child of a directory inside an open workspace."""
+
+    name: str
+    path: str
+    is_directory: bool
+    is_symlink: bool
+    size: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceListing:
+    """A bounded, workspace-relative directory listing for the file explorer."""
+
+    path: str
+    entries: tuple[WorkspaceEntry, ...]
+    truncated: bool = False
+    error: str | None = None
+
+
+def _workspace_relative_parts(relative: str | Path) -> tuple[str, ...]:
+    """Parse one wire path consistently on Windows, macOS, and Linux.
+
+    Explorer paths are POSIX-style on the wire. Splitting them before the
+    native ``Path`` join keeps ordinary separators stable; the resolved native
+    path still passes the workspace-containment check below, which also catches
+    Windows drive, UNC, and backslash traversal forms without rejecting valid
+    Unix filenames that happen to contain a colon or backslash.
+    """
+    raw = os.fspath(relative) or "."
+    posix = PurePosixPath(raw)
+    if posix.is_absolute() or ".." in posix.parts:
+        raise ValueError("That folder is outside the open workspace.")
+    return tuple(part for part in posix.parts if part not in {"", "."})
+
+
+@dataclass(slots=True)
+class ProjectProfile:
+    """Compact, cheap description of a chosen folder."""
+
+    path: str
+    name: str
+    exists: bool = True
+    is_repo: bool = False
+    branch: str | None = None
+    stacks: list[str] = field(default_factory=list)
+    instruction_files: list[str] = field(default_factory=list)
+    top_level_dirs: list[str] = field(default_factory=list)
+    skills: list[str] = field(default_factory=list)
+    subagents: list[str] = field(default_factory=list)
+    commands: list[str] = field(default_factory=list)
+    note: str = ""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def summary_lines(self) -> list[str]:
+        """Plain-text lines for a model-facing context block."""
+        out = [f"Folder: {self.path}"]
+        if not self.exists:
+            out.append("This folder no longer exists on disk.")
+            return out
+        if self.is_repo:
+            out.append(f"Git repository{f' on branch {self.branch}' if self.branch else ''}.")
+        if self.stacks:
+            out.append("Stack: " + ", ".join(self.stacks))
+        if self.instruction_files:
+            out.append("Agent instructions present: " + ", ".join(self.instruction_files))
+        if self.top_level_dirs:
+            out.append("Top-level folders: " + ", ".join(self.top_level_dirs))
+        # What the agents in this repo can be ASKED for. Knowing that a repo
+        # defines a `game-art-pipeline` skill or a `code-reviewer` subagent is
+        # the difference between "hand-build a Blender scene" and "run the art
+        # pipeline skill" — the second is what the user meant and what the agent in the
+        # pane is actually equipped to do.
+        for label, items in (
+            ("Skills defined here", self.skills),
+            ("Subagents defined here", self.subagents),
+            ("Slash commands defined here", self.commands),
+        ):
+            if not items:
+                continue
+            shown = ", ".join(items[:20])
+            more = "" if len(items) <= 20 else f" (+{len(items) - 20} more)"
+            out.append(f"{label} ({len(items)}): {shown}{more}")
+        return out
+
+
+def _is_hidden(name: str) -> bool:
+    return name.startswith(".")
+
+
+# Folders a tool writes into every project and nobody opens as a workspace.
+# They are listed with the hidden ones: out of the way, one switch away. Kept
+# to names that mean one thing only; "dist" and "build" can be somebody's
+# project and stay visible.
+_CLUTTER_DIRS = frozenset({"__pycache__", "node_modules"})
+
+# Whether a per-entry ``stat`` can say more about "hidden" than the name does.
+# Windows keeps it in the file attributes (free: ``scandir`` already has them),
+# macOS in the BSD flags. Linux has only the dot, so the call is skipped there.
+_STAT_KNOWS_HIDDEN = os.name == "nt" or sys.platform == "darwin"
+
+
+def _hidden_state(item: os.DirEntry[str]) -> tuple[bool, bool]:
+    """``(hidden, system_internal)`` for one directory entry.
+
+    Hidden is what the file manager of this machine hides: a leading dot
+    everywhere, the Hidden attribute on Windows (``AppData``, ``ProgramData``),
+    the hidden flag on macOS (``~/Library``). The picker lists those only when
+    asked to.
+
+    ``system_internal`` is narrower and is never listed: on Windows a folder
+    that is Hidden AND System belongs to the operating system. That is the
+    recycle bin, ``System Volume Information``, and the compatibility links of
+    older Windows versions (``Application Data``, ``Cookies``, ``Start Menu``
+    and their localised names), which exist in every account folder and refuse
+    to be opened. Listed, they looked like ordinary folders that were broken.
+    """
+    if _is_hidden(item.name) or item.name in _CLUTTER_DIRS:
+        return True, False
+    if not _STAT_KNOWS_HIDDEN:
+        return False, False
+    try:
+        info = item.stat(follow_symlinks=False)
+    except OSError:  # gone or unreadable: treated as an ordinary entry
+        return False, False
+    attributes = getattr(info, "st_file_attributes", 0)
+    if attributes:
+        hidden = bool(attributes & stat.FILE_ATTRIBUTE_HIDDEN)
+        system = bool(attributes & stat.FILE_ATTRIBUTE_SYSTEM)
+        return hidden, hidden and system
+    flags = getattr(info, "st_flags", 0)
+    return bool(flags & getattr(stat, "UF_HIDDEN", 0)), False
+
+
+_DIGITS = re.compile(r"(\d+)")
+
+
+def _natural_key(name: str) -> list[object]:
+    """Sort key that reads numbers as numbers: "New folder (9)" before "(10)"."""
+    parts = _DIGITS.split(name.casefold())
+    return [int(part) if index % 2 else part for index, part in enumerate(parts)]
+
+
+def _looks_like_project(entry_path: Path) -> tuple[bool, bool]:
+    """(is_project, is_repo) from marker files, without descending."""
+    is_repo = (entry_path / ".git").exists()
+    if is_repo:
+        return True, True
+    for marker, _label in _STACK_MARKERS:
+        if "*" in marker:
+            continue
+        if (entry_path / marker).exists():
+            return True, False
+    return False, False
+
+
+def start_points() -> list[FolderEntry]:
+    """Platform-appropriate places to begin browsing."""
+    seen: set[str] = set()
+    out: list[FolderEntry] = []
+
+    def add(path: Path, label: str | None = None) -> None:
+        try:
+            if not path.is_dir():
+                return
+            resolved = str(path)
+        except OSError:
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        is_project, is_repo = _looks_like_project(path)
+        out.append(
+            FolderEntry(
+                name=label or path.name or resolved,
+                path=resolved,
+                is_project=is_project,
+                is_repo=is_repo,
+            )
+        )
+
+    home = Path.home()
+    add(home, "Home")
+    for conventional in (
+        "Desktop",
+        "Documents",
+        "Downloads",
+        "Projects",
+        "Code",
+        "dev",
+        "src",
+        "repos",
+    ):
+        add(home / conventional)
+
+    if os.name == "nt":
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            add(Path(f"{letter}:\\"), f"{letter}:\\")
+    else:
+        add(Path("/"), "/")
+        for volumes in ("/Volumes", "/media", "/mnt", "/opt", "/srv"):
+            add(Path(volumes))
+
+    return out
+
+
+_DRIVE_ONLY = re.compile(r"[A-Za-z]:")
+
+
+def resolve_folder_path(raw: str | Path, base: str | Path | None = None) -> Path:
+    """The folder a typed path means, the way a shell would read it.
+
+    Lexical, apart from one lookup for the spelling: nothing here needs the
+    folder to exist, so a path that is not one yet still comes back in the form
+    it would have.
+
+    * ``~`` and environment variables (``%USERPROFILE%``, ``$HOME``) expand.
+    * A relative path is relative to ``base``, the folder on screen, and to
+      the home folder when there is none. It is never relative to the working
+      directory of the server process: that is wherever the app was started
+      from, a place the person typing has never seen.
+    * ``..`` folds away, so the answer is the folder and not the route to it.
+    * A bare drive (``C:``) means the root of that drive. Windows itself reads
+      it as "the current directory on C:", which is again the server's.
+    * On Windows the spelling on disk wins over the spelling that was typed
+      (``c:/users/me`` becomes ``C:/Users/me``), because this path becomes the
+      name of the workspace.
+    """
+    text = os.path.expandvars(os.fspath(raw).strip())
+    if os.name == "nt" and _DRIVE_ONLY.fullmatch(text):
+        text += os.sep
+    try:
+        candidate = Path(text).expanduser()
+    except RuntimeError:  # no home folder to expand "~" with
+        candidate = Path(text)
+    if not candidate.is_absolute():
+        try:
+            anchor = Path(base).expanduser() if base else Path.home()
+        except RuntimeError:  # a "~" base with no home folder: home is the fallback
+            anchor = Path.home()
+        candidate = anchor / candidate
+    resolved = Path(os.path.normpath(candidate))
+    if os.name != "nt":
+        return resolved
+    try:
+        on_disk = os.path.realpath(resolved)
+    except OSError:  # the spelling is a nicety: the typed form is still right
+        return resolved
+    # Only the spelling may change. A path that leads through a link keeps the
+    # form the person used, so a mapped or redirected folder stays recognisable.
+    if os.path.normcase(on_disk) == os.path.normcase(str(resolved)):
+        return Path(on_disk)
+    return resolved
+
+
+def list_dir(
+    path: str | Path, *, include_hidden: bool = False
+) -> tuple[list[FolderEntry], str | None]:
+    """Sub-directories of ``path``. Returns ``(entries, error_message)``.
+
+    Sorted by name, numbers read as numbers: the order every file manager
+    uses. Projects used to be sorted to the top, which put a long account
+    folder in an order nobody could scan ("sonnet5.5" above "Apps").
+
+    Everything the person could open is listed, build folders included. Only
+    hidden folders wait for ``include_hidden``, and folders that belong to the
+    operating system are left out (see :func:`_hidden_state`).
+    """
+    target = Path(path).expanduser()
+    try:
+        if not target.is_dir():
+            return [], (
+                f"There is no folder called {target}. "
+                "Check the spelling, or pick a folder from the list."
+            )
+    except OSError as exc:
+        return [], f"Could not open {target}: {exc}"
+
+    children: list[tuple[str, Path]] = []
+    try:
+        with os.scandir(target) as it:
+            for item in it:
+                hidden, system_internal = _hidden_state(item)
+                if system_internal or (hidden and not include_hidden):
+                    continue
+                try:
+                    # Links are followed: a linked project folder is a folder
+                    # to the person who made the link. One level cannot loop.
+                    if not item.is_dir():
+                        continue
+                except OSError:
+                    continue
+                children.append((item.name, Path(item.path)))
+    except PermissionError:
+        return [], f"Dodaios is not allowed to look inside {target}. Pick another folder."
+    except OSError as exc:
+        return [], f"Cannot read {target}: {exc}"
+
+    # Sorted before the cut, so a very large folder loses its tail and not a
+    # random part: the order `scandir` yields is the file system's own.
+    children.sort(key=lambda child: _natural_key(child[0]))
+    del children[_MAX_ENTRIES:]
+
+    # One question per folder, the one the list shows the answer to: is it a
+    # repository. The full marker check (:func:`_looks_like_project`) costs a
+    # dozen file lookups per folder and only ever fed the old projects-first
+    # order; on a home folder with two hundred entries it took half a second.
+    entries: list[FolderEntry] = []
+    for name, child in children:
+        try:
+            is_repo = (child / ".git").exists()
+        except OSError:  # unreadable folder: listed, just not marked
+            is_repo = False
+        entries.append(FolderEntry(name=name, path=str(child), is_project=is_repo, is_repo=is_repo))
+    return entries, None
+
+
+def is_listing_cut(entries: list[FolderEntry]) -> bool:
+    """True when :func:`list_dir` stopped at its limit and more folders exist."""
+    return len(entries) >= _MAX_ENTRIES
+
+
+def list_workspace_dir(
+    root: str | Path,
+    relative: str | Path = "",
+    *,
+    limit: int = _MAX_WORKSPACE_ENTRIES,
+) -> WorkspaceListing:
+    """List one directory without ever escaping the open workspace.
+
+    The explorer loads one level at a time, so even a large repository stays
+    cheap to open. Hidden entries are intentionally included: source control,
+    agent instructions, and environment examples are normal project files.
+    Symlinks are shown but never reported as expandable directories, which
+    prevents a link inside the workspace from becoming a browser for another
+    part of the machine.
+    """
+    root_path = Path(root).expanduser().resolve(strict=True)
+    relative_parts = _workspace_relative_parts(relative)
+
+    try:
+        target = root_path.joinpath(*relative_parts).resolve(strict=True)
+        target.relative_to(root_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError("That folder is outside the open workspace.") from exc
+    if not target.is_dir():
+        raise NotADirectoryError("That workspace path is not a folder.")
+
+    normalized_path = "" if target == root_path else target.relative_to(root_path).as_posix()
+    entries: list[WorkspaceEntry] = []
+    truncated = False
+    try:
+        with os.scandir(target) as it:
+            for item in it:
+                if len(entries) >= max(1, limit):
+                    truncated = True
+                    break
+                try:
+                    is_symlink = item.is_symlink()
+                    is_directory = item.is_dir(follow_symlinks=False)
+                    size = None
+                    if not is_directory and not is_symlink:
+                        size = item.stat(follow_symlinks=False).st_size
+                except OSError:
+                    # A file can disappear between scandir and stat. The next
+                    # refresh will reflect it; one racing entry must not blank
+                    # the rest of the folder.
+                    continue
+                child = Path(item.path).relative_to(root_path).as_posix()
+                entries.append(
+                    WorkspaceEntry(
+                        name=item.name,
+                        path=child,
+                        is_directory=is_directory,
+                        is_symlink=is_symlink,
+                        size=size,
+                    )
+                )
+    except PermissionError:
+        # Reported through the listing's own error field, not a log call.
+        return WorkspaceListing(
+            path=normalized_path,
+            entries=(),
+            error="This folder cannot be read with the current permissions.",
+        )
+    except OSError:
+        # Reported through the listing's own error field, not a log call.
+        return WorkspaceListing(
+            path=normalized_path,
+            entries=(),
+            error="This folder could not be read.",
+        )
+
+    entries.sort(key=lambda entry: (not entry.is_directory, entry.name.casefold()))
+    return WorkspaceListing(
+        path=normalized_path,
+        entries=tuple(entries),
+        truncated=truncated,
+    )
+
+
+def search_folders(
+    query: str,
+    *,
+    roots: list[Path] | None = None,
+    limit: int = 40,
+    max_depth: int = 5,
+) -> list[FolderEntry]:
+    """Folders whose name matches ``query``, searched breadth-first.
+
+    Breadth-first on purpose: the folder a person is looking for is almost always
+    a few levels down from home or from a code directory, so widening before
+    deepening finds it sooner and lets the walk stop early. The traversal is
+    bounded three ways — depth, a hard visit budget, and the shared skip list —
+    because an unbounded walk of a home directory on a spinning disk or a network
+    share would block for minutes.
+
+    Ranking puts exact name matches first, then prefix matches, then substring
+    matches; within each tier projects and repositories come before plain
+    folders, because that is what someone opening a coding workspace wants.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return []
+
+    if roots is None:
+        home = Path.home()
+        roots = [home]
+        for extra in ("Desktop", "Documents", "Projects", "Code", "dev", "src", "repos"):
+            candidate = home / extra
+            if candidate.is_dir():
+                roots.append(candidate)
+
+    # Visit budget: generous enough to cover a real code tree, small enough that
+    # the worst case stays well inside a request timeout.
+    budget = 20_000
+    seen: set[str] = set()
+    hits: list[tuple[int, int, str, FolderEntry]] = []
+
+    queue: deque[tuple[Path, int]] = deque((root, 0) for root in roots)
+    while queue and budget > 0 and len(hits) < limit * 4:
+        current, depth = queue.popleft()
+        key = str(current).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if depth > max_depth:
+            continue
+        try:
+            with os.scandir(current) as it:
+                for item in it:
+                    budget -= 1
+                    if budget <= 0:
+                        break
+                    name = item.name
+                    if name in _SKIP_DIRS:
+                        continue
+                    # Hidden folders are matched only when the query itself
+                    # starts with a dot (".claude", ".config") — that is the
+                    # one time a person means one — and are never walked into:
+                    # ".cache" alone can hold more entries than the budget, and
+                    # so can "AppData", which Windows hides by attribute.
+                    hidden, system_internal = _hidden_state(item)
+                    if system_internal:
+                        continue
+                    if hidden and not (needle.startswith(".") and _is_hidden(name)):
+                        continue
+                    try:
+                        if not item.is_dir(follow_symlinks=False):
+                            continue
+                    except OSError:
+                        continue
+                    child = Path(item.path)
+                    lowered = name.lower()
+                    if needle in lowered:
+                        tier = 0 if lowered == needle else 1 if lowered.startswith(needle) else 2
+                        is_project, is_repo = _looks_like_project(child)
+                        kind = 0 if is_repo else 1 if is_project else 2
+                        hits.append(
+                            (
+                                tier,
+                                kind,
+                                lowered,
+                                FolderEntry(
+                                    name=name,
+                                    path=str(child),
+                                    is_project=is_project,
+                                    is_repo=is_repo,
+                                ),
+                            )
+                        )
+                    if depth < max_depth and not hidden:
+                        queue.append((child, depth + 1))
+        except (PermissionError, OSError):
+            continue
+
+    hits.sort(key=lambda h: (h[0], h[1], h[2]))
+    return [entry for _t, _k, _n, entry in hits[:limit]]
+
+
+def create_folder(parent: str | Path | None, name: str) -> tuple[FolderEntry | None, str | None]:
+    """Make one new folder called ``name`` inside ``parent``.
+
+    Returns ``(entry, error_message)``. Without a parent the folder goes into
+    the home directory — the one place that exists on every machine.
+
+    One segment only: a name carrying a separator would silently create a tree
+    the person never saw, so it is refused rather than honoured. The parent must
+    already exist for the same reason. A folder that is already there is handed
+    back as it is — the person wanted that folder, and it now exists; whether
+    it was made just now is not something they need to be told twice.
+    """
+    cleaned = name.strip()
+    if not cleaned or cleaned in {".", ".."}:
+        return None, "Give the new folder a name first."
+    if any(sep in cleaned for sep in ("/", "\\", "\x00")):
+        return None, "A folder name cannot contain slashes. Type just the name."
+
+    base = Path(parent).expanduser() if parent else Path.home()
+    try:
+        if not base.is_dir():
+            return None, (f"There is no folder called {base}, so nothing can be created inside it.")
+    except OSError as exc:
+        return None, f"Could not open {base}: {exc}"
+
+    target = base / cleaned
+    try:
+        if target.is_dir():
+            is_project, is_repo = _looks_like_project(target)
+            return (
+                FolderEntry(name=cleaned, path=str(target), is_project=is_project, is_repo=is_repo),
+                None,
+            )
+        if target.exists():
+            return None, f"{target} already exists and is a file, not a folder."
+        target.mkdir()
+    except PermissionError:
+        return None, f"Dodaios is not allowed to create folders inside {base}."
+    except OSError as exc:
+        return None, f"Could not create {target}: {exc}"
+
+    return FolderEntry(name=cleaned, path=str(target), is_project=False, is_repo=False), None
+
+
+def _git_branch(root: Path) -> str | None:
+    """Current branch from ``.git/HEAD`` — no subprocess, no git required.
+
+    In a linked worktree ``.git`` is a FILE (``gitdir: <path>``) pointing at the
+    worktree's own git directory, which holds its HEAD.
+    """
+    dot_git = root / ".git"
+    head = dot_git / "HEAD"
+    if dot_git.is_file():
+        try:
+            pointer = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:  # unreadable pointer: no branch shown, like a missing HEAD
+            return None
+        if not pointer.startswith("gitdir:"):
+            return None
+        gitdir = Path(pointer[len("gitdir:") :].strip())
+        head = (gitdir if gitdir.is_absolute() else root / gitdir) / "HEAD"
+    try:
+        text = head.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    if text.startswith("ref: refs/heads/"):
+        return text[len("ref: refs/heads/") :] or None
+    return text[:12] or None  # detached HEAD
+
+
+def _collect_named(root: Path, kind: str, *, files: bool = False) -> list[str]:
+    """Names defined under ``.claude/<kind>`` / ``.agents/<kind>``.
+
+    Both trees are read because the repo convention is that they mirror each
+    other (``.claude`` canonical, ``.agents`` the tool-neutral twin), and a
+    contributor may have only one of them checked out. Duplicates collapse.
+
+    Skills and subagents are directories; slash commands are Markdown files, so
+    ``files`` switches which entries count and strips the ``.md`` suffix.
+    """
+    found: list[str] = []
+    for base in (root / ".claude" / kind, root / ".agents" / kind):
+        if not base.is_dir():
+            continue
+        try:
+            with os.scandir(base) as it:
+                for item in it:
+                    if len(found) >= _MAX_SKILLS:
+                        break
+                    if _is_hidden(item.name):
+                        continue
+                    try:
+                        is_file = item.is_file(follow_symlinks=False)
+                        is_dir = item.is_dir(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if files and is_file and item.name.endswith(".md"):
+                        name = item.name[:-3]
+                    elif not files and is_dir:
+                        name = item.name
+                    else:
+                        continue
+                    if name not in found:
+                        found.append(name)
+        except OSError:
+            continue
+    return found
+
+
+def _collect_skills(root: Path) -> list[str]:
+    """Skill names defined in this repo (``.claude/skills`` / ``.agents/skills``)."""
+    return _collect_named(root, "skills")
+
+
+def probe_project(path: str | Path) -> ProjectProfile:
+    """Shallow profile of a folder — one scandir plus a few existence checks."""
+    root = Path(path).expanduser()
+    profile = ProjectProfile(path=str(root), name=root.name or str(root))
+
+    try:
+        if not root.is_dir():
+            profile.exists = False
+            profile.note = "Folder not found."
+            return profile
+    except OSError as exc:
+        profile.exists = False
+        profile.note = f"Folder unreadable: {exc}"
+        return profile
+
+    names: set[str] = set()
+    dirs: list[str] = []
+    try:
+        with os.scandir(root) as it:
+            for item in it:
+                names.add(item.name)
+                try:
+                    if item.is_dir(follow_symlinks=False):
+                        if item.name in _SKIP_DIRS or _is_hidden(item.name):
+                            continue
+                        if len(dirs) < 24:
+                            dirs.append(item.name)
+                except OSError:
+                    continue
+    except OSError as exc:
+        profile.note = f"Folder only partially readable: {exc}"
+
+    profile.is_repo = (root / ".git").exists()
+    if profile.is_repo:
+        profile.branch = _git_branch(root)
+
+    stacks: list[str] = []
+    for marker, label in _STACK_MARKERS:
+        hit = (
+            any(n.endswith(marker[1:]) for n in names)
+            if marker.startswith("*")
+            else marker in names
+        )
+        if hit and label not in stacks:
+            stacks.append(label)
+    profile.stacks = stacks
+
+    profile.instruction_files = [f for f in _INSTRUCTION_FILES if f in names]
+    profile.top_level_dirs = sorted(dirs, key=str.lower)
+    profile.skills = _collect_skills(root)
+    # Subagents and slash commands are both single Markdown files (one per
+    # definition); skills are directories with a SKILL.md inside.
+    profile.subagents = [
+        name for name in _collect_named(root, "agents", files=True) if name != "INDEX"
+    ]
+    profile.commands = _collect_named(root, "commands", files=True)
+    return profile
+
+
+__all__ = [
+    "SKIP_DIRS",
+    "FolderEntry",
+    "ProjectProfile",
+    "WorkspaceEntry",
+    "WorkspaceListing",
+    "create_folder",
+    "is_listing_cut",
+    "list_dir",
+    "list_workspace_dir",
+    "probe_project",
+    "resolve_folder_path",
+    "search_folders",
+    "start_points",
+]
