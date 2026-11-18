@@ -96,6 +96,7 @@ const EDITOR_LANGUAGE: Record<UiLanguage, string> = {
   es: "es-ES",
   pt: "pt-PT",
   zh: "zh-CN",
+  ru: "ru-RU",
 };
 
 /** Element types a board does not keep: they frame the web (see the plan's scene). */

@@ -23,7 +23,7 @@ import {
   settingsSelectCls,
 } from "@/views/settings/SettingsLayout";
 
-const UI_OPTIONS: UiLanguage[] = ["en", "de", "es", "zh", "pt"];
+const UI_OPTIONS: UiLanguage[] = ["ru", "en", "de", "es", "zh", "pt"];
 const REPLY_OPTIONS: ReplyLanguage[] = ["auto", "en", "de", "es", "pt"];
 
 /**
@@ -65,7 +65,7 @@ export function LanguagesGroup() {
               testId="ui-language"
               options={UI_OPTIONS.map((code) => ({
                 value: code,
-                label: t(`languages_view.options.${code}.label`),
+                label: code === "ru" ? "Русский" : t(`languages_view.options.${code}.label`),
               }))}
             />
           }
