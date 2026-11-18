@@ -1,0 +1,58 @@
+name: Galen 1.0 smoke checks
+
+on:
+  push:
+    branches:
+      - feat/galen-1.0-dodaios
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile changed Python modules
+        run: |
+          python -m py_compile dodaios/core/config.py dodaios/ui/web/settings_routes.py
+      - name: Validate Russian locale data
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          base = Path("dodaios/ui/web/frontend/src/i18n/locales")
+          en = json.loads((base / "en.json").read_text(encoding="utf-8"))
+          ru = json.loads((base / "ru.json").read_text(encoding="utf-8"))
+          def validate(localized, reference, path=""):
+              for key, value in localized.items():
+                  assert key in reference, f"Missing English key: {path}{key}"
+                  if isinstance(value, dict):
+                      assert isinstance(reference[key], dict)
+                      validate(value, reference[key], path + key + ".")
+                  else:
+                      assert isinstance(value, str)
+                      import re
+                      a=set(re.findall(r"\{[a-zA-Z0-9_]+\}",value))
+                      b=set(re.findall(r"\{[a-zA-Z0-9_]+\}",reference[key]))
+                      assert a == b, f"Placeholder mismatch: {path}{key}: {a} != {b}"
+          validate(ru,en)
+          print("RU locale keys and placeholders valid")
+          PY
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dodaios/ui/web/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+      - run: npm run build
