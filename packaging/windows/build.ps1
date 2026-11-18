@@ -159,7 +159,7 @@ if ($SkipPyInstaller) {
 
 # The windowed launcher under its current and its earlier name, then the CLI
 # under both of its names (dodaios.spec).
-foreach ($required in @("DodaiosApp.exe", "PersonalJarvis.exe", "dodaios.exe", "jarvis.exe")) {
+foreach ($required in @("GalenApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")) {
     $candidate = Join-Path $BundleDir $required
     if (-not (Test-Path $candidate)) {
         Stop-WithError "the frozen bundle is missing $required (expected at $candidate)"
@@ -191,13 +191,6 @@ foreach ($stray in $strayState) {
         Write-Step "removing runtime state left in the bundle: $stray"
         Remove-Item -Recurse -Force $path
     }
-}
-
-# Optional full-duplex voice companion, compiled from pinned OpenRealtime.
-$RealtimeBin = Join-Path $RepoRoot "integrations\openrealtime\bin\openrealtime.exe"
-if (Test-Path $RealtimeBin) {
-    Copy-Item $RealtimeBin (Join-Path $BundleDir "GalenRealtime.exe") -Force
-    Write-Step "OpenRealtime companion included"
 }
 
 # Optional full-duplex voice companion, compiled from pinned OpenRealtime.
