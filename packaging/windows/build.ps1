@@ -83,7 +83,7 @@ $InstallerDir = Join-Path $RepoRoot "dist\installers"
 $FrontendDir = Join-Path $RepoRoot "dodaios\ui\web\frontend"
 $FrontendDist = Join-Path $RepoRoot "dodaios\ui\web\dist"
 $IssFile = Join-Path $PSScriptRoot "Dodaios.iss"
-$IconFile = Join-Path $RepoRoot "assets\icons\dodaios.ico"
+$IconFile = Join-Path $RepoRoot "assets\galen-brand\icon.ico"
 
 if (-not (Test-Path $SpecFile)) { Stop-WithError "dodaios.spec not found at $SpecFile" }
 if (-not (Test-Path $IssFile)) { Stop-WithError "Dodaios.iss not found at $IssFile" }
@@ -229,7 +229,7 @@ $IsccArgs = @(
 Invoke-Checked -Executable $Iscc -Arguments $IsccArgs -WorkingDirectory $RepoRoot -What "ISCC"
 
 # The signed name (OutputBaseFilename = SignedSetupBaseName in the .iss).
-$Artifact = Join-Path $InstallerDir "Dodaios-Setup-x64.exe"
+$Artifact = Join-Path $InstallerDir "Galen-Setup-x64.exe"
 if (-not (Test-Path $Artifact)) {
     Stop-WithError "ISCC reported success but $Artifact does not exist"
 }

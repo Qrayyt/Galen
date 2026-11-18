@@ -43,22 +43,22 @@ from PyInstaller.utils.hooks import (
 PROJECT_ROOT = Path(SPECPATH).resolve()  # noqa: F821  (SPECPATH is PyInstaller-injected)
 FRONTEND_DIST = PROJECT_ROOT / "dodaios" / "ui" / "web" / "dist"
 PACKAGE_ASSETS = PROJECT_ROOT / "dodaios" / "assets"
-ICON_DIR = PROJECT_ROOT / "assets" / "icons"
+ICON_DIR = PROJECT_ROOT / "assets" / "galen-brand"
 
 # The COLLECT directory name stays `Jarvis` — the per-OS packaging scripts and
 # the release contract address the bundle as `dist/Jarvis/`.
 BUNDLE_DIR_NAME = "Jarvis"
 # Windowed launcher; see the header note on the case-collision.
-GUI_EXE_NAME = "DodaiosApp"
+GUI_EXE_NAME = "GalenApp"
 # The windowed launcher under its earlier name, built from the same program:
 # a pinned taskbar button, a logon task or a shortcut of an earlier release
 # starts `{app}\PersonalJarvis.exe`, and must keep finding it.
 LEGACY_GUI_EXE_NAMES = ("PersonalJarvis",)
 # Console entry point. Same name as the pip console script on purpose.
-CLI_EXE_NAME = "dodaios"
+CLI_EXE_NAME = "galen"
 # The console entry point under its earlier name, built from the same program.
 # No name here may equal a GUI name ignoring case: they share one folder.
-LEGACY_CLI_EXE_NAMES = ("jarvis",)
+LEGACY_CLI_EXE_NAMES = ("dodaios", "jarvis")
 
 # The Python distribution this tree is installed as, current name first
 # (dodaios.core.branding.DISTRIBUTION_NAMES). An environment set up before the
@@ -68,8 +68,8 @@ DISTRIBUTION_NAMES = ('dodaios', 'personal-jarvis')
 # The bundle name (``dodaios.core.branding.MACOS_APP_DIR_NAME``). Its bundle id
 # below did not move with it: the privacy grants of every installed copy name
 # that id, and the in-app updater installs a renamed bundle beside the old one.
-MACOS_APP_NAME = "Dodaios.app"
-MACOS_BUNDLE_IDENTIFIER = "ai.personaljarvis.desktop"
+MACOS_APP_NAME = "Galen.app"
+MACOS_BUNDLE_IDENTIFIER = "org.galenite.galen.desktop"
 MACOS_MIN_SYSTEM_VERSION = "12.0"
 
 

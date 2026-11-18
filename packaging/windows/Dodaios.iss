@@ -45,13 +45,13 @@
 ; the installer end-to-end test overrides it (/DAppGuid=...), so its throwaway
 ; install can never touch, upgrade or uninstall a real Dodaios install.
 #ifndef AppGuid
-  #define AppGuid "7F1C4E42-2E5B-4F0A-9E1B-1A7B6C0D5E88"
+  #define AppGuid "6F548C6A-7FA9-4A2B-A1C3-1780B6D14E97"
 #endif
 
-#define AppName "Dodaios"
-#define AppPublisher "Dodaios"
-#define AppUrl "https://github.com/Dodaios/Dodaios"
-#define GuiExeName "DodaiosApp.exe"
+#define AppName "Galen"
+#define AppPublisher "Galenite"
+#define AppUrl "https://github.com/Qrayyt/Galen"
+#define GuiExeName "GalenApp.exe"
 ; The windowed launcher's earlier name. The bundle ships it too (dodaios.spec).
 #define LegacyGuiExeName "PersonalJarvis.exe"
 ; The product's earlier name: the Start-menu group and the shortcuts an
@@ -64,13 +64,13 @@
 ; (.github/workflows/desktop-installers.yml). The release publishes a
 ; byte-identical PersonalJarvis-Setup-x64.exe next to it for installs from
 ; before the rename (scripts/ci/installer_aliases.py).
-#define SignedProductName "Dodaios"
-#define SignedSetupBaseName "Dodaios-Setup-x64"
-#define CliExeName "dodaios.exe"
+#define SignedProductName "Galen"
+#define SignedSetupBaseName "Galen-Setup-x64"
+#define CliExeName "galen.exe"
 ; The command's earlier name. The bundle ships it beside CliExeName, in the
 ; same folder the PATH task adds, so both names work in a terminal.
 #define LegacyCliExeName "jarvis.exe"
-#define UserDataDirDisplay "%LOCALAPPDATA%\Dodaios"
+#define UserDataDirDisplay "%LOCALAPPDATA%\Galen"
 
 [Setup]
 ; NEVER change AppGuid's default (see its #define above).
@@ -123,6 +123,7 @@ ChangesEnvironment=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

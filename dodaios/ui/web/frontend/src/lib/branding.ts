@@ -1,7 +1,7 @@
 /** Product display name and public links shared by frontend surfaces. */
 
-export const PRODUCT_NAME = "Dodaios";
-export const OFFICIAL_REPO_SLUG = "Dodaios/Dodaios";
+export const PRODUCT_NAME = "Galen";
+export const OFFICIAL_REPO_SLUG = "Qrayyt/Galen";
 export const OFFICIAL_REPO_URL = `https://github.com/${OFFICIAL_REPO_SLUG}`;
 export const OFFICIAL_REPO_LABEL = `github.com/${OFFICIAL_REPO_SLUG}`;
 /** The community registry: where published plugins, skills and agents live. */
@@ -16,4 +16,4 @@ export const MARKETPLACE_WEB_URL = "https://dodaios.ai/marketplace/";
  * its server ("mcp__dodaios__gmail"), and transcripts written under the
  * earlier name are still on disk, so a reader accepts all of them.
  */
-export const MCP_TOOLS_SERVER_NAMES: readonly string[] = ["dodaios", "jarvis"];
+export const MCP_TOOLS_SERVER_NAMES: readonly string[] = ["galen", "dodaios", "jarvis"];

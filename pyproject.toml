@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 # that depends on this one at the same version and re-declares its extras and
 # [project.scripts] (scripts/ci/build_distributions.py).
 name = "dodaios"
-version = "5.6.0"
+version = "1.0.0"
 description = "One voice-driven assistant that directs your models, your coding agents and your computer. Open source, installed on your own machine."
 requires-python = ">=3.11,<3.15"
 readme = "README.md"
@@ -523,6 +523,8 @@ tts-eval = [
 # `dodaiosapp` or `personaljarvis` alias): Windows paths ignore case, and the
 # venv's Scripts folder holds `DodaiosApp.exe` (and `PersonalJarvis.exe` from
 # earlier releases).
+galen = "dodaios.__main__:main"
+galenctl = "dodaios.cli_ctl.__main__:main"
 dodaios = "dodaios.__main__:main"
 jarvis = "dodaios.__main__:main"
 personal-jarvis = "dodaios.__main__:main"
