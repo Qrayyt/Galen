@@ -1,0 +1,116 @@
+name: Bootstrap Galen from Dodaios source
+
+on:
+  push:
+    branches:
+      - feat/galen-1.0-dodaios
+    paths:
+      - .github/workflows/bootstrap-dodaios.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: bootstrap-galen-dodaios
+  cancel-in-progress: false
+
+jobs:
+  import-upstream:
+    if: github.ref == 'refs/heads/feat/galen-1.0-dodaios'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Galen feature branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Import upstream source code without executing it
+        shell: bash
+        env:
+          UPSTREAM_SHA: d53cb8d2343567280ac0ab013dac73b633060c93
+        run: |
+          set -euo pipefail
+
+          # Save the bootstrap workflow and original, user-owned branding.
+          mkdir -p "$RUNNER_TEMP/galen-preserved"
+          cp .github/workflows/bootstrap-dodaios.yml "$RUNNER_TEMP/galen-preserved/bootstrap-dodaios.yml"
+          cp src/assets/galen.svg "$RUNNER_TEMP/galen-preserved/galen.svg"
+          cp src-tauri/icons/icon.png "$RUNNER_TEMP/galen-preserved/icon.png"
+          cp src-tauri/icons/icon.ico "$RUNNER_TEMP/galen-preserved/icon.ico"
+          cp src-tauri/icons/galen-icon.svg "$RUNNER_TEMP/galen-preserved/galen-icon.svg"
+
+          git clone --filter=blob:none --no-checkout https://github.com/Dodaios/Dodaios.git "$RUNNER_TEMP/dodaios-upstream"
+          git -C "$RUNNER_TEMP/dodaios-upstream" fetch --depth=1 origin "$UPSTREAM_SHA"
+          git -C "$RUNNER_TEMP/dodaios-upstream" -c advice.detachedHead=false checkout --detach "$UPSTREAM_SHA"
+          test "$(git -C "$RUNNER_TEMP/dodaios-upstream" rev-parse HEAD)" = "$UPSTREAM_SHA"
+
+          # The legacy Tauri source remains fully recoverable on the backup branch.
+          # Clear only the checked-out feature branch worktree, never its .git directory.
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
+
+          # Actual, complete upstream application sources, including tests and third-party notices.
+          # Exclude non-runtime design studies and demonstration media to keep the repo lean.
+          rsync -a "$RUNNER_TEMP/dodaios-upstream/" ./ \
+            --exclude='.git/' \
+            --exclude='.github/' \
+            --exclude='art/' \
+            --exclude='assets/demo/'
+
+          # Preserve exact upstream attribution and the existing Galen identity assets.
+          mkdir -p .github/workflows assets/galen-brand
+          cp "$RUNNER_TEMP/galen-preserved/bootstrap-dodaios.yml" .github/workflows/bootstrap-dodaios.yml
+          cp "$RUNNER_TEMP/galen-preserved/galen.svg" assets/galen-brand/galen.svg
+          cp "$RUNNER_TEMP/galen-preserved/icon.png" assets/galen-brand/icon.png
+          cp "$RUNNER_TEMP/galen-preserved/icon.ico" assets/galen-brand/icon.ico
+          cp "$RUNNER_TEMP/galen-preserved/galen-icon.svg" assets/galen-brand/galen-icon.svg
+
+          mv README.md README.upstream.md
+          cat > README.md <<'EOF'
+          # Galen
+
+          Личный десктопный AI-ассистент на реальной кодовой базе [Dodaios](https://github.com/Dodaios/Dodaios).
+
+          **Ветка разработки:** `feat/galen-1.0-dodaios`
+
+          Это исходники Dodaios, перенесённые в Galen, а не самостоятельная переписанная реализация. Основной интерфейс, голос, агентное ядро, подключение инструментов, Computer Use и авторизация через поддерживаемые официальные CLI сохранены из оригинала.
+
+          Следующие изменения: русская локализация, идентичность Galen, подключение дополнительных компонентов после проверки совместимости. Пока сборка и запуск перенесённой версии не подтверждены.
+
+          - [Исходная документация и установка](README.upstream.md)
+          - [Сведения об импорте](GALEN_UPSTREAM.md)
+          - [Лицензия Apache 2.0](LICENSE) и [уведомления](NOTICE)
+
+          Логин ChatGPT в официальном Codex CLI даёт доступ к этому CLI в пределах его условий; он **не заменяет** ключ OpenRouter или OpenAI API для произвольного LLM-бэкенда.
+          EOF
+          cat > GALEN_UPSTREAM.md <<EOF
+          # Provenance — Galen 1.0
+
+          - Upstream: https://github.com/Dodaios/Dodaios
+          - Exact imported commit: `$UPSTREAM_SHA`
+          - Import method: copy upstream code into Galen feature branch using GitHub Actions
+          - Excluded: `.github/`, `art/`, `assets/demo/` (CI, design studies, demos, not application runtime)
+          - Preserved legacy assets: `assets/galen-brand/`
+          - Legacy Galen backup branch: `backup/galen-0.8-before-dodaios`
+          - Licensing: upstream `LICENSE`, `NOTICE`, and third-party notices preserved
+          - Rebranding: substantial forks must use a distinct app name and visual identity; retaining original software attribution
+          - Status: upstream source imported; Russian UI and runtime tests are follow-up changes
+          EOF
+
+          test -f LICENSE
+          test -f NOTICE
+          test -f pyproject.toml
+          test -f dodaios/ui/web/frontend/src/i18n/index.ts
+          test -f dodaios/brain/manager.py
+          test -f README.upstream.md
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to import."
+            exit 0
+          fi
+          git commit -m "feat: transplant Dodaios source as Galen 1.0 foundation"
+          git push origin HEAD:feat/galen-1.0-dodaios
