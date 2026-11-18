@@ -5,3 +5,5 @@ License: Apache-2.0 + MIT third-party notices
 Platforms targeted by this candidate: Windows 11 x64
 Includes: Dodaios core, Galenite desktop identity, RU UI, OpenDex HUD, Kaizumi actions, Elissa audio focus, OpenRealtime Go companion
 Publishing gate: Python validation + React build + Windows PyInstaller/Inno Setup + SHA256
+
+Candidate revision: 2 (restore pinned OpenRealtime Go embed WAV fixtures)
