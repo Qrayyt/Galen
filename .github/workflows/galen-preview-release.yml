@@ -152,7 +152,15 @@ jobs:
           test -s release-assets/Galen-Setup-x64.exe
           test -s release-assets/Galen-Setup-x64.exe.sha256
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
+            # A rebuilt preview must keep its source tag, notes and installer on
+            # the same commit. Merely clobbering the assets leaves GitHub's
+            # source archives pointing at the previous candidate.
+            gh api --method PATCH "repos/$REPO/git/refs/tags/$tag" \
+              -f sha="$TARGET_SHA" -F force=true >/dev/null
             gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 --clobber --repo "$REPO"
+            gh release edit "$tag" --repo "$REPO" --target "$TARGET_SHA" --prerelease \
+              --title "Galen 1.0 Preview 1 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW.md
           else
             gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 \
               --repo "$REPO" --target "$TARGET_SHA" --prerelease \
