@@ -1,0 +1,17 @@
+# Closed live reference (plan cell R0): Google's native-audio Live API as one
+# integrated element through the upstream binding; the background reasoner is
+# the local Qwen3-8B so only the voice path leaves the machine.
+# Needs GEMINI_API_KEY. Network and per-minute cost belong to this cell.
+binding: upstream
+upstream-provider: google
+upstream-model: gemini-2.5-flash-native-audio-latest
+upstream-token-env: GEMINI_API_KEY
+# The background reasoner is hosted too, so this cell needs no local GPU and
+# can run while the card is busy with the open models.
+slow-provider: google
+slow-model: gemini-3.5-flash
+slow-token-env: GEMINI_API_KEY
+# gemini-3.5-flash spends its thinking from the same output budget; at the
+# default 2048 it ended 51 of the 2026-09-24 campaign's sessions with
+# MAX_TOKENS, which fails the whole voice session.
+slow-max-tokens: 8192

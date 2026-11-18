@@ -1,0 +1,637 @@
+import SwiftUI
+import AppKit
+import WebKit
+
+struct ContentView: View {
+    @ObservedObject var model: DeveloperModel
+    @ObservedObject var host: NativeClientHost
+    @State private var columns: NavigationSplitViewVisibility = .detailOnly
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $columns) {
+            configuration
+                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 430)
+        } detail: {
+            VStack(spacing: 0) {
+                sessionBar
+                Divider()
+                TabView {
+                    liveSession.tabItem { Label("Session", systemImage: "waveform") }
+                    channelInspector.tabItem { Label("Channels", systemImage: "rectangle.3.group") }
+                    if model.artifactsAvailable {
+                        artifactInspector.tabItem { Label("Artifacts", systemImage: "doc.richtext") }
+                    }
+                    timelineInspector.tabItem { Label("Timeline", systemImage: "clock.arrow.2.circlepath") }
+                    managementInspector.tabItem { Label("Graph", systemImage: "point.3.connected.trianglepath.dotted") }
+                    authoringInspector.tabItem { Label("Authoring", systemImage: "slider.horizontal.3") }
+                    protocolInspector.tabItem { Label("Protocol", systemImage: "chevron.left.forwardslash.chevron.right") }
+                }
+                .padding(10)
+            }
+        }
+        .preferredColorScheme(.dark)
+        .sheet(item: $model.pendingConfirmation) { request in
+            ConfirmationView(request: request) { approved in
+                model.decideConfirmation(approved)
+            }
+        }
+        .onDisappear { model.shutdown() }
+    }
+
+    private var configuration: some View {
+        Form {
+            Section("Deployment") {
+                if host.pinnedByEnvironment {
+                    Text("Wiring is pinned by OPENREALTIME_NATIVE_ENDPOINT_DIRECTORY.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    TextField("Server base URL", text: $host.draft.base)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.connectionState != .disconnected)
+                    Picker("Serves", selection: $host.draft.layout) {
+                        ForEach(NativeDeploymentLayout.allCases) { layout in
+                            Text("\(layout.title) · \(layout.detail)").tag(layout)
+                        }
+                    }
+                    .disabled(model.connectionState != .disconnected)
+                    Picker("Transport", selection: $host.draft.transport) {
+                        ForEach(NativeTransportKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    .disabled(model.connectionState != .disconnected)
+                    Text(host.draft.transport.detail)
+                        .font(.caption).foregroundStyle(.secondary)
+                    if host.draft.transport == .webRTC {
+                        TextField("WebRTC adapter base URL", text: $host.draft.webRTCBase)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.connectionState != .disconnected)
+                    }
+                    HStack {
+                        Button("Apply and rebuild client") { host.applyDraft() }
+                            .disabled(model.connectionState != .disconnected)
+                        Button("Bundled") { host.resetToBundled() }
+                            .disabled(model.connectionState != .disconnected)
+                    }
+                    if !host.deploymentDiagnostic.isEmpty {
+                        Text(host.deploymentDiagnostic).font(.caption).foregroundStyle(.red)
+                    }
+                    Text("Applying disposes the provider graph and rebuilds it against a newly frozen directory. Disconnect first.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Connection") {
+                LabeledContent("\(model.transportName) endpoint") {
+                    Text(model.endpoint).font(.caption.monospaced()).textSelection(.enabled)
+                }
+                SecureField("Bearer token (optional)", text: $model.token)
+                    .textFieldStyle(.roundedBorder)
+                Text("client \(model.clientIdentity)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+
+            Section("Initial system prompt") {
+                TextEditor(text: $model.systemPrompt)
+                    .font(.body)
+                    .frame(minHeight: 150)
+                Text("Sent in the first session.update and editable while connected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Apply prompt now") { model.applySystemPrompt() }
+                    .disabled(model.connectionState != .connected)
+            }
+
+            Section("Video sources") {
+                TextField("Chrome CDP URL", text: $model.cdpURL)
+                    .textFieldStyle(.roundedBorder)
+                Picker("Screen display", selection: $model.selectedDisplayID) {
+                    ForEach(model.displays) { display in
+                        Text(display.label).tag(display.id)
+                    }
+                }
+                Text("Camera, selected-screen, and marked-browser capture are independent video-provider sources. Host effects never receive local UI authority.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Privacy") {
+                permissionRow("Microphone", model.microphonePermission)
+                permissionRow("Camera", model.cameraPermission)
+                permissionRow("Screen Recording", model.screenPermission)
+            }
+        }
+        .formStyle(.grouped)
+        .navigationTitle("OpenRealtime")
+    }
+
+    private func permissionRow(_ name: String, _ value: String) -> some View {
+        HStack {
+            Text(name)
+            Spacer()
+            Text(value).foregroundStyle(value == "granted" ? .green : .secondary)
+        }
+    }
+
+    private var sessionBar: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(model.connectionState == .connected ? .green :
+                      model.connectionState == .failed ? .red : .secondary)
+                .frame(width: 10, height: 10)
+            Text(model.statusText).font(.headline)
+            if !model.negotiationText.isEmpty {
+                Text(model.negotiationText).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if !model.sessionErrorText.isEmpty {
+                Label(model.sessionErrorText, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red)
+                    .lineLimit(2).textSelection(.enabled)
+                    .accessibilityLabel("Session error: \(model.sessionErrorText)")
+            }
+            Spacer()
+            Button("Connect") { model.connect() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.preparingConnection ||
+                          (model.connectionState != .disconnected && model.connectionState != .failed))
+            Button("Disconnect") { model.disconnect() }
+                .disabled(model.connectionState == .disconnected)
+        }
+        .padding(12)
+    }
+
+    private var liveSession: some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack(spacing: 14) {
+                        Image(systemName: "waveform.circle.fill").font(.system(size: 40)).foregroundStyle(.mint)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("OpenRealtime").font(.title2.bold())
+                            Text("Your realtime conversation room").foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if model.recording { Label("Recording", systemImage: "record.circle.fill").foregroundStyle(.red) }
+                    }
+                    DisclosureGroup("Practice an interaction scenario") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Picker("Scenario", selection: $model.selectedScenario) {
+                                    Text("Free conversation").tag("")
+                                    ForEach(model.roomScenarios) { preset in Text(preset.id).tag(preset.id) }
+                                }
+                                Button("Apply scenario") { model.applyRoomScenario() }.disabled(model.connectionState != .connected)
+                            }
+                            if let preset = model.roomScenarios.first(where: { $0.id == model.selectedScenario }) {
+                                Text(preset.note).foregroundStyle(.secondary)
+                                ForEach(Array(preset.script.enumerated()), id: \.offset) { _, line in Text(line).font(.callout).textSelection(.enabled) }
+                            }
+                        }.padding(.top, 10)
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 18) {
+                            roomStage.frame(width: max(280, (geometry.size.width - 58) * 0.4))
+                            roomConversation.frame(width: max(360, (geometry.size.width - 58) * 0.6))
+                        }
+                        VStack(spacing: 18) { roomStage; roomConversation.frame(minHeight: 340) }
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        roomControls
+                        ScrollView(.horizontal) { roomControls }
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Connection & debug logs", systemImage: "terminal").font(.headline)
+                        Text(model.latencySummary).font(.caption.monospaced())
+                        Text(model.transportDiagnosticsText).font(.caption.monospaced()).foregroundStyle(.secondary)
+                        protocolInspector.frame(height: 200)
+                    }
+                    Text("Camera and screen sharing are independent. Recordings stay on this Mac. The agent is an audio participant.")
+                        .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity)
+                }
+                .padding(20)
+                .frame(minHeight: geometry.size.height, alignment: .top)
+            }
+            .background(Color(red: 0.047, green: 0.063, blue: 0.098))
+        }
+    }
+
+    private var roomStage: some View {
+        VStack(spacing: 16) {
+            VStack(spacing: 16) {
+                participant("You", subtitle: model.microphoneMuted ? "Microphone muted" : (model.microphoneActive ? "Microphone live" : "Microphone off"), source: "camera", icon: "person.fill", hidden: false)
+                participant("OpenRealtime", subtitle: model.speakerMuted ? "Audio muted" : "Audio participant", source: nil, icon: "waveform", hidden: model.agentTileHidden)
+            }
+            if model.screenActive {
+                participant("Your shared screen", subtitle: "Sharing", source: "screen", icon: "display", hidden: false)
+                    .frame(minHeight: 280)
+            }
+            if model.browserActive {
+                participant("Shared browser", subtitle: model.browserCaption, source: "browser", icon: "safari", hidden: false)
+            }
+        }
+    }
+
+    private func participant(_ title: String, subtitle: String, source: String?, icon: String, hidden: Bool) -> some View {
+        ZStack(alignment: .bottomLeading) {
+            RoundedRectangle(cornerRadius: 20).fill(Color(red: 0.10, green: 0.14, blue: 0.21))
+            if let source, let data = model.previews[source], let image = NSImage(data: data) {
+                Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !hidden {
+                Image(systemName: icon).font(.system(size: 42)).foregroundStyle(source == nil ? .mint : .secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(subtitle).font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(12).background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10)).padding(14)
+        }
+        .frame(maxWidth: .infinity, minHeight: 280)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.white.opacity(0.12)))
+    }
+
+    private var roomConversation: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Conversation").font(.headline)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    if model.conversation.isEmpty {
+                        Text("Join the room to talk, type, or share something you see.").foregroundStyle(.secondary).padding(.vertical)
+                    }
+                    ForEach(model.conversation) { record in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(record.title).font(.caption.bold()).foregroundStyle(.secondary)
+                            Text(record.body).textSelection(.enabled).foregroundStyle(record.failed ? .red : .primary)
+                        }
+                        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                    }
+                }
+            }.frame(minHeight: 230, maxHeight: 500)
+            HStack {
+                TextField("Message the room…", text: $model.composer).textFieldStyle(.roundedBorder).onSubmit { model.submitText() }
+                Button("Send") { model.submitText() }
+                    .keyboardShortcut(.return, modifiers: [.command])
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.connectionState != .connected || model.composer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(18).background(Color(red: 0.082, green: 0.114, blue: 0.169), in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private var roomControls: some View {
+        HStack(spacing: 10) {
+            mediaButton(model.microphoneActive && !model.microphoneMuted ? "Mute mic" : "Enable mic", icon: model.microphoneMuted ? "mic.slash" : "mic") { model.toggleMicrophone() }
+            mediaButton(model.speakerMuted ? "Enable audio" : "Mute agent", icon: model.speakerMuted ? "speaker.slash" : "speaker.wave.2") { model.toggleSpeaker() }
+            mediaButton(model.cameraActive ? "Stop camera" : "Camera", icon: "video") { model.toggleCamera() }
+            mediaButton(model.screenActive ? "Stop sharing" : "Share screen", icon: "rectangle.on.rectangle") { model.toggleScreen() }
+            Button(model.agentTileHidden ? "Show agent" : "Hide agent") { model.agentTileHidden.toggle() }
+            mediaButton("Add image", icon: "photo") { model.attachImage() }
+            mediaButton(model.recording ? "Stop recording" : "Record room", icon: "record.circle") { model.toggleRecording() }
+            Menu("More") {
+                Button(model.browserActive ? "Stop browser" : "Share browser") { model.toggleBrowser() }
+                    .disabled(model.connectionState != .connected)
+                Button("End turn") { model.endTurn() }
+                    .disabled(model.connectionState != .connected)
+                Button("Settings") { columns = .all }
+            }
+        }
+        .controlSize(.large).buttonStyle(.bordered).frame(maxWidth: .infinity)
+    }
+
+    private func mediaButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: icon) }
+            .disabled(model.connectionState != .connected)
+    }
+
+    private func statusRow(_ name: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(name).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).lineLimit(2).multilineTextAlignment(.trailing)
+        }
+    }
+
+    private var channelInspector: some View {
+        VStack(alignment: .leading) {
+            HStack {
+                Text("Observation and action channels").font(.headline)
+                Spacer()
+                Text("\(model.channelRecords.count) events").foregroundStyle(.secondary)
+                Button("Clear") { model.channelRecords.removeAll() }
+            }
+            List(model.channelRecords.reversed()) { record in
+                HStack(alignment: .top, spacing: 12) {
+                    Text(record.channel).font(.caption.monospaced()).frame(width: 105, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(record.title).fontWeight(.semibold)
+                        Text(record.body).font(.body).textSelection(.enabled)
+                    }
+                    Spacer()
+                    Text(record.timestamp, format: .dateTime.hour().minute().second().secondFraction(.fractional(3)))
+                        .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                }
+                .foregroundStyle(record.failed ? .red : .primary)
+            }
+            .listStyle(.inset)
+        }
+    }
+
+    private var artifactInspector: some View {
+        HSplitView {
+            VStack(alignment: .leading) {
+                Text("HTML artifacts").font(.headline)
+                if !model.artifactDiagnostic.isEmpty {
+                    Text(model.artifactDiagnostic).font(.caption).foregroundStyle(.red)
+                }
+                if let artifact = model.selectedArtifact {
+                    if model.artifacts.count > 1 {
+                        Menu("Select artifact") {
+                            ForEach(model.artifacts) { candidate in
+                                Button(candidate.title) { model.selectArtifact(candidate) }
+                            }
+                        }
+                    }
+                    if model.artifactLoading {
+                        ProgressView("Fetching and verifying immutable artifact…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        ArtifactWebView(html: model.selectedArtifactHTML) { text in
+                            model.submitArtifactText(text)
+                        }
+                        .id("\(artifact.id)-\(artifact.version)")
+                    }
+                    Text("\(artifact.title) · revision \(artifact.version)")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    ContentUnavailableView("No artifact yet", systemImage: "doc.richtext",
+                                           description: Text("display_artifact renders here in an isolated web view."))
+                }
+            }
+            .frame(minWidth: 430)
+
+            VStack(alignment: .leading) {
+                Text("Generated files").font(.headline)
+                if model.downloads.isEmpty {
+                    ContentUnavailableView("No generated files", systemImage: "arrow.down.doc",
+                                           description: Text("publish_download adds bounded files here."))
+                } else {
+                    List(model.downloads) { download in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(download.filename).fontWeight(.semibold)
+                            Text("\(download.mediaType) · \(download.bytes) bytes · revision \(download.version)")
+                                .font(.caption).foregroundStyle(.secondary)
+                            HStack {
+                                Button("Open") { model.openDownload(download) }
+                                Button("Show in Finder") { model.revealDownload(download) }
+                                Button("Save As…") { model.saveDownload(download) }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(minWidth: 310)
+        }
+    }
+
+    private var timelineInspector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Server debug timeline").font(.headline)
+                TextField("Filter category, name, correlation, or detail", text: $model.timelineFilter)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 430)
+                Spacer()
+                Text(model.latencySummary).font(.caption.monospaced()).foregroundStyle(.secondary)
+                Button("Clear") { model.debugRecords.removeAll() }
+            }
+            Table(model.filteredDebugRecords) {
+                TableColumn("Time") { record in
+                    Text(record.date, format: .dateTime.hour().minute().second().secondFraction(.fractional(3)))
+                        .font(.caption.monospaced())
+                }.width(105)
+                TableColumn("Category") { record in Text(record.category).font(.caption.monospaced()) }.width(85)
+                TableColumn("Event") { record in Text(record.name) }.width(min: 170, ideal: 230)
+                TableColumn("Phase") { record in Text(record.phase) }.width(70)
+                TableColumn("Duration") { record in
+                    Text(record.durationMS.map { String(format: "%.1f ms", $0) } ?? "—")
+                        .font(.caption.monospaced())
+                }.width(90)
+                TableColumn("Correlation") { record in Text(record.correlationID).font(.caption.monospaced()) }.width(150)
+                TableColumn("Detail") { record in Text(record.detail).lineLimit(2).textSelection(.enabled) }
+            }
+        }
+    }
+
+    private var managementInspector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Canonical session inspection").font(.headline)
+                    Text(model.inspectionAccessText)
+                        .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                Text(model.inspectionStatus).font(.caption).foregroundStyle(.secondary)
+                if model.inspectionRefreshing { ProgressView().controlSize(.small) }
+                Button("Refresh") { model.refreshInspection() }
+                    .disabled(model.inspectionRefreshing || model.connectionState != .connected)
+            }
+            HSplitView {
+                inspectionDocument("Live graph", model.inspectionLive)
+                inspectionDocument("Bounded deltas", model.inspectionDeltas)
+                inspectionDocument("Causal trace", model.inspectionTrace)
+            }
+        }
+    }
+
+    private func inspectionDocument(_ title: String, _ content: String) -> some View {
+        GroupBox(title) {
+            if content.isEmpty {
+                ContentUnavailableView(
+                    "No \(title.lowercased())",
+                    systemImage: "eye.slash",
+                    description: Text("The scoped management provider has not returned this resource.")
+                )
+            } else {
+                ScrollView([.horizontal, .vertical]) {
+                    Text(content).font(.caption.monospaced())
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+            }
+        }
+        .frame(minWidth: 280)
+    }
+
+    private var authoringInspector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField("Canonical .ortg path", text: $model.authoringPath)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 280)
+                SecureField("Management operator capability", text: $model.authoringCapability)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 360)
+                Button("Analyze contracts") { model.analyzeConfigurationContracts() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(model.authoringRunning)
+                Button("Clear capability") { model.clearAuthoringCapability() }
+                if model.authoringRunning { ProgressView().controlSize(.small) }
+                Spacer()
+                Text(model.authoringStatus).font(.caption).foregroundStyle(.secondary)
+            }
+            HSplitView {
+                GroupBox("In-memory graph source") {
+                    TextEditor(text: $model.authoringSource)
+                        .font(.body.monospaced())
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(minWidth: 360)
+                GroupBox("Configuration contracts · plaintext") {
+                    if let presentation = model.authoringPresentation {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("source \(presentation.sourceDigest) · \(presentation.contracts.count) of \(presentation.total)")
+                                .font(.caption2.monospaced()).foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            ScrollView([.horizontal, .vertical]) {
+                                Text(presentation.plaintext)
+                                    .font(.caption.monospaced())
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                            }
+                        }
+                    } else {
+                        ContentUnavailableView(
+                            "No analyzed contract",
+                            systemImage: "slider.horizontal.3",
+                            description: Text(
+                                "Analysis uses a separate operator capability and cannot compile or write files."
+                            )
+                        )
+                    }
+                }
+                .frame(minWidth: 420)
+            }
+        }
+        .onChange(of: model.authoringPath) { _ in model.authoringDocumentChanged() }
+        .onChange(of: model.authoringSource) { _ in model.authoringDocumentChanged() }
+    }
+
+    private var protocolInspector: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Raw protocol log (media elided)").font(.headline)
+                Spacer()
+                Button("Export…") { model.exportProtocolLog() }
+                Button("Clear") { model.protocolRecords.removeAll() }
+            }
+            List(model.protocolRecords.reversed()) { record in
+                HStack(alignment: .top) {
+                    Text(record.direction).font(.caption.bold().monospaced())
+                        .foregroundStyle(record.direction == "OUT" ? .orange : .blue)
+                        .frame(width: 34)
+                    Text(record.timestamp, format: .dateTime.hour().minute().second().secondFraction(.fractional(3)))
+                        .font(.caption2.monospaced()).foregroundStyle(.secondary).frame(width: 105)
+                    Text(record.type).font(.caption.bold().monospaced()).frame(width: 260, alignment: .leading)
+                    Text(record.payload).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
+            .listStyle(.plain)
+        }
+    }
+}
+
+private struct ConfirmationView: View {
+    let request: ConfirmationRequest
+    let decide: (Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("Host effect confirmation required", systemImage: "exclamationmark.shield")
+                .font(.title2.bold())
+            Text(request.name).font(.headline.monospaced())
+            Text(request.consequence).foregroundStyle(.secondary)
+            ScrollView { Text(request.arguments).font(.body.monospaced()).textSelection(.enabled) }
+                .frame(minWidth: 560, minHeight: 180)
+                .padding(8).background(.quaternary, in: RoundedRectangle(cornerRadius: 7))
+            HStack {
+                Spacer()
+                Button("Decline", role: .cancel) { decide(false); dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Allow once") { decide(true); dismiss() }
+                    .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .interactiveDismissDisabled()
+    }
+}
+
+private struct ArtifactWebView: NSViewRepresentable {
+    let html: String
+    let interaction: (String) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(interaction: interaction) }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.add(context.coordinator, name: "openrealtime")
+        let bridge = WKUserScript(source: """
+          window.addEventListener('message', event => {
+            if (event.data && typeof event.data.text === 'string')
+              window.webkit.messageHandlers.openrealtime.postMessage(event.data.text);
+          });
+        """, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+        configuration.userContentController.addUserScript(bridge)
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        webView.loadHTMLString(Self.isolated(html), baseURL: nil)
+    }
+
+    private static func isolated(_ html: String) -> String {
+        let policy = #"<meta http-equiv="Content-Security-Policy" content="sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; font-src data:; connect-src 'none'; media-src 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">"#
+        if let head = html.range(
+            of: #"<head(?:\s[^>]*)?>"#, options: [.regularExpression, .caseInsensitive]
+        ) {
+            var document = html
+            document.insert(contentsOf: policy, at: head.upperBound)
+            return document
+        }
+        if let root = html.range(
+            of: #"<html(?:\s[^>]*)?>"#, options: [.regularExpression, .caseInsensitive]
+        ) {
+            var document = html
+            document.insert(contentsOf: "<head>\(policy)</head>", at: root.upperBound)
+            return document
+        }
+        return "<!doctype html><html><head><meta charset=\"utf-8\">\(policy)</head><body>\(html)</body></html>"
+    }
+
+    final class Coordinator: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+        let interaction: (String) -> Void
+        init(interaction: @escaping (String) -> Void) { self.interaction = interaction }
+        func userContentController(_ userContentController: WKUserContentController,
+                                   didReceive message: WKScriptMessage) {
+            if message.frameInfo.isMainFrame, let text = message.body as? String,
+               !text.isEmpty, text.utf8.count <= (16 << 10) {
+                interaction(text)
+            }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            let scheme = navigationAction.request.url?.scheme?.lowercased()
+            decisionHandler(scheme == nil || scheme == "about" ? .allow : .cancel)
+        }
+    }
+}

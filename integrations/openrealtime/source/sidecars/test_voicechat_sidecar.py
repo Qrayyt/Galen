@@ -1,0 +1,181 @@
+"""Response cancellation bookkeeping without loading VoiceChat weights."""
+import threading
+import unittest
+
+from voicechat_sidecar import VoiceChatSidecar
+
+
+class CancellationTests(unittest.TestCase):
+    def make_sidecar(self, gate):
+        sidecar = VoiceChatSidecar.__new__(VoiceChatSidecar)
+        sidecar._state_lock = threading.Lock()
+        sidecar._output_lock = threading.Lock()
+        sidecar._turn_finished = threading.Condition(sidecar._state_lock)
+        sidecar._gated_response = gate
+        sidecar._response_text = []
+        sidecar._response_active = False
+        sidecar._current_response = None
+        sidecar._turns_done = 0
+        sidecar.turn_done = lambda: self.fail('cancelled turn emitted a duplicate boundary')
+        return sidecar
+
+    def test_unknown_response_id_mutes_later_identified_packets(self):
+        sidecar = self.make_sidecar('*')
+        self.assertTrue(sidecar._gated('resp-later'))
+        self.assertTrue(sidecar._gated(''))
+        sidecar._finish_turn('resp-later', {})
+        self.assertIsNone(sidecar._gated_response)
+        self.assertFalse(sidecar._gated('resp-next'))
+
+    def test_upstream_error_is_protocol_error_not_only_log(self):
+        sidecar = self.make_sidecar(None)
+        errors = []
+        sidecar.error = lambda message, **kwargs: errors.append((message, kwargs))
+        sidecar._handle_event({'type': 'error', 'error': {'code': 'unsupported',
+                                                       'message': 'cannot cancel'}})
+        self.assertEqual(len(errors), 1)
+        self.assertIn('cannot cancel', errors[0][0])
+        self.assertEqual(errors[0][1], {'code': 'upstream_error', 'fatal': False})
+
+    def test_interrupt_boundary_cannot_overtake_admitted_audio(self):
+        import base64
+        s = self.make_sidecar(None)
+        s.mock = False
+        s.output_quiet_ms = 0
+        s._response_active = True
+        s._current_response = 'response'
+        s._ws_send = lambda event: None
+        checked, release, interrupt_started = (threading.Event() for _ in range(3))
+        events = []
+        s.audio = lambda payload: events.append('audio')
+        s.turn_done = lambda: events.append('end')
+        original_gate = s._gated
+        def delayed_gate(identity):
+            result = original_gate(identity)
+            checked.set()
+            if not release.wait(2):
+                raise RuntimeError('test gate timed out')
+            return result
+        s._gated = delayed_gate
+        packet = {'type': 'response.output_audio.delta', 'response_id': 'response',
+                  'delta': base64.b64encode(b'\x01\x00').decode()}
+        output = threading.Thread(target=s._handle_event, args=(packet,))
+        def interrupt():
+            interrupt_started.set()
+            s.on_interrupt()
+        control = threading.Thread(target=interrupt)
+        output.start()
+        try:
+            self.assertTrue(checked.wait(2))
+            control.start()
+            self.assertTrue(interrupt_started.wait(2))
+            control.join(.05)
+        finally:
+            release.set()
+            output.join(2)
+            if control.ident is not None:
+                control.join(2)
+        self.assertFalse(output.is_alive())
+        self.assertFalse(control.is_alive())
+        self.assertEqual(events, ['audio', 'end'])
+        s._gated = original_gate
+        s._handle_event(packet)
+        self.assertEqual(events, ['audio', 'end'])
+
+    def test_named_gate_does_not_mute_another_response(self):
+        sidecar = self.make_sidecar('resp-old')
+        self.assertTrue(sidecar._gated('resp-old'))
+        self.assertFalse(sidecar._gated('resp-next'))
+        sidecar._finish_turn('resp-old', {})
+        self.assertFalse(sidecar._gated('resp-next'))
+
+class SegmentationTests(unittest.TestCase):
+    def test_idle_silence_and_short_pause_do_not_end_speech(self):
+        import numpy as np
+        from voicechat_sidecar import MODEL_OUTPUT_RATE
+        s = CancellationTests().make_sidecar(None)
+        s.output_quiet_ms = 800
+        s._output_audible = False
+        s._output_quiet_samples = 0
+        s._response_text = ['hello']
+        events = []
+        s.audio = lambda p: events.append('audio')
+        s.send = lambda *a, **k: None
+        s.text_done = lambda t: events.append(t)
+        s.turn_done = lambda: events.append('end')
+        quiet = np.zeros(int(MODEL_OUTPUT_RATE * .08), dtype='<i2').tobytes()
+        loud = (np.ones(int(MODEL_OUTPUT_RATE * .08)) * 4000).astype('<i2').tobytes()
+        s._segmented_audio(quiet)
+        self.assertEqual(events, [])
+        s._segmented_audio(loud)
+        for _ in range(7): s._segmented_audio(quiet)
+        self.assertNotIn('end', events)
+        s._segmented_audio(loud)  # short pause is reset by more speech
+        for _ in range(10): s._segmented_audio(quiet)
+        self.assertEqual(events[-2:], ['hello', 'end'])
+        count = len(events)
+        s._segmented_audio(quiet)
+        self.assertEqual(len(events), count)
+
+    def test_upstream_boundary_resets_silence_tracking(self):
+        s = CancellationTests().make_sidecar(None)
+        s._output_audible = True
+        s._output_quiet_samples = 100
+        s._finish_turn('response', {})
+        self.assertFalse(s._output_audible)
+        self.assertEqual(s._output_quiet_samples, 0)
+
+
+class ToolResultTests(unittest.TestCase):
+    def test_invalid_or_conflicting_proposals_never_become_new_calls(self):
+        s = VoiceChatSidecar.__new__(VoiceChatSidecar)
+        s._calls = {}
+        sent, errors = [], []
+        s.send = lambda *a, **k: sent.append((a, k))
+        s.error = lambda *a, **k: errors.append(k['code'])
+        for arguments in ['{bad', '[]', 'null', 'false', [], False]:
+            s._propose_call({'call_id': 'invalid', 'name': 'lookup', 'arguments': arguments})
+        self.assertEqual(sent, [])
+        self.assertEqual(errors, ['invalid_tool_arguments'] * 6)
+        call = {'call_id': 'valid', 'name': 'lookup', 'arguments': '{"number": 37}'}
+        s._propose_call(call)
+        s._propose_call(dict(call, arguments={'number': 37}))
+        self.assertEqual(len(sent), 1)
+        s._propose_call(dict(call, arguments='{"number": 38}'))
+        s._propose_call(dict(call, name='other'))
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(errors[-2:], ['conflicting_tool_call'] * 2)
+        self.assertEqual(s._calls['valid']['arguments'], {'number': 37})
+
+    def test_only_proposed_result_is_forwarded_once(self):
+        import time
+        s = VoiceChatSidecar.__new__(VoiceChatSidecar)
+        s._calls = {'call-1': {'proposed_at': time.monotonic()}}
+        s.mock = False
+        s._ws = object()
+        sent, errors = [], []
+        s._ws_send = sent.append
+        s.send = lambda *a, **k: None
+        s.error = lambda *a, **k: errors.append(k['code'])
+        s.on_tool_result({'call_id': 'unknown', 'output': 'bad'})
+        s.on_tool_result({'call_id': 'call-1', 'output': '37'})
+        s.on_tool_result({'call_id': 'call-1', 'output': '38'})
+        self.assertEqual(errors, ['unknown_tool_call'])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['item']['output'], '37')
+
+    def test_failed_write_does_not_mark_result_delivered(self):
+        import time
+        s = VoiceChatSidecar.__new__(VoiceChatSidecar)
+        s._calls = {'call-1': {'proposed_at': time.monotonic()}}
+        s.mock = False
+        s._ws = object()
+        def fail(_): raise OSError('closed')
+        s._ws_send = fail
+        with self.assertRaises(OSError):
+            s.on_tool_result({'call_id': 'call-1', 'output': '37'})
+        self.assertFalse(s._calls['call-1'].get('result_delivered', False))
+
+
+if __name__ == '__main__':
+    unittest.main()

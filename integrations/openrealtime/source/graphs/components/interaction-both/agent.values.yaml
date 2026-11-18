@@ -1,0 +1,17 @@
+apiVersion: openrealtime.ai/config/v1alpha1
+graph: interaction_both
+nodes:
+  fast:
+    provider: deployment.fast
+  slow:
+    provider: deployment.slow
+  fast_control_quarantine:
+    max_candidate_bytes: 4194304
+    max_blocks: 1024
+    max_active_streams: 32
+  slow_control_quarantine:
+    max_candidate_bytes: 4194304
+    max_blocks: 1024
+    max_active_streams: 32
+  arbiter: {}
+  segment: {}

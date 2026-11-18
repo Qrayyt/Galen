@@ -1,0 +1,284 @@
+package scenario
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/bojieli/OpenRealtime/bench"
+)
+
+// Ears transcribes the agent's own audio.
+//
+// Reported text alone cannot establish audible content: synthesis can emit
+// different words, and interruption can stop a sentence before it finishes.
+// Event-count and resumed-count checks therefore ask what the user heard in
+// captured agent audio, independently of the generation and playback cursors.
+//
+// The runtime has its own answer to that question now, and that answer is
+// exactly what is under test. Scoring against it would be scoring the runtime
+// against itself: a runtime that decided it had said everything would be marked
+// correct for carrying on as though it had. So the check is grounded in the
+// waveform the harness recorded, transcribed by something that was not involved
+// in producing it.
+//
+// A Voice plug-in that can also listen implements this. One that cannot leaves
+// the claim unmade, and a check that needs it fails saying so rather than
+// passing quietly.
+type Ears interface {
+	Hear(ctx context.Context, samples []int16, rateHz int) (string, error)
+}
+
+// heard is how a check asks what the agent was audibly saying in a window.
+// Nil means nothing can answer, which is a failure rather than a pass.
+type heard func(fromMS, toMS int) (string, error)
+
+// agentAudioBetween rebuilds the agent's own output over a window of the
+// episode clock.
+//
+// Silence is preserved rather than squeezed out. A recogniser handed the
+// agent's speech with every pause removed hears one run-on utterance and
+// punctuates it wherever it likes; handed the gaps, it segments the way the
+// agent actually spoke.
+func agentAudioBetween(capture bench.SessionAudioCapture, fromMS, toMS int) []int16 {
+	rate := int(capture.SampleRateHz)
+	if rate == 0 {
+		rate = 24_000
+	}
+	if toMS <= fromMS {
+		return nil
+	}
+	window := make([]int16, (toMS-fromMS)*rate/1000)
+	for _, chunk := range capture.Agent {
+		offset := (int(chunk.AtMS) - fromMS) * rate / 1000
+		for index, sample := range chunk.PCM16 {
+			position := offset + index
+			if position < 0 {
+				continue
+			}
+			if position >= len(window) {
+				break
+			}
+			window[position] = sample
+		}
+	}
+	return window
+}
+
+// hearing returns the accessor a scored run uses, transcribing each window
+// once and remembering it.
+func hearing(ctx context.Context, ears Ears, capture bench.SessionAudioCapture) heard {
+	if ears == nil {
+		return nil
+	}
+	rate := int(capture.SampleRateHz)
+	if rate == 0 {
+		rate = 24_000
+	}
+	cache := map[string]string{}
+	return func(fromMS, toMS int) (string, error) {
+		key := fmt.Sprintf("%d-%d", fromMS, toMS)
+		if text, known := cache[key]; known {
+			return text, nil
+		}
+		samples := agentAudioBetween(capture, fromMS, toMS)
+		if len(samples) == 0 {
+			cache[key] = ""
+			return "", nil
+		}
+		text, err := ears.Hear(ctx, samples, rate)
+		if err != nil {
+			return "", err
+		}
+		cache[key] = text
+		return text, nil
+	}
+}
+
+// numbersIn pulls the counting sequence out of a transcript.
+//
+// Both spellings, because which one arrives is the recogniser's decision rather
+// than the agent's: the same "twenty-one" comes back as "21" from one model and
+// as two words from another, and a check that understood only one of them would
+// be measuring the recogniser.
+func numbersIn(text string) []int {
+	words := strings.FieldsFunc(strings.ToLower(text), func(character rune) bool {
+		return !('a' <= character && character <= 'z') && !('0' <= character && character <= '9')
+	})
+	var numbers []int
+	pending, open := 0, false
+	flush := func() {
+		if open {
+			numbers = append(numbers, pending)
+		}
+		pending, open = 0, false
+	}
+	for _, word := range words {
+		if value, err := strconv.Atoi(word); err == nil {
+			flush()
+			numbers = append(numbers, value)
+			continue
+		}
+		if value, ok := smallNumbers[word]; ok {
+			// "twenty" then "one" is one number; "one" then "two" is two.
+			if open && pending%10 == 0 && pending >= 20 && value < 10 {
+				pending += value
+				flush()
+				continue
+			}
+			flush()
+			pending, open = value, true
+			continue
+		}
+		flush()
+	}
+	flush()
+	return numbers
+}
+
+// The homophones are there because the listener is a recogniser: Whisper
+// wrote "to" for a spoken "Two." and a count of one to forty was scored as
+// carrying an extra word. Inside a count nothing else sounds like them.
+var smallNumbers = map[string]int{
+	"zero": 0, "oh": 0, "one": 1, "won": 1, "two": 2, "to": 2, "too": 2, "three": 3,
+	"four": 4, "for": 4, "fore": 4, "five": 5, "ate": 8,
+	"six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+	"twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+	"seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20, "thirty": 30,
+	"forty": 40, "fourty": 40, "fifty": 50, "sixty": 60, "seventy": 70,
+	"eighty": 80, "ninety": 90,
+}
+
+// runsOn reports whether numbers continue a count without a gap. A recogniser
+// drops the odd word, so one missing number in the middle is tolerated; two in
+// a row is the agent skipping.
+func runsOn(numbers []int) (int, bool) {
+	if len(numbers) < 2 {
+		return 0, true
+	}
+	for index := 1; index < len(numbers); index++ {
+		if step := numbers[index] - numbers[index-1]; step < 1 || step > 2 {
+			return index, false
+		}
+	}
+	return 0, true
+}
+
+// describeNumbers renders a sequence compactly for a failure message.
+func describeNumbers(numbers []int) string {
+	if len(numbers) == 0 {
+		return "nothing"
+	}
+	parts := make([]string, 0, len(numbers))
+	for _, number := range numbers {
+		parts = append(parts, strconv.Itoa(number))
+	}
+	return strings.Join(parts, " ")
+}
+
+// resumed scores a claim grounded in the waveform: after
+// being cut off and told to carry on, the agent continued from the number the
+// user actually heard.
+//
+// Three failures are being separated, and they are separate because they come
+// from different beliefs. Starting again from the beginning is an agent that
+// knows it was interrupted and not where. Carrying on past numbers nobody heard
+// is an agent that believes it said everything it wrote. Saying nothing at all
+// is an agent that lost the thread entirely. Reported as one "wrong number",
+// none of them would be diagnosable.
+func resumed(check Check, timeline Timeline, listen heard) string {
+	if err := validateCheck(check, timeline); err != nil {
+		return "invalid scenario check: " + err.Error()
+	}
+	if check.Interrupted < 0 || check.Interrupted >= len(timeline.Spans) ||
+		check.Line < 0 || check.Line >= len(timeline.Spans) {
+		return fmt.Sprintf("the resumed check names lines %d and %d, and the script has %d (%s)",
+			check.Interrupted, check.Line, len(timeline.Spans), check.Note)
+	}
+	if listen == nil {
+		// Never a quiet pass. This claim is about what a loudspeaker produced,
+		// and with nothing to listen to that recording the claim has not been
+		// checked - which is a different thing from having been met.
+		return "NOT VERIFIED: continuing from what was actually heard is scored " +
+			"against the agent's own recorded audio, and no transcription endpoint " +
+			"was configured for the harness (-transcribe-url)"
+	}
+	// The user still hears speech while the agent is stopping. Cutting this
+	// window at the user's first sample loses those numbers and falsely calls
+	// a correct continuation a skip.
+	stop := timeline.Spans[check.Interrupted].EndMS
+	if !canAddMS(stop, check.Count.StopWithinMS) || stop+check.Count.StopWithinMS >= timeline.Spans[check.Line].StartMS {
+		return "invalid scenario check: stopping deadline leaves no quiet interval before resumption"
+	}
+	before, err := listen(0, stop+check.Count.StopWithinMS)
+	if err != nil {
+		return fmt.Sprintf("NOT VERIFIED: could not transcribe what the agent had said: %v", err)
+	}
+	after, err := listen(timeline.Spans[check.Line].EndMS,
+		timeline.Spans[check.Line].EndMS+check.AfterMS)
+	if err != nil {
+		return fmt.Sprintf("NOT VERIFIED: could not transcribe what the agent said next: %v", err)
+	}
+
+	heardBefore, heardAfter := numbersIn(before), numbersIn(after)
+	if len(heardBefore) == 0 {
+		return fmt.Sprintf("the agent had counted nothing audible before being stopped, "+
+			"so there was nothing to carry on from; it was heard saying %q (%s)",
+			truncateSaid(before), check.Note)
+	}
+	if len(heardAfter) == 0 {
+		return fmt.Sprintf("after being told to carry on it counted nothing; it had reached %s "+
+			"and was then heard saying %q (%s)",
+			describeNumbers(lastFew(heardBefore)), truncateSaid(after), check.Note)
+	}
+	count := check.Count
+	if len(heardBefore) < count.MinimumBefore || len(heardAfter) < count.MinimumAfter {
+		return fmt.Sprintf("insufficient sustained counting: heard %d numbers before interruption and %d afterwards; require at least %d before and %d after (%s)",
+			len(heardBefore), len(heardAfter), count.MinimumBefore, count.MinimumAfter, check.Note)
+	}
+	for _, sequence := range [][]int{heardBefore, heardAfter} {
+		for _, number := range sequence {
+			if number < count.From || number > count.Through {
+				return fmt.Sprintf("counted %d outside the requested range %d through %d (%s)", number, count.From, count.Through, check.Note)
+			}
+		}
+	}
+	if heardBefore[0] != count.From {
+		return fmt.Sprintf("the initial count began at %d instead of %d (%s)", heardBefore[0], count.From, check.Note)
+	}
+	if at, ordered := runsOn(heardBefore); !ordered {
+		return fmt.Sprintf("before interruption the count jumped from %d to %d (%s)", heardBefore[at-1], heardBefore[at], check.Note)
+	}
+	reached := heardBefore[len(heardBefore)-1]
+	if reached == count.Through {
+		return fmt.Sprintf("the count already reached %d before interruption; no unfinished sequence remained to resume (%s)", reached, check.Note)
+	}
+	next := heardAfter[0]
+	switch {
+	case next <= 1 && reached > 2:
+		return fmt.Sprintf("it had counted to %d and started again from %d: it knew it was "+
+			"interrupted and not where (%s)", reached, next, check.Note)
+	case next > reached+1:
+		return fmt.Sprintf("it had counted to %d and carried on from %d, past %d number(s) "+
+			"nobody heard: it continued from where its own text had got to rather than from "+
+			"where its voice had (%s)", reached, next, next-reached-1, check.Note)
+	case next < reached:
+		return fmt.Sprintf("it had counted to %d and went back to %d, repeating %d number(s) "+
+			"the user had already heard (%s)", reached, next, reached-next+1, check.Note)
+	}
+	if at, ordered := runsOn(heardAfter); !ordered {
+		return fmt.Sprintf("it carried on from %d and then jumped from %d to %d (%s)",
+			next, heardAfter[at-1], heardAfter[at], check.Note)
+	}
+	return ""
+}
+
+// lastFew is the tail of a count, for a failure message that should show where
+// the agent had got to without printing the whole sequence.
+func lastFew(numbers []int) []int {
+	if len(numbers) <= 4 {
+		return numbers
+	}
+	return numbers[len(numbers)-4:]
+}

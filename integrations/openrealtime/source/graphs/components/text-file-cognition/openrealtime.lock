@@ -1,0 +1,93 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "cognition.TextModel",
+      "identity": {
+        "name": "cognition.TextModel",
+        "revision": 3,
+        "digest": "sha256:1596e62d7da68f20107787c8b627b1cc32ba6ff5f3f0c1b3f4f3a5a7a7bf52df"
+      }
+    },
+    {
+      "reference": "flow.Mux",
+      "identity": {
+        "name": "flow.Mux",
+        "revision": 1,
+        "digest": "sha256:91976286e56562ebb11b6598d20c70394dae476d324ac209f3e775ec4b89b6fc"
+      }
+    },
+    {
+      "reference": "flow.Tee",
+      "identity": {
+        "name": "flow.Tee",
+        "revision": 1,
+        "digest": "sha256:54c309b4fa80950ca8815b63de7bb84947c9aa890fc3f638cd6a5afc574e40d6"
+      }
+    },
+    {
+      "reference": "ingress.UserContent",
+      "identity": {
+        "name": "ingress.UserContent",
+        "revision": 1,
+        "digest": "sha256:5c667d597ba98724d46b318fe57a5c1a99a508921d9544839a6e776fa5e0b286"
+      }
+    },
+    {
+      "reference": "interaction.ControlSerializationQuarantine",
+      "identity": {
+        "name": "interaction.ControlSerializationQuarantine",
+        "revision": 2,
+        "digest": "sha256:f5d773fcdfe5fe831b37e853185bea03ef86276f5b30999532d8cecb33654f62"
+      }
+    },
+    {
+      "reference": "interaction.ModelResultCommit",
+      "identity": {
+        "name": "interaction.ModelResultCommit",
+        "revision": 3,
+        "digest": "sha256:c3fdf3b43e31f4409fa33a513a37690c15167a131d4dd660e56ea2bc91c07a12"
+      }
+    },
+    {
+      "reference": "media.ResolveAttachment",
+      "identity": {
+        "name": "media.ResolveAttachment",
+        "revision": 1,
+        "digest": "sha256:c6492ff0c32c1050f929b37b6812dd1eefe688f538d4b9ddeab5da52e94dbd02"
+      }
+    },
+    {
+      "reference": "media.RetainedMedia",
+      "identity": {
+        "name": "media.RetainedMedia",
+        "revision": 1,
+        "digest": "sha256:6ae581ec85b07c34f158140cd4459ef48bacbb494e8e9f65bce98e4a60884ee9"
+      }
+    },
+    {
+      "reference": "policy.ObservationInvocation",
+      "identity": {
+        "name": "policy.ObservationInvocation",
+        "revision": 1,
+        "digest": "sha256:0b6e7bfa33a89334cfe2dcdaa3d91ab4e46344a46ba8dcb0458cae15974f96de"
+      }
+    },
+    {
+      "reference": "state.ObservationCommit",
+      "identity": {
+        "name": "state.ObservationCommit",
+        "revision": 2,
+        "digest": "sha256:c66bb9dccc83f20e053bf6bdd0289bd46d185718ff0f458c00eca1533bcd5b35"
+      }
+    },
+    {
+      "reference": "state.TrajectoryStore",
+      "identity": {
+        "name": "state.TrajectoryStore",
+        "revision": 2,
+        "digest": "sha256:b3d813911f931b5e61b6a2edb782ad25a3d4ffe6e256b8a713a1e61c1b2dead7"
+      }
+    }
+  ]
+}

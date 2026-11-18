@@ -1,0 +1,184 @@
+{
+  "endpoints": [],
+  "format_version": 1,
+  "lock_fingerprint": "sha256:5c4b300fea1d6187954717983734bb34aa4eb8ec6d12527d5d16a1b8ce69fc42",
+  "manifest_fingerprint": "sha256:33d2608c538f1df6d397bc450326f59e34d7629165a5fb425ae83ffd092daeff",
+  "plan_fingerprint": "sha256:116066f2f8384156282c9563bbdc9ced3542fe95424cf6dea9bbd8733ba8b999",
+  "platform": "macos",
+  "profile_fingerprint": "sha256:881807f979f3be2231d7e7a0732193638e14c7ebb5e756846546f6f2c509eff0",
+  "providers": [
+    {
+      "id": "slots",
+      "implementation": "macos.swiftui-slots.v1",
+      "permissions": [],
+      "requires": [],
+      "service": "presentation.client.slots"
+    },
+    {
+      "id": "strict-json",
+      "implementation": "portable.swift-strict-json.v1",
+      "permissions": [],
+      "requires": [],
+      "service": "presentation.client.strict_json"
+    },
+    {
+      "id": "transport",
+      "implementation": "macos.realtime-transport.v2",
+      "permissions": [
+        {
+          "kind": "network.connect",
+          "operations": [
+            "websocket",
+            "webrtc"
+          ],
+          "resource": "realtime-endpoint"
+        }
+      ],
+      "requires": [
+        "presentation.client.strict_json"
+      ],
+      "service": "presentation.client.connection"
+    },
+    {
+      "id": "transport-diagnostics",
+      "implementation": "macos.websocket-diagnostics.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.connection"
+      ],
+      "service": "presentation.client.transport_diagnostics"
+    },
+    {
+      "id": "reducer",
+      "implementation": "portable.swift-reducer.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.connection",
+        "presentation.client.strict_json"
+      ],
+      "service": "presentation.client.session_state"
+    },
+    {
+      "id": "protocol-events",
+      "implementation": "portable.swift-protocol-events.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.session_state"
+      ],
+      "service": "presentation.client.protocol_events"
+    },
+    {
+      "id": "inspection-access",
+      "implementation": "portable.swift-inspection-access.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.session_state"
+      ],
+      "service": "presentation.client.inspection_access"
+    },
+    {
+      "id": "session-configuration",
+      "implementation": "portable.swift-session-configuration.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.session_state"
+      ],
+      "service": "presentation.client.session_configuration"
+    },
+    {
+      "id": "authoring",
+      "implementation": "portable.swift-management-authoring.v1",
+      "permissions": [
+        {
+          "kind": "network.connect",
+          "operations": [
+            "http"
+          ],
+          "resource": "management-endpoint"
+        }
+      ],
+      "requires": [],
+      "service": "presentation.client.management_authoring"
+    },
+    {
+      "id": "media",
+      "implementation": "macos.av-media.v2",
+      "permissions": [
+        {
+          "kind": "device.media",
+          "operations": [
+            "microphone",
+            "playout"
+          ],
+          "resource": "native-audio"
+        }
+      ],
+      "requires": [
+        "presentation.client.connection",
+        "presentation.client.protocol_events",
+        "presentation.client.session_state"
+      ],
+      "service": "presentation.client.media"
+    },
+    {
+      "id": "video",
+      "implementation": "macos.video-protocol.v2",
+      "permissions": [
+        {
+          "kind": "device.media",
+          "operations": [
+            "camera",
+            "screen"
+          ],
+          "resource": "native-video"
+        },
+        {
+          "kind": "device.media",
+          "operations": [
+            "capture"
+          ],
+          "resource": "native-browser"
+        }
+      ],
+      "requires": [
+        "presentation.client.connection",
+        "presentation.client.session_configuration",
+        "presentation.client.session_state"
+      ],
+      "service": "presentation.client.video"
+    },
+    {
+      "id": "inspection",
+      "implementation": "macos.inspection.v1",
+      "permissions": [
+        {
+          "kind": "network.connect",
+          "operations": [
+            "http"
+          ],
+          "resource": "management-endpoint"
+        }
+      ],
+      "requires": [
+        "presentation.client.inspection_access",
+        "presentation.client.session_configuration"
+      ],
+      "service": "presentation.client.inspection"
+    },
+    {
+      "id": "view",
+      "implementation": "macos.swiftui-observer-view.v1",
+      "permissions": [],
+      "requires": [
+        "presentation.client.management_authoring",
+        "presentation.client.inspection",
+        "presentation.client.media",
+        "presentation.client.session_state",
+        "presentation.client.slots",
+        "presentation.client.transport_diagnostics",
+        "presentation.client.video"
+      ],
+      "service": "presentation.client.view"
+    }
+  ]
+}

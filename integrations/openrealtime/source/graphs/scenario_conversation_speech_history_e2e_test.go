@@ -1,0 +1,402 @@
+package graphs_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"testing"
+	"time"
+
+	v1 "github.com/bojieli/OpenRealtime/api/v1"
+	legacy "github.com/bojieli/OpenRealtime/binding"
+	"github.com/bojieli/OpenRealtime/continuation"
+	"github.com/bojieli/OpenRealtime/element"
+	interactionelements "github.com/bojieli/OpenRealtime/elements/interaction"
+	policyelements "github.com/bojieli/OpenRealtime/elements/policy"
+	graphlaunch "github.com/bojieli/OpenRealtime/graph/launch"
+	"github.com/bojieli/OpenRealtime/graphs"
+	coreinteraction "github.com/bojieli/OpenRealtime/interaction"
+	"github.com/bojieli/OpenRealtime/trajectory"
+)
+
+// A model can answer a partial while its matching final, or a later unrelated
+// observation, commits. Rejecting fresh action authority must not erase speech
+// that reaches the listener or strand its playback-completion receipt.
+func TestScenarioConversationPreservesAudibleCountAfterContextAdvances(t *testing.T) {
+	for _, newerRoom := range []bool{false, true} {
+		t.Run(map[bool]string{false: "matching final", true: "later room observation"}[newerRoom], func(t *testing.T) {
+			testScenarioSpeechHistoryContext(t, newerRoom, false, false)
+		})
+	}
+}
+
+func TestScenarioConversationExplicitResponseIncludesPublishedPlayback(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		newerRoom, finalOnly bool
+	}{
+		{"matching final", false, false},
+		{"later room observation", true, false},
+		{"ordinary committed response", false, true},
+	} {
+		t.Run(test.name, func(t *testing.T) { testScenarioSpeechHistoryContext(t, test.newerRoom, true, test.finalOnly) })
+	}
+}
+
+func TestScenarioConversationReleaseUpdatesPolicyBeforeNextResponse(t *testing.T) {
+	testScenarioSpeechHistoryContext(t, false, true, true, &scenarioDelayedAgentOutputGate{})
+}
+
+func testScenarioSpeechHistoryContext(t *testing.T, newerRoom, explicit, finalOnly bool, gates ...*scenarioDelayedAgentOutputGate) {
+	t.Helper()
+	base := newScenarioProfileFixture(t)
+	config := base.pluginConfig()
+	config.SemanticAdmission.Rules = "Count the current animal."
+	asr := &scenarioAddressingASRControl{turns: []string{"Count the animals out loud as I mention them and say nothing else.", "A capybara wandered over and sat down next to me.", "The water was calm."}}
+	if !newerRoom {
+		asr.turns = asr.turns[:2]
+	}
+	if finalOnly {
+		asr.turns[0] = "Count the animals out loud as I mention them."
+	}
+	asr.turns = append(asr.turns, "A capybara joined the first one.")
+	policy := &scenarioSpeechHistoryPolicy{scenarioCountAdmissionPolicy: scenarioCountAdmissionPolicy{descriptor: config.Policy.Descriptor, primary: coreinteraction.ChoiceSpeak, primaryConfidence: 0.989}, finalOnly: finalOnly}
+	model := &scenarioSpeechHistoryModel{descriptor: config.Model.Descriptor, started: make(chan continuation.Request, 1), release: make(chan struct{})}
+	tts := &scenarioAddressingTTSControl{}
+	config.ASR.Factory = func(context.Context, legacy.Options) (v1.PerceptionProvider, error) {
+		return &scenarioAddressingASR{control: asr, descriptor: config.ASR.Descriptor}, nil
+	}
+	config.Policy.Factory = func(context.Context, legacy.Options) (policyelements.SemanticDecider, error) { return policy, nil }
+	config.Model.Factory = func(context.Context, legacy.Options) (continuation.Provider, error) { return model, nil }
+	config.TTS.Factory = func(context.Context, legacy.Options) (v1.SpeechProvider, error) {
+		return &scenarioAddressingTTS{control: tts, descriptor: config.TTS.Descriptor}, nil
+	}
+	launchConfig, err := graphs.ScenarioConversationLaunchConfig(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording := newScenarioAddressingGraphRecorder()
+	instrumentScenarioAddressingFactory(t, &launchConfig, "policy.SemanticAdmission", recording, "decision")
+	instrumentScenarioAddressingFactory(t, &launchConfig, "interaction.ModelResultCommit", recording, "outcome")
+	for _, gate := range gates {
+		gate.install(t, &launchConfig)
+		defer gate.open()
+	}
+	launched, err := graphlaunch.New(t.Context(), launchConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &scenarioSpeechHistorySink{scenarioQueuedCancelSink: &scenarioQueuedCancelSink{scenarioAddressingSink: newScenarioAddressingSink(), audio: make(chan string, 8)}, ended: make(chan legacy.TurnOutcome, 8)}
+	const sessionID = "speech-history"
+	settings := legacy.Settings{Instruction: "Follow the user's standing count.", Voice: config.TTS.Voice, Modalities: []string{"audio"}, Gate: config.Gate}
+	runtime, err := launched.Binding.Start(t.Context(), legacy.Options{SessionID: sessionID, Sink: sink, Settings: settings})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx, errors.New("history test complete")); err != nil {
+			t.Error(err)
+		}
+	})
+	if err = runtime.Update(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	var clock scenarioAddressingAudioClock
+	driveScenarioAddressingTurn(t, runtime, sink.scenarioAddressingSink, &clock, scenarioAddressingStreamID(sessionID, 1), asr.turns[0])
+	recording.await(t, "semantic_admission.decision", func(e element.Envelope) bool {
+		d, ok := e.Payload.(policyelements.SemanticDecision)
+		return ok && d.StandingAfter == 1
+	})
+	for i := 0; i < 3; i++ {
+		sendScenarioCountAudio(t, runtime, &clock, false)
+	}
+	var request continuation.Request
+	if !finalOnly {
+		request = receiveScenarioAddressing(t, model.started, "partial-trigger model invocation")
+	}
+	for i := 0; i < 5; i++ {
+		sendScenarioCountAudio(t, runtime, &clock, true)
+	}
+	awaitSpeechHistoryObservation(t, runtime, asr.turns[1])
+	if finalOnly {
+		request = receiveScenarioAddressing(t, model.started, "final-trigger model invocation")
+	}
+	if newerRoom {
+		for i := 0; i < 8; i++ {
+			sendScenarioCountAudio(t, runtime, &clock, i >= 3)
+		}
+		awaitSpeechHistoryObservation(t, runtime, asr.turns[2])
+	}
+	if !finalOnly && runtime.Trajectory().Version <= request.Trajectory.Version {
+		t.Fatal("fixture did not advance canonical context during model work")
+	}
+	close(model.release)
+	if text := receiveScenarioAddressing(t, sink.audio, "count at actual audio boundary"); text != "One." {
+		t.Fatal(text)
+	}
+	outcome := recording.await(t, "model_result_commit.outcome", func(e element.Envelope) bool {
+		o, ok := e.Payload.(interactionelements.ModelCommitOutcome)
+		return ok && o.Kind != interactionelements.ModelIgnored
+	})
+	committed := outcome.Payload.(interactionelements.ModelCommitOutcome)
+	wantKind, wantCode := interactionelements.ModelSpeechRetained, "stale_speech_history"
+	if finalOnly {
+		wantKind, wantCode = interactionelements.ModelCommitted, ""
+	}
+	if committed.Kind != wantKind || committed.Code != wantCode {
+		t.Fatalf("unexpected speech history outcome: %+v", committed)
+	}
+	// Ignore empty setup turns. The exact utterance below must finish cleanly.
+	end := receiveScenarioAddressing(t, sink.ended, "completed count turn")
+	if end.Incomplete {
+		t.Fatalf("count ended incomplete: %+v", end)
+	}
+	snapshot := runtime.Trajectory()
+	visibility := trajectory.AssistantVisibility(snapshot)
+	found := false
+	for _, item := range snapshot.Items {
+		if item.InvocationID != committed.RunID {
+			continue
+		}
+		if item.Kind == trajectory.KindToolProposal || item.Kind == trajectory.KindToolCall {
+			t.Fatal("stale proposal became canonical")
+		}
+		if item.Kind == trajectory.KindAssistant && item.Content == "One." {
+			if visibility[item.ID] != trajectory.VisibilityPlayed {
+				t.Fatalf("retained count not visible as played: %s", visibility[item.ID])
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("audible count missing from canonical history")
+	}
+	if explicit {
+		for _, gate := range gates {
+			receiveScenarioAddressing(t, gate.blocked, "delayed inactive policy state")
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+		defer cancel()
+		if err := runtime.CreateResponse(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for _, gate := range gates {
+			gate.open()
+		}
+		decision := recording.await(t, "semantic_admission.decision", func(e element.Envelope) bool {
+			d, ok := e.Payload.(policyelements.SemanticDecision)
+			return ok && d.Operation == "create"
+		}).Payload.(policyelements.SemanticDecision)
+		if decision.ContextVersion < snapshot.Version {
+			t.Fatal("explicit decision omitted published playback state")
+		}
+		if !finalOnly {
+			// No new animal arrived. The standing say-nothing-else instruction
+			// still permits silence, but evaluating it must observe playback.
+			if !decision.Choice.Idle() {
+				t.Fatal("explicit request bypassed standing silence")
+			}
+			return
+		}
+	} else {
+		for i := 0; i < 3; i++ {
+			sendScenarioCountAudio(t, runtime, &clock, false)
+		}
+	}
+	next := receiveScenarioAddressing(t, model.started, "next provider context")
+	nextVisibility := trajectory.AssistantVisibility(next.Trajectory)
+	found = false
+	for _, item := range next.Trajectory.Items {
+		if item.InvocationID == committed.RunID && item.Kind == trajectory.KindAssistant &&
+			item.Content == "One." && nextVisibility[item.ID] == trajectory.VisibilityPlayed {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("next provider invocation omitted the played count")
+	}
+	if explicit {
+		if text := receiveScenarioAddressing(t, sink.audio, "explicit response audio"); text != "One." {
+			t.Fatal(text)
+		}
+		if end := receiveScenarioAddressing(t, sink.ended, "explicit response completion"); end.Incomplete {
+			t.Fatalf("explicit response incomplete: %+v", end)
+		}
+	}
+}
+
+// Sampled State can lag the independent completion path. Suppress inactive
+// observations until the next request is admitted, while still draining the
+// connection so this test does not introduce unrelated upstream backpressure.
+type scenarioDelayedAgentOutputGate struct {
+	blocked chan struct{}
+	release chan struct{}
+}
+
+func (gate *scenarioDelayedAgentOutputGate) open() {
+	select {
+	case <-gate.release:
+	default:
+		close(gate.release)
+	}
+}
+
+func (gate *scenarioDelayedAgentOutputGate) install(t *testing.T, config *graphlaunch.Config) {
+	t.Helper()
+	gate.blocked = make(chan struct{})
+	gate.release = make(chan struct{})
+	for i := range config.Catalog.Assembly.Implementations {
+		registration := &config.Catalog.Assembly.Implementations[i]
+		if registration.Factory.Descriptor().Name == "policy.SemanticAdmission" {
+			registration.Factory = scenarioDelayedAgentOutputFactory{registration.Factory, gate}
+			return
+		}
+	}
+	t.Fatal("semantic admission factory missing")
+}
+
+type scenarioDelayedAgentOutputFactory struct {
+	element.Factory
+	gate *scenarioDelayedAgentOutputGate
+}
+
+func (factory scenarioDelayedAgentOutputFactory) ValidateConfig(raw json.RawMessage) error {
+	return factory.Factory.(element.ConfigValidator).ValidateConfig(raw)
+}
+
+func (factory scenarioDelayedAgentOutputFactory) Mount(ctx context.Context, mount element.MountContext) (element.Runnable, error) {
+	mount.Ports = scenarioDelayedAgentOutputPorts{mount.Ports, factory.gate}
+	return factory.Factory.Mount(ctx, mount)
+}
+
+type scenarioDelayedAgentOutputPorts struct {
+	element.Ports
+	gate *scenarioDelayedAgentOutputGate
+}
+
+func (ports scenarioDelayedAgentOutputPorts) Input(name string) (element.InputPort, error) {
+	input, err := ports.Ports.Input(name)
+	if err != nil || name != "agent_output" {
+		return input, err
+	}
+	return &scenarioDelayedAgentOutputInput{InputPort: input, gate: ports.gate}, nil
+}
+
+type scenarioDelayedAgentOutputInput struct {
+	element.InputPort
+	active bool
+	held   bool
+	gate   *scenarioDelayedAgentOutputGate
+}
+
+func (input *scenarioDelayedAgentOutputInput) Receive(ctx context.Context) (element.Envelope, error) {
+	for {
+		envelope, err := input.InputPort.Receive(ctx)
+		if err != nil {
+			return envelope, err
+		}
+		output := envelope.Payload.(coreinteraction.AgentOutput)
+		if input.active && !output.Active {
+			if !input.held {
+				input.held = true
+				close(input.gate.blocked)
+			}
+			select {
+			case <-input.gate.release:
+			default:
+				continue
+			}
+		}
+		input.active = input.active || output.Active
+		return envelope, nil
+	}
+}
+
+// Thirty seconds bounds "this never arrived", not how quickly it did. The
+// same reasoning as realtimeCUReceiveTimeout: these wait on events the
+// runtime owes the test, none of them rate-gated, so a tighter bound only
+// asserts a latency on whichever machine happened to run the gate.
+func awaitSpeechHistoryObservation(t *testing.T, runtime legacy.Runtime, text string) {
+	t.Helper()
+	deadline := time.NewTimer(30 * time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(time.Millisecond)
+	defer poll.Stop()
+	for !scenarioEndpointHasFinalAudio(runtime.Trajectory(), text) {
+		select {
+		case <-deadline.C:
+			t.Fatal("newer observation did not commit")
+		case <-poll.C:
+		}
+	}
+}
+
+type scenarioSpeechHistoryPolicy struct {
+	scenarioCountAdmissionPolicy
+	finalOnly bool
+}
+
+func (p *scenarioSpeechHistoryPolicy) Generate(ctx context.Context, prompt, text string, budget int) (string, error) {
+	if p.finalOnly {
+		if prompt == coreinteraction.RestrictingInstruction {
+			return "no", nil
+		}
+		if prompt == coreinteraction.ExtractionInstruction {
+			return "pin conversation count the animals out loud as they mention them", nil
+		}
+	}
+	return p.scenarioCountAdmissionPolicy.Generate(ctx, prompt, text, budget)
+}
+
+func (p *scenarioSpeechHistoryPolicy) Decide(ctx context.Context, d coreinteraction.Decision) (coreinteraction.Outcome, error) {
+	if p.finalOnly {
+		switch {
+		case strings.Contains(d.Evidence, "transcript event: partial"):
+			// This variant only ever speaks on a settled utterance.
+			return scenarioAnswer(d, scenarioStepChoice(d, coreinteraction.ChoiceListen))
+		case !strings.Contains(d.Evidence, "transcript event:") && !d.Speaking:
+			// An explicit request with the floor free is answered.
+			return scenarioAnswer(d, coreinteraction.ChoiceSpeak)
+		}
+	}
+	return p.scenarioCountAdmissionPolicy.Decide(ctx, d)
+}
+
+type scenarioSpeechHistoryModel struct {
+	descriptor continuation.Descriptor
+	started    chan continuation.Request
+	release    chan struct{}
+}
+
+func (m *scenarioSpeechHistoryModel) Descriptor() continuation.Descriptor { return m.descriptor }
+func (m *scenarioSpeechHistoryModel) Continue(ctx context.Context, request continuation.Request, emit continuation.Emit) (continuation.Completion, error) {
+	select {
+	case m.started <- request:
+	case <-ctx.Done():
+		return continuation.Completion{}, context.Cause(ctx)
+	}
+	select {
+	case <-m.release:
+	case <-ctx.Done():
+		return continuation.Completion{}, context.Cause(ctx)
+	}
+	return scenarioEndpointSpeak(emit, "One.")
+}
+
+type scenarioSpeechHistorySink struct {
+	*scenarioQueuedCancelSink
+	ended chan legacy.TurnOutcome
+}
+
+func (s *scenarioSpeechHistorySink) TurnEnd(ctx context.Context, outcome legacy.TurnOutcome) error {
+	s.mu.Lock()
+	hasSpeech := s.speechBegins > 0
+	s.mu.Unlock()
+	if hasSpeech {
+		s.ended <- outcome
+	}
+	return s.scenarioAddressingSink.TurnEnd(ctx, outcome)
+}

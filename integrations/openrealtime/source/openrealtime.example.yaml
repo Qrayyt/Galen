@@ -1,0 +1,104 @@
+# Every setting here is a flag, and every flag can go here. Nesting is the flag
+# name split on dashes, so `fast: {provider: ...}` is -fast-provider. Anything
+# given on the command line overrides the file, which is how a deployment keeps
+# its choices in version control and varies one of them for a run.
+#
+# A key that matches no flag is an error rather than a silent typo.
+
+listen: 127.0.0.1:8765
+
+# The voice. Every word it writes is spoken the moment it writes it, and it
+# decides whether this is a turn to speak at all - the interaction model only
+# offers it the chance. That judgement is the hard one in this system.
+#
+# effort is how much room it has to think before answering. minimal suits a
+# small instruct model, which has nothing to think with. A reasoning model
+# given no budget makes the same mistakes as the small one: measured on eight
+# turns replayed from real runs, the local instruct model scores four, Gemini
+# 3.5 Flash with no budget scores four, and the same model with a budget scores
+# five - and the two it gains are the ones no rewording of the prompt could fix.
+#
+# It costs about 1.8s a turn against 30ms. A phone agent may want the speed; an
+# interpreter sitting behind a second speaker may want the judgement.
+#
+# effort is a name - minimal, low, medium, high - or a number of thinking
+# tokens. They are alternatives and never both: Gemini answers 400, "you can
+# only set only one of thinking budget and thinking level". A name lets the
+# provider decide how far to think; a number says how far. 512 is a reasonable
+# number for a Flash model. Measured on the date-contradiction turn, minimal
+# and a budget of 0 think nothing and still answer; low spends about 370
+# thinking tokens; and every setting from 0 upward corrects the date.
+#
+# There is deliberately no output limit here. How long the voice may think and
+# how long it may speak are different quantities, and a provider spends one
+# allowance on thinking before it speaks: at a 96-token ceiling with thinking
+# on, the reply came back empty, finishReason MAX_TOKENS, 93 tokens of thought
+# and none of speech. At 128 it came back as "Wait, the thirteenth? The". Left
+# uncapped the same turns answer in 18 to 32 tokens, so the ceiling was never
+# what kept them short - the instruction to speak aloud is. Set max-tokens only
+# as a runaway ceiling, well above any turn worth hearing.
+fast:
+  provider: gemini
+  model: gemini-3.5-flash
+  token-env: GEMINI_API_KEY
+  effort: 512
+  sees: true
+
+# The reasoner. Never heard: what it writes is background state the voice reads
+# before it speaks next. It is off the path between hearing a word and
+# answering, so it can afford to think.
+# effort here is not free even though this phase is never heard. When the voice
+# defers to it - which it does on most turns - the reasoner sits between the
+# last word somebody said and the first the agent speaks. Measured on the
+# waiter, where the moment passes in a second: 8/15 at high effort, 11/15 at
+# minimal, with nothing else changed. The failing runs at high effort ordered
+# the right dish two seconds after the window closed.
+slow:
+  provider: gemini
+  model: gemini-3.5-flash
+  token-env: GEMINI_API_KEY
+  effort: minimal
+
+# The interaction model, and the classifiers that read a policy when it is
+# pinned. These run many times a second and decide only whether to speak, not
+# what to say, so they want a fast local model rather than a thoughtful one.
+# Measured at 17ms a decision on this GPU.
+policy:
+  models: interaction
+  model: qwen-fast
+  url: http://127.0.0.1:8000/v1
+  reasoning: chat_template_kwargs
+
+# Recognition, speech, and who is speaking. The speaker thresholds are measured
+# rather than chosen - see F53 in docs/measurement.md.
+asr:
+  provider: openai-compatible
+  url: http://127.0.0.1:8003/v1
+  model: whisper-turbo
+tts:
+  provider: fish-audio
+  url: http://127.0.0.1:8123/v1/tts
+  model: fishaudio/fish-speech-1.5
+speaker:
+  url: http://127.0.0.1:8124/embed
+
+# What the voice is given of the video. A dedicated narrator keeps seeing
+# separate from speaking: something watches and writes down what is on screen,
+# and the voice reads that.
+#
+# Not the server the interaction model is on. Images are heavy and a turn-taking
+# decision is 17ms, so sharing a GPU does not slow the decisions down evenly, it
+# stops them happening: measured, decisions fell from 1.66/s to 0.25/s and the
+# situation then never once said anybody was speaking, because every decision
+# that would have landed during speech never ran. Cutting in, the waiter and
+# somebody else's conversation went to 0/5, 1/5 and 0/5 - the interaction model
+# was answering about a world that had already moved on. See F77.
+vision:
+  provider: google-openai
+  model: gemini-3.5-flash
+  token-env: GEMINI_API_KEY
+
+observers: audio+video
+narrator: dedicated
+speak-by-sentence: true
+endpoint-silence: 120

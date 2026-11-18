@@ -1,0 +1,629 @@
+package interaction_test
+
+import (
+	"context"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/bojieli/OpenRealtime/interaction"
+	"github.com/bojieli/OpenRealtime/session"
+)
+
+// recordingDecider captures exactly what a policy model was shown, which is
+// what the decision-time-information rule has to be checked against.
+type recordingDecider struct {
+	mu         sync.Mutex
+	seen       []interaction.Decision
+	answer     string
+	confidence float64
+	err        error
+}
+
+type sequencedDecider struct {
+	mu      sync.Mutex
+	seen    []interaction.Decision
+	answers []string
+}
+
+func (decider *sequencedDecider) Name() string { return "sequenced" }
+
+func (decider *sequencedDecider) Decide(
+	_ context.Context, decision interaction.Decision,
+) (interaction.Outcome, error) {
+	decider.mu.Lock()
+	defer decider.mu.Unlock()
+	decider.seen = append(decider.seen, decision)
+	if len(decider.answers) == 0 {
+		return interaction.Outcome{}, nil
+	}
+	answer := decider.answers[0]
+	decider.answers = decider.answers[1:]
+	for index, option := range decision.Options {
+		if option == answer {
+			return interaction.Outcome{Index: index, Option: option}, nil
+		}
+	}
+	return interaction.Outcome{}, nil
+}
+
+func (decider *sequencedDecider) decisions() []interaction.Decision {
+	decider.mu.Lock()
+	defer decider.mu.Unlock()
+	return append([]interaction.Decision(nil), decider.seen...)
+}
+
+func (decider *recordingDecider) Name() string { return "recording" }
+
+func (decider *recordingDecider) Decide(
+	_ context.Context, decision interaction.Decision,
+) (interaction.Outcome, error) {
+	decider.mu.Lock()
+	decider.seen = append(decider.seen, decision)
+	answer, confidence, err := decider.answer, decider.confidence, decider.err
+	decider.mu.Unlock()
+	if err != nil {
+		return interaction.Outcome{}, err
+	}
+	for index, option := range decision.Options {
+		if option == answer {
+			// Measured, because a double that reports a confidence is
+			// standing in for a server that actually returned one.
+			return interaction.Outcome{
+				Index: index, Option: option, Confidence: confidence, Measured: true,
+			}, nil
+		}
+	}
+	return interaction.Outcome{}, nil
+}
+
+func (decider *recordingDecider) decisions() []interaction.Decision {
+	decider.mu.Lock()
+	defer decider.mu.Unlock()
+	return append([]interaction.Decision(nil), decider.seen...)
+}
+
+func TestVisualIntentPolicySeparatesAuthorityFromPixelGrounding(t *testing.T) {
+	decider := &recordingDecider{answer: string(interaction.VisualIntentMonitor)}
+	model, err := interaction.NewInteractionModel(decider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, _, err := model.DecideVisualIntent(
+		context.Background(),
+		"Present the quarterly review; if an approval dialog appears, acknowledge it.",
+	)
+	if err != nil || intent != interaction.VisualIntentMonitor {
+		t.Fatalf("visual intent = %q, %v", intent, err)
+	}
+	decisions := decider.decisions()
+	if len(decisions) != 1 {
+		t.Fatalf("expected one visual policy call, got %d", len(decisions))
+	}
+	decision := decisions[0]
+	if len(decision.Options) != 3 || len(decision.Images) != 0 {
+		t.Fatalf("visual authority policy received the wrong surface: %+v", decision)
+	}
+	if strings.Contains(decision.Prompt, "coordinate") || strings.Contains(decision.Evidence, "pixel") {
+		t.Fatalf("authority classifier was asked to ground an action: %+v", decision)
+	}
+	if !strings.Contains(decision.Prompt, "semantic work") ||
+		!strings.Contains(decision.Evidence, "approval dialog") {
+		t.Fatalf("visual classification lost its decision-time contract: %+v", decision)
+	}
+}
+
+func TestSingleExecutableActDoesNotCallPolicyProvider(t *testing.T) {
+	decider := &recordingDecider{answer: string(interaction.ActAnswer)}
+	model, err := interaction.NewInteractionModel(decider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	act, outcome, err := model.Decide(context.Background(), interaction.Situation{
+		Seen:        "the build is still running",
+		AllowedActs: []interaction.Act{interaction.ActStaySilent},
+	})
+	if err != nil || act != interaction.ActStaySilent || outcome.Index != 0 ||
+		outcome.Option != string(interaction.ActStaySilent) || outcome.Measured {
+		t.Fatalf("single executable act = %q, %+v, %v", act, outcome, err)
+	}
+	if decisions := decider.decisions(); len(decisions) != 0 {
+		t.Fatalf("singleton act was sent to policy provider: %+v", decisions)
+	}
+}
+
+func TestExplicitVisualAuthorityCompilesOnlyUnambiguousImperatives(t *testing.T) {
+	tests := []struct {
+		name string
+		task string
+		want bool
+	}{
+		{name: "navigation while presenting", task: "Go to the summary slide and begin presenting.", want: true},
+		{name: "spoken correction", task: "Wait, go back to the Overview.", want: true},
+		{name: "polite switch", task: "Could you please switch to the Risks tab?", want: true},
+		{name: "named click", task: "Click the Acknowledge alert button now.", want: true},
+		{name: "open with article", task: "Open the launch review and present it.", want: true},
+		{name: "share screen", task: "Please share your screen.", want: true},
+		{name: "incomplete navigation", task: "Wait, go back to the.", want: false},
+		{name: "incomplete click", task: "Click the.", want: false},
+		{name: "semantic summary", task: "Summarize the launch review.", want: false},
+		{name: "descriptive open", task: "Open questions remain in the review.", want: false},
+		{name: "future condition", task: "If an alert appears, click Acknowledge.", want: false},
+		{name: "watch condition", task: "Watch for the warning, then go to Overview.", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			intent, ok := interaction.ExplicitVisualAuthority(test.task)
+			if ok != test.want {
+				t.Fatalf("ExplicitVisualAuthority(%q) = %q, %t", test.task, intent, ok)
+			}
+			if ok && intent != interaction.VisualIntentDirect {
+				t.Fatalf("explicit intent = %q, want direct", intent)
+			}
+		})
+	}
+}
+
+func TestExplicitVisualMonitorRequiresNamedFutureConditionAndVisibleOperation(t *testing.T) {
+	tests := []struct {
+		name string
+		task string
+		want bool
+	}{
+		{
+			name: "condition before pronoun action",
+			task: "Present the launch overview. If a deployment alert appears, acknowledge it immediately without stopping your presentation.",
+			want: true,
+		},
+		{name: "punctuation free ASR", task: "Present the overview and if an alert appears acknowledge it.", want: true},
+		{name: "action before condition", task: "Silently acknowledge an alert if it appears.", want: true},
+		{name: "watch then navigate", task: "Watch for the warning, then go to Overview.", want: true},
+		{name: "semantic callback", task: "Call me if the deployment succeeds.", want: false},
+		{name: "semantic explanation", task: "Explain how to acknowledge an alert if it appears.", want: false},
+		{name: "condition without operation", task: "Tell me if an alert appears.", want: false},
+		{name: "direct without future condition", task: "Acknowledge the alert now.", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := interaction.ExplicitVisualMonitor(test.task); got != test.want {
+				t.Fatalf("ExplicitVisualMonitor(%q) = %t, want %t", test.task, got, test.want)
+			}
+		})
+	}
+}
+
+func TestExplicitVisualActionCountWaitsForCompleteOrderedCommands(t *testing.T) {
+	tests := []struct {
+		task string
+		want int
+	}{
+		{task: "Open the launch review.", want: 1},
+		{task: "Open the launch review share.", want: 1},
+		{task: "Open the launch review, share your.", want: 1},
+		{task: "Open the launch review, share your screen.", want: 2},
+		{task: "Open the launch review, share your screen, and tell everyone the latest conversion rate.", want: 2},
+		{task: "Go to Summary and begin presenting.", want: 1},
+		{task: "If an alert appears, click Acknowledge.", want: 0},
+		{task: "Open questions remain in the review.", want: 0},
+	}
+	for _, test := range tests {
+		if got := interaction.ExplicitVisualActionCount(test.task); got != test.want {
+			t.Fatalf("ExplicitVisualActionCount(%q) = %d, want %d", test.task, got, test.want)
+		}
+	}
+	task := "Open the launch review, share your screen, and tell everyone the latest conversion rate."
+	if got, ok := interaction.ExplicitVisualActionAt(task, 0); !ok || got != "open the launch review" {
+		t.Fatalf("first explicit action = %q, %t", got, ok)
+	}
+	if got, ok := interaction.ExplicitVisualActionAt(task, 1); !ok || got != "share your screen" {
+		t.Fatalf("second explicit action = %q, %t", got, ok)
+	}
+	if got, ok := interaction.ExplicitVisualActionAt(task, 2); ok || got != "" {
+		t.Fatalf("semantic tail became explicit action %q, %t", got, ok)
+	}
+}
+
+func TestImmediateNonvisualClauseRequiresEvidenceThatItIsDueNow(t *testing.T) {
+	tests := []struct {
+		task string
+		want string
+	}{
+		{task: "Present the launch overview. If an alert appears, acknowledge it.", want: "present the launch overview"},
+		{task: "Present the overview and if an alert appears acknowledge it.", want: "present the overview"},
+		{task: "Present the launch overview if an alert appears, acknowledge it without stopping your presentation.", want: "present the launch overview"},
+		{task: "Open the launch review, share your screen, and tell everyone the latest conversion rate.", want: "tell everyone the latest conversion rate"},
+		{task: "Go to Summary and begin presenting.", want: "begin presenting"},
+		{task: "Open the review and present it.", want: "present it"},
+		{task: "Open the review and tell everyone the latest.", want: ""},
+		{task: "Call me if the deployment succeeds.", want: ""},
+		{task: "If an alert appears, acknowledge it while presenting.", want: ""},
+		{task: "Watch for an alert and acknowledge it.", want: ""},
+	}
+	for _, test := range tests {
+		if got := interaction.ImmediateNonvisualClause(test.task); got != test.want {
+			t.Fatalf("ImmediateNonvisualClause(%q) = %q, want %q", test.task, got, test.want)
+		}
+	}
+}
+
+// A turn-projection model may see only what was available at the instant of
+// the decision. Prompted on hindsight - the final transcript, what the user
+// said next, whether the turn did end - it yields a judgement that cannot be
+// reproduced online, which is the standard trap for a learned endpointer.
+//
+// This test is what makes that a property rather than an intention: it drives
+// a projection at a moment when future text exists in the test's own scope and
+// asserts that none of it reached the model.
+func TestProjectionSeesOnlyDecisionTimeInformation(t *testing.T) {
+	decider := &recordingDecider{answer: "finished", confidence: 0.9}
+	projection, err := interaction.NewModelProjection(decider, interaction.ProjectionOptions{
+		MinimumSilence: 50 * time.Millisecond, Confidence: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("new projection: %v", err)
+	}
+
+	const heardSoFar = "transfer forty dollars to"
+	const whatCameNext = "account 8815 please, the one ending in five"
+	const finalTranscript = heardSoFar + " " + whatCameNext
+
+	result := projection.Project(interaction.Context{
+		NowNS: uint64(3 * time.Second),
+		Duplex: session.Snapshot{
+			Phase: session.PhaseListening, UserSpeechStartedNS: uint64(time.Second),
+		},
+		Revision: interaction.Revision{
+			ID: 7, StableText: heardSoFar, SilenceNS: uint64(150 * time.Millisecond),
+		},
+	})
+	if !result.Ending {
+		t.Fatalf("expected a projection, got %+v", result)
+	}
+
+	decisions := decider.decisions()
+	if len(decisions) != 1 {
+		t.Fatalf("expected one model call, got %d", len(decisions))
+	}
+	shown := decisions[0].Prompt + "\n" + decisions[0].Evidence
+	if !strings.Contains(shown, heardSoFar) {
+		t.Fatal("the model must see what was actually heard")
+	}
+	for _, hindsight := range []string{whatCameNext, finalTranscript, "8815"} {
+		if strings.Contains(shown, hindsight) {
+			t.Fatalf("the model was shown information from after the decision: %q", hindsight)
+		}
+	}
+	// Neither may it be told the answer in another form.
+	for _, leak := range []string{"the turn did end", "final transcript", "ground truth"} {
+		if strings.Contains(strings.ToLower(shown), leak) {
+			t.Fatalf("the prompt leaks hindsight: %q", leak)
+		}
+	}
+}
+
+func TestOverlapClassifierSeesTheConnectedSpeechAndCurrentRevisionOnly(t *testing.T) {
+	decider := &recordingDecider{answer: string(interaction.OverlapDirected), confidence: 0.9}
+	classifier, err := interaction.NewModelOverlapClassifier(decider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const agentSpeech = "I cannot turn on the study lamp."
+	const heard = "Actually, what"
+	const future = "financial goals I should set"
+	decision := interaction.Context{
+		Revision: interaction.Revision{ID: 7, StableText: heard},
+		Situation: &interaction.Situation{
+			Contract:      "You are Nova, the room assistant.",
+			AgentSpeaking: true,
+			AgentSaying:   agentSpeech,
+			Heard:         heard + " " + future,
+		},
+	}
+	if got := classifier.Classify(context.Background(), decision); got != interaction.OverlapDirected {
+		t.Fatalf("overlap classification = %q", got)
+	}
+	decisions := decider.decisions()
+	if len(decisions) != 1 {
+		t.Fatalf("overlap policy calls = %d, want 1", len(decisions))
+	}
+	shown := decisions[0].Prompt + "\n" + decisions[0].Evidence
+	for _, current := range []string{
+		agentSpeech, heard, "You are Nova", "strict closed class", "topic-shift opener",
+		"Topical unrelatedness alone", "role, or title used as a vocative",
+		"explicit identity in the agent contract takes precedence",
+		"let's switch", "by the way", "before I forget", "oh but", "I know", "I think so",
+	} {
+		if !strings.Contains(shown, current) {
+			t.Fatalf("overlap decision lost current evidence %q: %s", current, shown)
+		}
+	}
+	if strings.Contains(shown, future) {
+		t.Fatalf("overlap decision was shown future revision text %q", future)
+	}
+}
+
+func TestOverlapClassifierRevalidatesTheBackchannelSemanticContract(t *testing.T) {
+	tests := []struct {
+		name    string
+		heard   string
+		answers []string
+		want    interaction.OverlapEvidence
+		calls   int
+	}{
+		{
+			name:  "proposition cannot inhabit the one-or-two-token type",
+			heard: "Oh, it's starting.",
+			answers: []string{
+				string(interaction.OverlapBackchannel), string(interaction.OverlapSide),
+			},
+			want: interaction.OverlapSide, calls: 2,
+		},
+		{
+			name:  "language-dependent short continuer receives exact validation",
+			heard: "Yes, yeah.",
+			answers: []string{
+				string(interaction.OverlapBackchannel), "valid_backchannel",
+			},
+			want: interaction.OverlapBackchannel, calls: 2,
+		},
+		{
+			name:  "short proposition is reclassified without the invalid label",
+			heard: "I know.",
+			answers: []string{
+				string(interaction.OverlapBackchannel), "not_backchannel",
+				string(interaction.OverlapDirected),
+			},
+			want: interaction.OverlapDirected, calls: 3,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			decider := &sequencedDecider{answers: append([]string(nil), test.answers...)}
+			classifier, err := interaction.NewModelOverlapClassifier(decider)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := classifier.Classify(context.Background(), interaction.Context{
+				Revision: interaction.Revision{ID: 1, StableText: test.heard},
+				Situation: &interaction.Situation{
+					AgentSpeaking: true, AgentSaying: "I cannot turn on the study lamp.",
+				},
+			})
+			if got != test.want {
+				t.Fatalf("classification = %q, want %q", got, test.want)
+			}
+			decisions := decider.decisions()
+			if len(decisions) != test.calls {
+				t.Fatalf("policy calls = %d, want %d: %+v", len(decisions), test.calls, decisions)
+			}
+			if test.want != interaction.OverlapBackchannel {
+				last := decisions[len(decisions)-1]
+				for _, option := range last.Options {
+					if option == string(interaction.OverlapBackchannel) {
+						t.Fatalf("semantic retry retained the invalid label: %+v", last.Options)
+					}
+				}
+			} else {
+				validation := decisions[1].Prompt
+				for _, contract := range []string{
+					"punctuation and capitalization", "one or two", "uh-huh", "'yeah but'",
+				} {
+					if !strings.Contains(validation, contract) {
+						t.Fatalf("backchannel validation lost %q: %s", contract, validation)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProjectionWaitsForSilenceAndCachesPerRevision(t *testing.T) {
+	decider := &recordingDecider{answer: "finished", confidence: 0.95}
+	projection, err := interaction.NewModelProjection(decider, interaction.ProjectionOptions{
+		MinimumSilence: 100 * time.Millisecond, Confidence: 0.7,
+	})
+	if err != nil {
+		t.Fatalf("new projection: %v", err)
+	}
+	speaking := interaction.Context{
+		Duplex:   session.Snapshot{UserSpeaking: true, Phase: session.PhaseUserSpeaking},
+		Revision: interaction.Revision{ID: 1, StableText: "hello", SilenceNS: uint64(time.Second)},
+	}
+	if projection.Project(speaking).Ending {
+		t.Fatal("a projection must not fire while the user is audible")
+	}
+	tooEarly := interaction.Context{
+		Revision: interaction.Revision{ID: 2, StableText: "hello", SilenceNS: uint64(10 * time.Millisecond)},
+	}
+	if projection.Project(tooEarly).Ending {
+		t.Fatal("a projection must wait for enough silence to judge")
+	}
+	if len(decider.decisions()) != 0 {
+		t.Fatal("the cheap checks must answer before a model is called")
+	}
+
+	ready := interaction.Context{
+		Revision: interaction.Revision{ID: 3, StableText: "hello", SilenceNS: uint64(200 * time.Millisecond)},
+	}
+	if !projection.Project(ready).Ending {
+		t.Fatal("expected a projection once there is enough silence")
+	}
+	if !projection.Project(ready).Ending {
+		t.Fatal("the same revision must give the same answer")
+	}
+	if len(decider.decisions()) != 1 {
+		t.Fatalf("one revision is one decision, got %d calls", len(decider.decisions()))
+	}
+}
+
+func TestLowConfidenceProjectionsDoNotEndTurns(t *testing.T) {
+	decider := &recordingDecider{answer: "finished", confidence: 0.4}
+	projection, _ := interaction.NewModelProjection(decider, interaction.ProjectionOptions{
+		MinimumSilence: 10 * time.Millisecond, Confidence: 0.8,
+	})
+	result := projection.Project(interaction.Context{
+		Revision: interaction.Revision{ID: 1, StableText: "and then", SilenceNS: uint64(time.Second)},
+	})
+	if result.Ending {
+		t.Fatal("cutting the user off on a guess is worse than waiting for silence")
+	}
+}
+
+func TestAFailingProjectionModelFallsBackToSilence(t *testing.T) {
+	decider := &recordingDecider{err: context.DeadlineExceeded}
+	projection, _ := interaction.NewModelProjection(decider, interaction.ProjectionOptions{
+		MinimumSilence: 10 * time.Millisecond,
+	})
+	result := projection.Project(interaction.Context{
+		Revision: interaction.Revision{ID: 1, StableText: "hello", SilenceNS: uint64(time.Second)},
+	})
+	if result.Ending {
+		t.Fatal("a failing policy model must not end a turn")
+	}
+}
+
+func TestBackchannelAnswersCheaplyMostOfTheTime(t *testing.T) {
+	decider := &recordingDecider{answer: "acknowledge", confidence: 0.9}
+	backchannel, err := interaction.NewModelBackchannel(decider, interaction.BackchannelOptions{
+		MinimumSpeech: time.Second, MinimumInterval: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("new backchannel: %v", err)
+	}
+	ctx := context.Background()
+
+	// Not listening: no model call.
+	if decision, _ := backchannel.Decide(ctx, interaction.Context{
+		Duplex:   session.Snapshot{AgentSpeaking: true, Phase: session.PhaseAgentSpeaking},
+		Revision: interaction.Revision{ID: 1, StableText: "hello"},
+	}); decision.Choice != interaction.BackchannelNone {
+		t.Fatal("the agent must not interject over itself")
+	}
+	// The user has only just started: no model call.
+	if decision, _ := backchannel.Decide(ctx, interaction.Context{
+		NowNS:    uint64(500 * time.Millisecond),
+		Duplex:   session.Snapshot{UserSpeaking: true, UserSpeechStartedNS: uint64(400 * time.Millisecond)},
+		Revision: interaction.Revision{ID: 2, StableText: "so"},
+	}); decision.Choice != interaction.BackchannelNone {
+		t.Fatal("a continuer half a second in is an interruption")
+	}
+	if len(decider.decisions()) != 0 {
+		t.Fatalf("the cheap checks must answer first, got %d model calls", len(decider.decisions()))
+	}
+
+	listening := interaction.Context{
+		NowNS:    uint64(5 * time.Second),
+		Duplex:   session.Snapshot{UserSpeaking: true, UserSpeechStartedNS: uint64(time.Second)},
+		Revision: interaction.Revision{ID: 3, StableText: "so I was thinking about the account"},
+	}
+	decision, err := backchannel.Decide(ctx, listening)
+	if err != nil {
+		t.Fatalf("decide: %v", err)
+	}
+	if decision.Choice != interaction.BackchannelAcknowledge || decision.Token != "mm-hm" {
+		t.Fatalf("unexpected decision %+v", decision)
+	}
+
+	// Immediately after, the interval check answers without a model.
+	before := len(decider.decisions())
+	next := listening
+	next.NowNS = uint64(6 * time.Second)
+	next.Revision.ID = 4
+	if again, _ := backchannel.Decide(ctx, next); again.Choice != interaction.BackchannelNone {
+		t.Fatal("a continuer every second is not attentiveness")
+	}
+	if len(decider.decisions()) != before {
+		t.Fatal("the interval check must answer without a model call")
+	}
+}
+
+func TestBackchannelFailureIsSilenceNotAnError(t *testing.T) {
+	decider := &recordingDecider{err: context.DeadlineExceeded}
+	backchannel, _ := interaction.NewModelBackchannel(decider, interaction.BackchannelOptions{
+		MinimumSpeech: time.Millisecond,
+	})
+	decision, err := backchannel.Decide(context.Background(), interaction.Context{
+		NowNS:    uint64(time.Second),
+		Duplex:   session.Snapshot{UserSpeaking: true, UserSpeechStartedNS: 1},
+		Revision: interaction.Revision{ID: 1, StableText: "hello"},
+	})
+	if decision.Choice != interaction.BackchannelNone {
+		t.Fatal("silence is always a safe answer when the policy model fails")
+	}
+	if err == nil {
+		t.Fatal("the failure must still be reported so it can be seen")
+	}
+}
+
+func TestPolicyModelsRequireADecider(t *testing.T) {
+	if _, err := interaction.NewModelBackchannel(nil, interaction.BackchannelOptions{}); err == nil {
+		t.Fatal("a model-backed policy needs a model")
+	}
+	if _, err := interaction.NewModelProjection(nil, interaction.ProjectionOptions{}); err == nil {
+		t.Fatal("a model-backed policy needs a model")
+	}
+	if _, err := interaction.NewModelOverlapClassifier(nil); err == nil {
+		t.Fatal("a model-backed overlap classifier needs a model")
+	}
+}
+
+// answering is a decider that returns one option, with or without a measured
+// confidence, so both halves of the asymmetry can be tested.
+type answering struct {
+	option     string
+	confidence float64
+	measured   bool
+}
+
+func (answering) Name() string { return "answering" }
+func (decider answering) Decide(context.Context, interaction.Decision) (interaction.Outcome, error) {
+	return interaction.Outcome{
+		Option: decider.option, Confidence: decider.confidence, Measured: decider.measured,
+	}, nil
+}
+
+// An endpoint that fires early cuts a person off mid-sentence, so it needs
+// evidence. Holding one open costs latency the hold already bounds, so it does
+// not - and requiring the same evidence for both spends the cheap failure to
+// avoid the expensive one.
+func TestEndingEarlyNeedsEvidenceAndWaitingDoesNot(t *testing.T) {
+	unsure := interaction.ProjectionOptions{Confidence: 0.7, MinimumSilence: time.Millisecond}
+	decision := interaction.Context{
+		Revision: interaction.Revision{ID: 1, StableText: "the order id is", SilenceNS: uint64(time.Second)},
+	}
+
+	early, err := interaction.NewModelProjection(answering{option: "finished", confidence: 0.4, measured: true}, unsure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if early.Project(decision).Ending {
+		t.Error("a poorly evidenced endpoint must not cut the user off")
+	}
+
+	waiting, err := interaction.NewModelProjection(answering{option: "continuing", confidence: 0.4, measured: true}, unsure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !waiting.Project(decision).Continuing {
+		t.Error("waiting a moment longer does not need the same evidence")
+	}
+}
+
+// A server that returns no log probabilities has said nothing about how sure
+// the model was. Reading that as "not sure enough" discards a decision the
+// model actually made - which is how turn projection ran for months without
+// ever firing.
+func TestAnUnmeasuredConfidenceIsNotALowOne(t *testing.T) {
+	options := interaction.ProjectionOptions{Confidence: 0.7, MinimumSilence: time.Millisecond}
+	policy, err := interaction.NewModelProjection(answering{option: "finished"}, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected := policy.Project(interaction.Context{
+		Revision: interaction.Revision{ID: 1, StableText: "that is all", SilenceNS: uint64(time.Second)},
+	})
+	if !projected.Ending {
+		t.Fatalf("an unmeasured answer is still an answer: %+v", projected)
+	}
+}

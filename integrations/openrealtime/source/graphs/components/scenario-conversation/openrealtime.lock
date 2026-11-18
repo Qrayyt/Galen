@@ -1,0 +1,269 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "acoustic.EndpointPolicy",
+      "identity": {
+        "name": "acoustic.EndpointPolicy",
+        "revision": 2,
+        "digest": "sha256:f6a5e79f5fd0d6c45c516f756c6a2052d90c2b0fdb1f4f4bf5ff2d7b52ecf6e9"
+      }
+    },
+    {
+      "reference": "acoustic.EnergyAdmission",
+      "identity": {
+        "name": "acoustic.EnergyAdmission",
+        "revision": 1,
+        "digest": "sha256:cb0f3581ed3925d4153c55bc0d9034ad2caf9c706d0fdce09b57e3ce03f52f4a"
+      }
+    },
+    {
+      "reference": "action.AuthorizedCallCommit",
+      "identity": {
+        "name": "action.AuthorizedCallCommit",
+        "revision": 4,
+        "digest": "sha256:370afcb26b5c434c69fe8b7896ad4a66f45c7eac221add2d0ee00951af9c5feb"
+      }
+    },
+    {
+      "reference": "action.ClientToolResultIngress",
+      "identity": {
+        "name": "action.ClientToolResultIngress",
+        "revision": 2,
+        "digest": "sha256:4125129d516e79f721acd21030f080395002060f1648a5e584054401b0394fb5"
+      }
+    },
+    {
+      "reference": "action.ClientToolResultJoin",
+      "identity": {
+        "name": "action.ClientToolResultJoin",
+        "revision": 1,
+        "digest": "sha256:b52aee91777a2a08ae607ecf5d1af9b3a0d5d4df23574e92b4f39f1b7f0984c8"
+      }
+    },
+    {
+      "reference": "action.Dispatch",
+      "identity": {
+        "name": "action.Dispatch",
+        "revision": 3,
+        "digest": "sha256:9b5840098e40fc35cb86f758e417460ce2b7d4254a0d1b0ab21f74786c96027a"
+      }
+    },
+    {
+      "reference": "action.LedgerCommit",
+      "identity": {
+        "name": "action.LedgerCommit",
+        "revision": 2,
+        "digest": "sha256:d0936589c792953801bface1a615434486d6523bb2d05ae967e04f7d453f0f96"
+      }
+    },
+    {
+      "reference": "action.NormalizeArguments",
+      "identity": {
+        "name": "action.NormalizeArguments",
+        "revision": 1,
+        "digest": "sha256:4fec14f995eef5b280e571498b4565f1621ae54254ef0a1e24d02b17a510c065"
+      }
+    },
+    {
+      "reference": "action.ToolLookup",
+      "identity": {
+        "name": "action.ToolLookup",
+        "revision": 2,
+        "digest": "sha256:944908a3b1db1151ad6d3d85f575b7b1b7402f7d91c1c6fed05349c1da1d59ab"
+      }
+    },
+    {
+      "reference": "action.ToolResultCommit",
+      "identity": {
+        "name": "action.ToolResultCommit",
+        "revision": 4,
+        "digest": "sha256:9fc6057e1e47de87b14ae0ff7ec43df59d81240a4ae9ac93e8e9eca89094de95"
+      }
+    },
+    {
+      "reference": "authority.Confirmation",
+      "identity": {
+        "name": "authority.Confirmation",
+        "revision": 3,
+        "digest": "sha256:152370cb35f3f2bf8273bedf3ccee0ba893fef92dbd10225cf102dadf4def775"
+      }
+    },
+    {
+      "reference": "authority.ProposalAdmission",
+      "identity": {
+        "name": "authority.ProposalAdmission",
+        "revision": 3,
+        "digest": "sha256:ad0d65d84433491b5ee882a79dc8593b84a157f346863a3340261dd3ea8e47fb"
+      }
+    },
+    {
+      "reference": "authority.ProvenanceJoin",
+      "identity": {
+        "name": "authority.ProvenanceJoin",
+        "revision": 2,
+        "digest": "sha256:43a1ac4dad1242b31225b6252b093f94fca6f32172d936877f9b468acc648bc3"
+      }
+    },
+    {
+      "reference": "authority.TargetFence",
+      "identity": {
+        "name": "authority.TargetFence",
+        "revision": 2,
+        "digest": "sha256:d146c02a24175e70b861ef4f3ae5e0134e603e5e65e021a859b23995e61bba2d"
+      }
+    },
+    {
+      "reference": "cognition.TextModel",
+      "identity": {
+        "name": "cognition.TextModel",
+        "revision": 3,
+        "digest": "sha256:1596e62d7da68f20107787c8b627b1cc32ba6ff5f3f0c1b3f4f3a5a7a7bf52df"
+      }
+    },
+    {
+      "reference": "flow.Mux",
+      "identity": {
+        "name": "flow.Mux",
+        "revision": 1,
+        "digest": "sha256:91976286e56562ebb11b6598d20c70394dae476d324ac209f3e775ec4b89b6fc"
+      }
+    },
+    {
+      "reference": "flow.Tee",
+      "identity": {
+        "name": "flow.Tee",
+        "revision": 1,
+        "digest": "sha256:54c309b4fa80950ca8815b63de7bb84947c9aa890fc3f638cd6a5afc574e40d6"
+      }
+    },
+    {
+      "reference": "ingress.UserContent",
+      "identity": {
+        "name": "ingress.UserContent",
+        "revision": 1,
+        "digest": "sha256:5c667d597ba98724d46b318fe57a5c1a99a508921d9544839a6e776fa5e0b286"
+      }
+    },
+    {
+      "reference": "interaction.ControlSerializationQuarantine",
+      "identity": {
+        "name": "interaction.ControlSerializationQuarantine",
+        "revision": 2,
+        "digest": "sha256:f5d773fcdfe5fe831b37e853185bea03ef86276f5b30999532d8cecb33654f62"
+      }
+    },
+    {
+      "reference": "interaction.ModelResultCommit",
+      "identity": {
+        "name": "interaction.ModelResultCommit",
+        "revision": 3,
+        "digest": "sha256:c3fdf3b43e31f4409fa33a513a37690c15167a131d4dd660e56ea2bc91c07a12"
+      }
+    },
+    {
+      "reference": "interaction.OverlapBargeIn",
+      "identity": {
+        "name": "interaction.OverlapBargeIn",
+        "revision": 12,
+        "digest": "sha256:f3d3ec42061a16d386cdb990845e1f39447d3d855035b80dd53f1114319b7689"
+      }
+    },
+    {
+      "reference": "interaction.PostCommitSilence",
+      "identity": {
+        "name": "interaction.PostCommitSilence",
+        "revision": 2,
+        "digest": "sha256:b1daf9ce76057f2c62b1688703845e9fa7c77b152922179773571cb231bc7771"
+      }
+    },
+    {
+      "reference": "interaction.SegmentPreparedText",
+      "identity": {
+        "name": "interaction.SegmentPreparedText",
+        "revision": 2,
+        "digest": "sha256:ad7fdc3e85e47f1aa24e6f23745b47f708f358a0eac028b5711fb7c2e2dda480"
+      }
+    },
+    {
+      "reference": "media.ResolveAttachment",
+      "identity": {
+        "name": "media.ResolveAttachment",
+        "revision": 1,
+        "digest": "sha256:c6492ff0c32c1050f929b37b6812dd1eefe688f538d4b9ddeab5da52e94dbd02"
+      }
+    },
+    {
+      "reference": "media.RetainedMedia",
+      "identity": {
+        "name": "media.RetainedMedia",
+        "revision": 1,
+        "digest": "sha256:6ae581ec85b07c34f158140cd4459ef48bacbb494e8e9f65bce98e4a60884ee9"
+      }
+    },
+    {
+      "reference": "perception.ASR",
+      "identity": {
+        "name": "perception.ASR",
+        "revision": 2,
+        "digest": "sha256:eb5702c5fdc955f766e04ea767dde51c3d740580c6b1e368a99f335a963054a6"
+      }
+    },
+    {
+      "reference": "perception.FinalObservationGate",
+      "identity": {
+        "name": "perception.FinalObservationGate",
+        "revision": 2,
+        "digest": "sha256:aa77a77eed78028bc77a0666a3a350e609e19514ad744b4839c2fcd3d086ae71"
+      }
+    },
+    {
+      "reference": "policy.SemanticAdmission",
+      "identity": {
+        "name": "policy.SemanticAdmission",
+        "revision": 10,
+        "digest": "sha256:7e515f634a5ad8d72f2d2edd4f4f7181ca4c6663d74a49ac3e1ca067099d946f"
+      }
+    },
+    {
+      "reference": "policy.SessionInvocation",
+      "identity": {
+        "name": "policy.SessionInvocation",
+        "revision": 1,
+        "digest": "sha256:544492049aafeb5e881ae9a8e54b34c107861d4281ca73cfd90f64524e26f968"
+      }
+    },
+    {
+      "reference": "speech.Playback",
+      "identity": {
+        "name": "speech.Playback",
+        "revision": 2,
+        "digest": "sha256:4a8f49c20ba366678fb5ed120130e34b6d8689923c3feb055cf076bafcdb598e"
+      }
+    },
+    {
+      "reference": "speech.TTS",
+      "identity": {
+        "name": "speech.TTS",
+        "revision": 1,
+        "digest": "sha256:837f0b82530c0bf43db41eed92301c33908f360451bd2bb389e0161235256833"
+      }
+    },
+    {
+      "reference": "state.ObservationCommit",
+      "identity": {
+        "name": "state.ObservationCommit",
+        "revision": 2,
+        "digest": "sha256:c66bb9dccc83f20e053bf6bdd0289bd46d185718ff0f458c00eca1533bcd5b35"
+      }
+    },
+    {
+      "reference": "state.TrajectoryStore",
+      "identity": {
+        "name": "state.TrajectoryStore",
+        "revision": 2,
+        "digest": "sha256:b3d813911f931b5e61b6a2edb782ad25a3d4ffe6e256b8a713a1e61c1b2dead7"
+      }
+    }
+  ]
+}

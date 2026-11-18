@@ -1,0 +1,37 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "cognition.TextModel",
+      "identity": {
+        "name": "cognition.TextModel",
+        "revision": 3,
+        "digest": "sha256:1596e62d7da68f20107787c8b627b1cc32ba6ff5f3f0c1b3f4f3a5a7a7bf52df"
+      }
+    },
+    {
+      "reference": "flow.Tee",
+      "identity": {
+        "name": "flow.Tee",
+        "revision": 1,
+        "digest": "sha256:54c309b4fa80950ca8815b63de7bb84947c9aa890fc3f638cd6a5afc574e40d6"
+      }
+    },
+    {
+      "reference": "interaction.ControlSerializationQuarantine",
+      "identity": {
+        "name": "interaction.ControlSerializationQuarantine",
+        "revision": 2,
+        "digest": "sha256:f5d773fcdfe5fe831b37e853185bea03ef86276f5b30999532d8cecb33654f62"
+      }
+    },
+    {
+      "reference": "interaction.SegmentPreparedText",
+      "identity": {
+        "name": "interaction.SegmentPreparedText",
+        "revision": 2,
+        "digest": "sha256:ad7fdc3e85e47f1aa24e6f23745b47f708f358a0eac028b5711fb7c2e2dda480"
+      }
+    }
+  ]
+}

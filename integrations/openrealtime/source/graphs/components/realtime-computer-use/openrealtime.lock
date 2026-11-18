@@ -1,0 +1,213 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "action.AuthorizedCallCommit",
+      "identity": {
+        "name": "action.AuthorizedCallCommit",
+        "revision": 4,
+        "digest": "sha256:370afcb26b5c434c69fe8b7896ad4a66f45c7eac221add2d0ee00951af9c5feb"
+      }
+    },
+    {
+      "reference": "action.Dispatch",
+      "identity": {
+        "name": "action.Dispatch",
+        "revision": 3,
+        "digest": "sha256:9b5840098e40fc35cb86f758e417460ce2b7d4254a0d1b0ab21f74786c96027a"
+      }
+    },
+    {
+      "reference": "action.LedgerCommit",
+      "identity": {
+        "name": "action.LedgerCommit",
+        "revision": 2,
+        "digest": "sha256:d0936589c792953801bface1a615434486d6523bb2d05ae967e04f7d453f0f96"
+      }
+    },
+    {
+      "reference": "action.NormalizeArguments",
+      "identity": {
+        "name": "action.NormalizeArguments",
+        "revision": 1,
+        "digest": "sha256:4fec14f995eef5b280e571498b4565f1621ae54254ef0a1e24d02b17a510c065"
+      }
+    },
+    {
+      "reference": "action.RepetitionAdmission",
+      "identity": {
+        "name": "action.RepetitionAdmission",
+        "revision": 1,
+        "digest": "sha256:4c34f0aba37cfc67383b6d7e59d1322c4b14a567a2f73d7db1340016ce3349d0"
+      }
+    },
+    {
+      "reference": "action.ToolAdmission",
+      "identity": {
+        "name": "action.ToolAdmission",
+        "revision": 1,
+        "digest": "sha256:2af66e32908629f3144178455bbd2bb665c972bf8231acd0dea4891bb811f98d"
+      }
+    },
+    {
+      "reference": "action.ToolLookup",
+      "identity": {
+        "name": "action.ToolLookup",
+        "revision": 2,
+        "digest": "sha256:944908a3b1db1151ad6d3d85f575b7b1b7402f7d91c1c6fed05349c1da1d59ab"
+      }
+    },
+    {
+      "reference": "action.ToolResultCommit",
+      "identity": {
+        "name": "action.ToolResultCommit",
+        "revision": 4,
+        "digest": "sha256:9fc6057e1e47de87b14ae0ff7ec43df59d81240a4ae9ac93e8e9eca89094de95"
+      }
+    },
+    {
+      "reference": "authority.Confirmation",
+      "identity": {
+        "name": "authority.Confirmation",
+        "revision": 3,
+        "digest": "sha256:152370cb35f3f2bf8273bedf3ccee0ba893fef92dbd10225cf102dadf4def775"
+      }
+    },
+    {
+      "reference": "authority.ProposalAdmission",
+      "identity": {
+        "name": "authority.ProposalAdmission",
+        "revision": 3,
+        "digest": "sha256:ad0d65d84433491b5ee882a79dc8593b84a157f346863a3340261dd3ea8e47fb"
+      }
+    },
+    {
+      "reference": "authority.ProvenanceJoin",
+      "identity": {
+        "name": "authority.ProvenanceJoin",
+        "revision": 2,
+        "digest": "sha256:43a1ac4dad1242b31225b6252b093f94fca6f32172d936877f9b468acc648bc3"
+      }
+    },
+    {
+      "reference": "authority.TargetFence",
+      "identity": {
+        "name": "authority.TargetFence",
+        "revision": 2,
+        "digest": "sha256:d146c02a24175e70b861ef4f3ae5e0134e603e5e65e021a859b23995e61bba2d"
+      }
+    },
+    {
+      "reference": "cognition.TextModel",
+      "identity": {
+        "name": "cognition.TextModel",
+        "revision": 3,
+        "digest": "sha256:1596e62d7da68f20107787c8b627b1cc32ba6ff5f3f0c1b3f4f3a5a7a7bf52df"
+      }
+    },
+    {
+      "reference": "flow.Drop",
+      "identity": {
+        "name": "flow.Drop",
+        "revision": 1,
+        "digest": "sha256:03b27e94e4488594bce430b7deb5b27f0a42f6bebf69dd613ed98d742426aa7d"
+      }
+    },
+    {
+      "reference": "flow.Mux",
+      "identity": {
+        "name": "flow.Mux",
+        "revision": 1,
+        "digest": "sha256:91976286e56562ebb11b6598d20c70394dae476d324ac209f3e775ec4b89b6fc"
+      }
+    },
+    {
+      "reference": "flow.Tee",
+      "identity": {
+        "name": "flow.Tee",
+        "revision": 1,
+        "digest": "sha256:54c309b4fa80950ca8815b63de7bb84947c9aa890fc3f638cd6a5afc574e40d6"
+      }
+    },
+    {
+      "reference": "interaction.ControlSerializationQuarantine",
+      "identity": {
+        "name": "interaction.ControlSerializationQuarantine",
+        "revision": 2,
+        "digest": "sha256:f5d773fcdfe5fe831b37e853185bea03ef86276f5b30999532d8cecb33654f62"
+      }
+    },
+    {
+      "reference": "interaction.ModelResultCommit",
+      "identity": {
+        "name": "interaction.ModelResultCommit",
+        "revision": 3,
+        "digest": "sha256:c3fdf3b43e31f4409fa33a513a37690c15167a131d4dd660e56ea2bc91c07a12"
+      }
+    },
+    {
+      "reference": "policy.IntentDispositionProducer",
+      "identity": {
+        "name": "policy.IntentDispositionProducer",
+        "revision": 2,
+        "digest": "sha256:6924671570fc86be0b90d5711cc93dd8f9fc311bbdf03e8e3b1a9b2622db0c3e"
+      }
+    },
+    {
+      "reference": "policy.IntentDispositionRetry",
+      "identity": {
+        "name": "policy.IntentDispositionRetry",
+        "revision": 1,
+        "digest": "sha256:c15556d5f4f61a5defa5463500eb75d7403711b2cc446b1605c710cfe3785678"
+      }
+    },
+    {
+      "reference": "policy.IntentSettlement",
+      "identity": {
+        "name": "policy.IntentSettlement",
+        "revision": 3,
+        "digest": "sha256:25e24955d299b1b0e9c827a8a84a333ef89da458cf24adc4e6616bf6eda8852f"
+      }
+    },
+    {
+      "reference": "policy.RealtimeComputerUseActivation",
+      "identity": {
+        "name": "policy.RealtimeComputerUseActivation",
+        "revision": 15,
+        "digest": "sha256:a829f38214520ef1d8999bb94f5764bd9ef6e72f38d49aede2fc2fb1e3ed77bc"
+      }
+    },
+    {
+      "reference": "policy.RealtimeComputerUseCancellationCoordinator",
+      "identity": {
+        "name": "policy.RealtimeComputerUseCancellationCoordinator",
+        "revision": 5,
+        "digest": "sha256:49da736357b7011d3e814cc268b2068a912a7ca7215b9800996eeff4554541f7"
+      }
+    },
+    {
+      "reference": "policy.TemporalEvidenceAdmission",
+      "identity": {
+        "name": "policy.TemporalEvidenceAdmission",
+        "revision": 1,
+        "digest": "sha256:91e7c9bdd498945efc09eb34f0e29679c3de752bbb98455d33fa672a437a8ee8"
+      }
+    },
+    {
+      "reference": "state.RealtimeComputerUseObservationCommit",
+      "identity": {
+        "name": "state.RealtimeComputerUseObservationCommit",
+        "revision": 1,
+        "digest": "sha256:3f6a2ed8c53bf3e8ef8e4e645b25691332f3b6c6f93283a839b4bb03088cbd28"
+      }
+    },
+    {
+      "reference": "state.TrajectoryStore",
+      "identity": {
+        "name": "state.TrajectoryStore",
+        "revision": 2,
+        "digest": "sha256:b3d813911f931b5e61b6a2edb782ad25a3d4ffe6e256b8a713a1e61c1b2dead7"
+      }
+    }
+  ]
+}

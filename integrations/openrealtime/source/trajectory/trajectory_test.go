@@ -1,0 +1,799 @@
+package trajectory
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"testing"
+)
+
+func TestStoreAppendLifecycle(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	items := []Item{
+		{ID: "user-1", Kind: KindObservation, MonotonicNS: 1, Producer: Producer{Phase: PhaseUser}, Content: "Schedule lunch."},
+		{ID: "fast-1", Kind: KindAssistant, MonotonicNS: 2, CausalParentIDs: []string{"user-1"}, InvocationID: "inv-fast", Producer: Producer{Phase: PhaseFast, Provider: "local", Model: "qwen"}, Content: "I'll check.", Visibility: VisibilityPrepared},
+		{ID: "fast-played", Kind: KindAssistantState, MonotonicNS: 3, CausalParentIDs: []string{"fast-1"}, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "fast-1", Visibility: VisibilityPlayed}},
+		{ID: "tool-1", Kind: KindToolCall, MonotonicNS: 4, CausalParentIDs: []string{"fast-1"}, InvocationID: "inv-slow", Producer: Producer{Phase: PhaseSlow, Provider: "google", Model: "gemini"}, ToolCall: &ToolCall{CallID: "call-1", Name: "calendar.read", Arguments: json.RawMessage(`{"day":"Tuesday"}`)}},
+		{ID: "result-1", Kind: KindToolResult, MonotonicNS: 5, CausalParentIDs: []string{"tool-1"}, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "call-1", Name: "calendar.read", Output: json.RawMessage(`{"free":true}`)}},
+	}
+	if err := store.AppendBatch(items); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.Version != uint64(len(items)) || len(snapshot.Items) != len(items) {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+	snapshot.Items[0].Content = "mutated"
+	if got := store.Snapshot().Items[0].Content; got != "Schedule lunch." {
+		t.Fatalf("snapshot aliases store: %q", got)
+	}
+}
+
+func TestStoreAppendBatchIsAtomic(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	err := store.AppendBatch([]Item{
+		{ID: "one", Kind: KindObservation, Producer: Producer{Phase: PhaseUser}, Content: "one"},
+		{ID: "two", Kind: KindObservation, CausalParentIDs: []string{"missing"}, Producer: Producer{Phase: PhaseUser}, Content: "two"},
+	})
+	if err == nil {
+		t.Fatal("expected invalid parent error")
+	}
+	if got := store.Snapshot().Version; got != 0 {
+		t.Fatalf("partial append changed store version to %d", got)
+	}
+}
+
+func TestStoreAppendBatchAtRejectsStaleWriterAtomically(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{ID: "one", Kind: KindObservation, Producer: Producer{Phase: PhaseUser}, Content: "one"}); err != nil {
+		t.Fatal(err)
+	}
+	err := store.AppendBatchAt(0, []Item{{
+		ID: "stale", Kind: KindObservation, Producer: Producer{Phase: PhaseUser}, Content: "stale",
+	}})
+	if !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("got %v, want version conflict", err)
+	}
+	snapshot := store.Snapshot()
+	if snapshot.Version != 1 || len(snapshot.Items) != 1 || snapshot.Items[0].ID != "one" {
+		t.Fatalf("stale append changed trajectory: %#v", snapshot)
+	}
+	if err := store.AppendBatchAt(1, []Item{{
+		ID: "two", Kind: KindObservation, Producer: Producer{Phase: PhaseUser}, Content: "two",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStoreRejectsInvalidToolAndVisibilityTransitions(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{ID: "assistant", Kind: KindAssistant, Producer: Producer{Phase: PhaseFast}, Content: "hello", Visibility: VisibilityPlayed}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{ID: "cancel", Kind: KindAssistantState, MonotonicNS: 1, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "assistant", Visibility: VisibilityCancelled}}); err == nil {
+		t.Fatal("expected played content cancellation to fail")
+	}
+	if err := store.Append(Item{ID: "result", Kind: KindToolResult, MonotonicNS: 1, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "unknown", Name: "tool", Output: json.RawMessage(`true`)}}); err == nil {
+		t.Fatal("expected unknown tool result to fail")
+	}
+}
+
+func TestStoreValidatesOpaqueProviderState(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{ID: "bad", Kind: KindReasoning, Producer: Producer{Phase: PhaseSlow}, ProviderStateType: "gemini-content-v1", ProviderState: json.RawMessage(`{`)}); err == nil {
+		t.Fatal("expected malformed provider state to fail")
+	}
+	if err := store.Append(Item{ID: "opaque", Kind: KindReasoning, Producer: Producer{Phase: PhaseSlow}, ProviderStateType: "gemini-content-v1", ProviderState: json.RawMessage(`{"role":"model","parts":[]}`)}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStorePreservesStructuredEventMetadata(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	metadata := &EventMetadata{
+		EventID: "event-1", Type: "asr.revision", Source: "qwen3-asr",
+		Channel: "voice", OccurredNS: 10, CorrelationID: "session-1",
+	}
+	if err := store.Append(Item{
+		ID: "observation", Kind: KindObservation, MonotonicNS: 20,
+		Producer: Producer{Phase: PhaseUser}, Content: "hello", Event: metadata,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metadata.Type = "mutated"
+	snapshot := store.Snapshot()
+	if snapshot.Items[0].Event.Type != "asr.revision" || snapshot.Items[0].Event.OccurredNS != 10 || snapshot.Items[0].MonotonicNS != 20 {
+		t.Fatalf("event occurrence and commit metadata changed: %#v", snapshot.Items[0])
+	}
+	snapshot.Items[0].Event.Source = "mutated"
+	if got := store.Snapshot().Items[0].Event.Source; got != "qwen3-asr" {
+		t.Fatalf("event metadata aliases snapshot: %q", got)
+	}
+	if err := store.Append(Item{
+		ID: "bad", Kind: KindAssistant, MonotonicNS: 21,
+		Producer: Producer{Phase: PhaseFast}, Content: "bad", Event: &EventMetadata{
+			EventID: "event-2", Type: "bad", Source: "bad", Channel: "bad",
+		},
+	}); err == nil {
+		t.Fatal("model output accepted external event metadata")
+	}
+}
+
+func TestAssistantVisibilityResolvesAppendOnlyPlaybackState(t *testing.T) {
+	t.Parallel()
+	snapshot := Snapshot{Items: []Item{
+		{ID: "prepared", Kind: KindAssistant, InvocationID: "inv-prepared", Producer: Producer{Phase: PhaseFast}, Content: "one"},
+		{ID: "queued", Kind: KindAssistant, InvocationID: "inv-queued", Producer: Producer{Phase: PhaseFast}, Content: "two"},
+		{ID: "queued-state", Kind: KindAssistantState, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "queued", Visibility: VisibilityQueued}},
+		{ID: "cancelled", Kind: KindAssistant, InvocationID: "inv-cancelled", Producer: Producer{Phase: PhaseFast}, Content: "three"},
+		{ID: "cancelled-state", Kind: KindAssistantState, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "cancelled", Visibility: VisibilityCancelled}},
+	}}
+
+	visibility := AssistantVisibility(snapshot)
+	if visibility["prepared"] != VisibilityPrepared || visibility["queued"] != VisibilityQueued || visibility["cancelled"] != VisibilityCancelled {
+		t.Fatalf("unexpected resolved visibility: %#v", visibility)
+	}
+	cancelled := CancelledAssistantInvocations(snapshot)
+	if _, ok := cancelled["inv-cancelled"]; !ok || len(cancelled) != 1 {
+		t.Fatalf("unexpected cancelled invocations: %#v", cancelled)
+	}
+}
+
+func TestToolProposalRequiresExactCausalPromotionBeforeResult(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	proposal := &ToolCall{CallID: "proposal-1", Name: "lookup", Arguments: json.RawMessage(`{"key":"x"}`)}
+	if err := store.Append(Item{
+		ID: "proposal", Kind: KindToolProposal, SourceRevision: 7, InvocationID: "run-1",
+		Producer: Producer{Phase: PhaseFast}, ToolCall: proposal,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{ID: "result", Kind: KindToolResult, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "proposal-1", Name: "lookup", Output: json.RawMessage(`true`)}}); err == nil {
+		t.Fatal("proposal accepted a tool result")
+	}
+	for _, test := range []struct {
+		name string
+		item Item
+	}{
+		{name: "missing causal promotion", item: Item{
+			ID: "call-unlinked", Kind: KindToolCall, SourceRevision: 7, InvocationID: "run-1",
+			Producer: Producer{Phase: PhaseRuntime}, ToolCall: proposal,
+		}},
+		{name: "changed arguments", item: Item{
+			ID: "call-mutated", Kind: KindToolCall, SourceRevision: 7, InvocationID: "run-1",
+			CausalParentIDs: []string{"proposal"}, Producer: Producer{Phase: PhaseRuntime},
+			ToolCall: &ToolCall{CallID: "proposal-1", Name: "lookup", Arguments: json.RawMessage(`{"key":"y"}`)},
+		}},
+		{name: "changed invocation", item: Item{
+			ID: "call-cross-run", Kind: KindToolCall, SourceRevision: 7, InvocationID: "run-2",
+			CausalParentIDs: []string{"proposal"}, Producer: Producer{Phase: PhaseRuntime}, ToolCall: proposal,
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := store.Append(test.item); err == nil {
+				t.Fatal("invalid proposal promotion was accepted")
+			}
+		})
+	}
+	promoted := Item{
+		ID: "call", Kind: KindToolCall, SourceRevision: 7, InvocationID: "run-1",
+		CausalParentIDs: []string{"proposal"}, Producer: Producer{Phase: PhaseRuntime}, ToolCall: proposal,
+	}
+	if err := store.Append(promoted); err != nil {
+		t.Fatalf("exact causal promotion failed: %v", err)
+	}
+	if err := store.Append(Item{
+		ID: "result-after-promotion", Kind: KindToolResult, SourceRevision: 7,
+		CausalParentIDs: []string{"call"}, Producer: Producer{Phase: PhaseTool},
+		ToolResult: &ToolResult{CallID: "proposal-1", Name: "lookup", Output: json.RawMessage(`true`)},
+	}); err != nil {
+		t.Fatalf("promoted call rejected its result: %v", err)
+	}
+}
+
+func TestToolIdentityScopesProviderCallIDByInvocation(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	call := func(run string) *ToolCall {
+		return &ToolCall{CallID: "provider-call", Name: "lookup", Arguments: json.RawMessage(`{"run":"` + run + `"}`)}
+	}
+	if err := store.AppendBatch([]Item{
+		{ID: "proposal-a", Kind: KindToolProposal, InvocationID: "run-a", Producer: Producer{Phase: PhaseSlow}, ToolCall: call("a")},
+		{ID: "call-a", Kind: KindToolCall, InvocationID: "run-a", CausalParentIDs: []string{"proposal-a"}, Producer: Producer{Phase: PhaseRuntime}, ToolCall: call("a")},
+		{ID: "proposal-b", Kind: KindToolProposal, InvocationID: "run-b", Producer: Producer{Phase: PhaseSlow}, ToolCall: call("b")},
+		{ID: "call-b", Kind: KindToolCall, InvocationID: "run-b", CausalParentIDs: []string{"proposal-b"}, Producer: Producer{Phase: PhaseRuntime}, ToolCall: call("b")},
+		{ID: "result-a", Kind: KindToolResult, InvocationID: "run-a", CausalParentIDs: []string{"call-a"}, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "provider-call", Name: "lookup", Output: json.RawMessage(`{"run":"a"}`)}},
+	}); err != nil {
+		t.Fatalf("append two invocation scopes: %v", err)
+	}
+
+	pending := UnresolvedToolCalls(store.Snapshot())
+	if len(pending) != 1 || pending[0].InvocationID != "run-b" || pending[0].ItemID != "call-b" {
+		t.Fatalf("result from run-a resolved the wrong provider call: %#v", pending)
+	}
+	matched, err := MatchToolResultBatch(store.Snapshot(), "run-b", []ToolResult{{
+		CallID: "provider-call", Name: "lookup", Output: json.RawMessage(`{"run":"b"}`),
+	}})
+	if err != nil {
+		t.Fatalf("match run-b result: %v", err)
+	}
+	if len(matched) != 1 || matched[0].Pending.ItemID != "call-b" || matched[0].Pending.InvocationID != "run-b" {
+		t.Fatalf("matched provider call from wrong invocation: %#v", matched)
+	}
+	if err := store.Append(Item{
+		ID: "result-b", Kind: KindToolResult, InvocationID: "run-b", CausalParentIDs: []string{"call-b"},
+		Producer: Producer{Phase: PhaseTool}, ToolResult: &matched[0].Result,
+	}); err != nil {
+		t.Fatalf("append run-b result: %v", err)
+	}
+	if pending := UnresolvedToolCalls(store.Snapshot()); len(pending) != 0 {
+		t.Fatalf("resolved scoped calls remained pending: %#v", pending)
+	}
+}
+
+func TestPromotedToolProposalIDsRequireExactScopedCausalPromotion(t *testing.T) {
+	t.Parallel()
+	call := func(arguments string) *ToolCall {
+		return &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(arguments)}
+	}
+	snapshot := Snapshot{Items: []Item{
+		{ID: "proposal-a", Kind: KindToolProposal, InvocationID: "run-a", SourceRevision: 3, ToolCall: call(`{"key":"a"}`)},
+		{ID: "call-a", Kind: KindToolCall, InvocationID: "run-a", SourceRevision: 3, CausalParentIDs: []string{"proposal-a"}, ToolCall: call(`{"key":"a"}`)},
+		{ID: "proposal-b", Kind: KindToolProposal, InvocationID: "run-b", SourceRevision: 4, ToolCall: call(`{"key":"b"}`)},
+		// Reusing the provider call ID in another invocation cannot promote
+		// proposal-b. Neither can a causally linked but mutated call.
+		{ID: "wrong-scope", Kind: KindToolCall, InvocationID: "run-a", SourceRevision: 4, CausalParentIDs: []string{"proposal-b"}, ToolCall: call(`{"key":"b"}`)},
+		{ID: "mutated", Kind: KindToolCall, InvocationID: "run-b", SourceRevision: 4, CausalParentIDs: []string{"proposal-b"}, ToolCall: call(`{"key":"changed"}`)},
+	}}
+	promoted := PromotedToolProposalIDs(snapshot)
+	if len(promoted) != 1 {
+		t.Fatalf("promoted proposal IDs = %#v", promoted)
+	}
+	if _, found := promoted["proposal-a"]; !found {
+		t.Fatalf("exact promotion was not recognized: %#v", promoted)
+	}
+}
+
+func TestToolIdentityRejectsSameInvocationReplayAndTamper(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	canonical := &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(`{"key":"x"}`)}
+	if err := store.AppendBatch([]Item{
+		{ID: "proposal", Kind: KindToolProposal, InvocationID: "run", Producer: Producer{Phase: PhaseSlow}, ToolCall: canonical},
+		{ID: "call", Kind: KindToolCall, InvocationID: "run", CausalParentIDs: []string{"proposal"}, Producer: Producer{Phase: PhaseRuntime}, ToolCall: canonical},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, item := range map[string]Item{
+		"proposal replay":    {ID: "proposal-replay", Kind: KindToolProposal, InvocationID: "run", Producer: Producer{Phase: PhaseSlow}, ToolCall: canonical},
+		"call replay":        {ID: "call-replay", Kind: KindToolCall, InvocationID: "run", Producer: Producer{Phase: PhaseRuntime}, ToolCall: canonical},
+		"result name tamper": {ID: "result-tamper", Kind: KindToolResult, InvocationID: "run", Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "shared", Name: "different", Output: json.RawMessage(`true`)}},
+		"forged invocation":  {ID: "result-forged", Kind: KindToolResult, InvocationID: "other", Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "shared", Name: "lookup", Output: json.RawMessage(`true`)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := store.Append(item); err == nil {
+				t.Fatal("invalid scoped replay or tamper was accepted")
+			}
+		})
+	}
+	result := Item{ID: "result", Kind: KindToolResult, InvocationID: "run", CausalParentIDs: []string{"call"}, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "shared", Name: "lookup", Output: json.RawMessage(`true`)}}
+	if err := store.Append(result); err != nil {
+		t.Fatalf("append canonical result: %v", err)
+	}
+	result.ID = "result-replay"
+	if err := store.Append(result); err == nil {
+		t.Fatal("same-invocation terminal replay was accepted")
+	}
+}
+
+func TestToolIdentityMissingInvocationIsCanonicalizedOrRejected(t *testing.T) {
+	t.Parallel()
+
+	legacyCompatible := NewStore()
+	if err := legacyCompatible.Append(Item{
+		ID: "call-a", Kind: KindToolCall, InvocationID: "run-a", Producer: Producer{Phase: PhaseSlow},
+		ToolCall: &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacyCompatible.Append(Item{
+		ID: "result-a", Kind: KindToolResult, Producer: Producer{Phase: PhaseTool},
+		ToolResult: &ToolResult{CallID: "shared", Name: "lookup", Output: json.RawMessage(`true`)},
+	}); err != nil {
+		t.Fatalf("unambiguous legacy result: %v", err)
+	}
+	snapshot := legacyCompatible.Snapshot()
+	if got := snapshot.Items[len(snapshot.Items)-1].InvocationID; got != "run-a" {
+		t.Fatalf("legacy result retained without canonical invocation: %q", got)
+	}
+	if err := legacyCompatible.Append(Item{
+		ID: "call-b", Kind: KindToolCall, InvocationID: "run-b", Producer: Producer{Phase: PhaseSlow},
+		ToolCall: &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+	}); err != nil {
+		t.Fatalf("later scoped provider ID reuse: %v", err)
+	}
+	pending := UnresolvedToolCalls(legacyCompatible.Snapshot())
+	if len(pending) != 1 || pending[0].InvocationID != "run-b" {
+		t.Fatalf("canonicalized legacy result changed scope after reuse: %#v", pending)
+	}
+
+	ambiguous := NewStore()
+	if err := ambiguous.AppendBatch([]Item{
+		{ID: "call-a", Kind: KindToolCall, InvocationID: "run-a", Producer: Producer{Phase: PhaseSlow}, ToolCall: &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(`{}`)}},
+		{ID: "call-b", Kind: KindToolCall, InvocationID: "run-b", Producer: Producer{Phase: PhaseSlow}, ToolCall: &ToolCall{CallID: "shared", Name: "lookup", Arguments: json.RawMessage(`{}`)}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for name, item := range map[string]Item{
+		"result":      {ID: "missing-result", Kind: KindToolResult, Producer: Producer{Phase: PhaseTool}, ToolResult: &ToolResult{CallID: "shared", Name: "lookup", Output: json.RawMessage(`true`)}},
+		"placeholder": {ID: "missing-placeholder", Kind: KindToolPlaceholder, Producer: Producer{Phase: PhaseRuntime}, ToolPlaceholder: &ToolPlaceholder{CallID: "shared", Name: "lookup", Reason: "interrupted"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := ambiguous.Append(item); err == nil {
+				t.Fatal("ambiguous invocation omission was accepted")
+			}
+		})
+	}
+	forged := Item{ID: "forged-placeholder", Kind: KindToolPlaceholder, InvocationID: "run-c", Producer: Producer{Phase: PhaseRuntime}, ToolPlaceholder: &ToolPlaceholder{CallID: "shared", Name: "lookup", Reason: "interrupted"}}
+	if err := ambiguous.Append(forged); err == nil {
+		t.Fatal("placeholder with forged invocation was accepted")
+	}
+}
+
+func TestLegacyUnscopedToolIdentityCannotBecomeAmbiguous(t *testing.T) {
+	t.Parallel()
+	for _, order := range []string{"legacy-first", "scoped-first"} {
+		t.Run(order, func(t *testing.T) {
+			store := NewStore()
+			firstInvocation, secondInvocation := "", "run-b"
+			if order == "scoped-first" {
+				firstInvocation, secondInvocation = "run-a", ""
+			}
+			if err := store.Append(Item{
+				ID: "first", Kind: KindToolCall, InvocationID: firstInvocation, Producer: Producer{Phase: PhaseSlow},
+				ToolCall: &ToolCall{CallID: "legacy", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Append(Item{
+				ID: "second", Kind: KindToolCall, InvocationID: secondInvocation, Producer: Producer{Phase: PhaseSlow},
+				ToolCall: &ToolCall{CallID: "legacy", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+			}); err == nil {
+				t.Fatal("unscoped identity was allowed to become ambiguous")
+			}
+		})
+	}
+}
+
+func TestToolIdentityConcurrentScopedResultsAndReplay(t *testing.T) {
+	t.Parallel()
+	const scopes = 64
+	store := NewStore()
+	calls := make([]Item, 0, scopes)
+	for index := 0; index < scopes; index++ {
+		run := fmt.Sprintf("run-%03d", index)
+		calls = append(calls, Item{
+			ID: "call-" + run, Kind: KindToolCall, InvocationID: run, Producer: Producer{Phase: PhaseSlow},
+			ToolCall: &ToolCall{CallID: "reused", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+		})
+	}
+	if err := store.AppendBatch(calls); err != nil {
+		t.Fatal(err)
+	}
+	errorsByRun := make(chan error, scopes)
+	var group sync.WaitGroup
+	for index := 0; index < scopes; index++ {
+		run := fmt.Sprintf("run-%03d", index)
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			errorsByRun <- store.Append(Item{
+				ID: "result-" + run, Kind: KindToolResult, InvocationID: run,
+				CausalParentIDs: []string{"call-" + run}, Producer: Producer{Phase: PhaseTool},
+				ToolResult: &ToolResult{CallID: "reused", Name: "lookup", Output: json.RawMessage(`true`)},
+			})
+		}()
+	}
+	group.Wait()
+	close(errorsByRun)
+	for err := range errorsByRun {
+		if err != nil {
+			t.Fatalf("concurrent scoped result: %v", err)
+		}
+	}
+	if pending := UnresolvedToolCalls(store.Snapshot()); len(pending) != 0 {
+		t.Fatalf("concurrent scoped results crossed identities: %#v", pending)
+	}
+
+	replay := NewStore()
+	if err := replay.Append(Item{
+		ID: "call", Kind: KindToolCall, InvocationID: "run", Producer: Producer{Phase: PhaseSlow},
+		ToolCall: &ToolCall{CallID: "same", Name: "lookup", Arguments: json.RawMessage(`{}`)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const racers = 32
+	results := make(chan error, racers)
+	for index := 0; index < racers; index++ {
+		index := index
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			results <- replay.Append(Item{
+				ID: fmt.Sprintf("result-%02d", index), Kind: KindToolResult, InvocationID: "run",
+				Producer:   Producer{Phase: PhaseTool},
+				ToolResult: &ToolResult{CallID: "same", Name: "lookup", Output: json.RawMessage(`true`)},
+			})
+		}()
+	}
+	group.Wait()
+	close(results)
+	succeeded := 0
+	for err := range results {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || replay.Snapshot().Version != 2 {
+		t.Fatalf("concurrent terminal replay accepted %d results; version=%d", succeeded, replay.Snapshot().Version)
+	}
+}
+
+func TestPlayedInvalidationCreatesAndResolvesTypedRepair(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.AppendBatch([]Item{
+		{ID: "user", Kind: KindObservation, SourceRevision: 1, Producer: Producer{Phase: PhaseUser}, Content: "request"},
+		{ID: "fast", Kind: KindAssistant, SourceRevision: 1, Producer: Producer{Phase: PhaseFast}, Content: "provisional answer"},
+		{ID: "queued", Kind: KindAssistantState, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "fast", Visibility: VisibilityQueued}},
+		{ID: "played", Kind: KindAssistantState, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "fast", Visibility: VisibilityPlayed, PlayedAudioMS: 120}},
+		{ID: "updated", Kind: KindObservation, SourceRevision: 2, Producer: Producer{Phase: PhaseUser}, Content: "updated request"},
+		{ID: "required", Kind: KindRepair, SourceRevision: 2, CausalParentIDs: []string{"fast"}, Producer: Producer{Phase: PhaseRuntime}, Repair: &RepairState{TargetAssistantItemID: "fast", Status: RepairRequired, PlayedAudioMS: 120}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending := PendingRepairs(store.Snapshot())
+	if len(pending) != 1 || pending[0].TargetAssistantItemID != "fast" || pending[0].PlayedAudioMS != 120 {
+		t.Fatalf("pending repairs = %#v", pending)
+	}
+	if err := store.Append(Item{ID: "bad-cancel", Kind: KindAssistantState, Producer: Producer{Phase: PhaseRuntime}, AssistantState: &AssistantState{AssistantItemID: "fast", Visibility: VisibilityCancelled}}); err == nil {
+		t.Fatal("played content was erased while its repair was pending")
+	}
+	if err := store.AppendBatch([]Item{
+		{ID: "correction", Kind: KindAssistant, SourceRevision: 2, Producer: Producer{Phase: PhaseSlow}, Content: "Correction: the updated answer is different."},
+		{ID: "resolved", Kind: KindRepair, SourceRevision: 2, CausalParentIDs: []string{"fast", "correction"}, Producer: Producer{Phase: PhaseRuntime}, Repair: &RepairState{TargetAssistantItemID: "fast", Status: RepairResolved, RepairAssistantItemID: "correction"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if pending := PendingRepairs(store.Snapshot()); len(pending) != 0 {
+		t.Fatalf("resolved repair remained pending: %#v", pending)
+	}
+}
+
+func TestRepairLifecycleRejectsUnplayedAndUnmatchedTransitions(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{ID: "assistant", Kind: KindAssistant, Producer: Producer{Phase: PhaseFast}, Content: "answer"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{ID: "required", Kind: KindRepair, Producer: Producer{Phase: PhaseRuntime}, Repair: &RepairState{TargetAssistantItemID: "assistant", Status: RepairRequired, PlayedAudioMS: 10}}); err == nil {
+		t.Fatal("unplayed assistant content created a repair obligation")
+	}
+	if err := store.Append(Item{ID: "correction", Kind: KindAssistant, Producer: Producer{Phase: PhaseSlow}, Content: "correction"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{ID: "resolved", Kind: KindRepair, Producer: Producer{Phase: PhaseRuntime}, Repair: &RepairState{TargetAssistantItemID: "assistant", Status: RepairResolved, RepairAssistantItemID: "correction"}}); err == nil {
+		t.Fatal("repair resolved without a required transition")
+	}
+}
+
+func TestStoreEnforcesTypedSupersessionProvenance(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{
+		ID: "first", Kind: KindObservation, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseUser}, Content: "partial",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	metadata := &EventMetadata{
+		EventID: "event-2", Type: "asr.stable_partial", Source: "asr", Channel: "voice",
+		SupersedesRevision: 1,
+	}
+	if err := store.Append(Item{
+		ID: "missing-cause", Kind: KindObservation, SourceRevision: 2,
+		Producer: Producer{Phase: PhaseUser}, Content: "extended", Event: metadata,
+	}); err == nil {
+		t.Fatal("supersession without its causal target was accepted")
+	}
+	if err := store.Append(Item{
+		ID: "second", Kind: KindObservation, SourceRevision: 2,
+		CausalParentIDs: []string{"first"}, Producer: Producer{Phase: PhaseUser},
+		Content: "extended", Event: metadata,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{
+		ID: "stale-branch", Kind: KindObservation, SourceRevision: 3,
+		CausalParentIDs: []string{"first"}, Producer: Producer{Phase: PhaseUser},
+		Content: "stale branch", Event: &EventMetadata{
+			EventID: "event-stale", Type: "asr.stable_partial", Source: "asr", Channel: "voice",
+			SupersedesRevision: 1,
+		},
+	}); err == nil {
+		t.Fatal("supersession skipped the latest canonical observation")
+	}
+	if err := store.Append(Item{
+		ID: "assistant", Kind: KindAssistant, SourceRevision: 2,
+		Producer: Producer{Phase: PhaseSlow}, Content: "answer",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{
+		ID: "fake-supersession", Kind: KindAssistantState,
+		Producer:       Producer{Phase: PhaseRuntime},
+		AssistantState: &AssistantState{AssistantItemID: "assistant", Visibility: VisibilityQueued},
+		Event: &EventMetadata{
+			EventID: "event-3", Type: "speech.queued", Source: "tts", Channel: "voice",
+			SupersedesRevision: 1,
+		},
+	}); err == nil {
+		t.Fatal("non-observation event claimed observation supersession")
+	}
+}
+
+func TestResolveObservationSupersessionUsesStoreCanonicalEdgeRules(t *testing.T) {
+	t.Parallel()
+	event := func(id, source, channel string, supersedes uint64) *EventMetadata {
+		return &EventMetadata{
+			EventID: id + "-event", Type: "input.revision", Source: source, Channel: channel,
+			SupersedesRevision: supersedes,
+		}
+	}
+	voice := Item{
+		ID: "voice-1", Kind: KindObservation, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseUser}, Content: "partial",
+		Event: event("voice-1", "asr", "voice", 0),
+	}
+	independent := Item{
+		ID: "text-2", Kind: KindObservation, SourceRevision: 2,
+		Producer: Producer{Phase: PhaseUser}, Content: "independent",
+		Event: event("text-2", "keyboard", "text", 0),
+	}
+	replacement := Item{
+		ID: "voice-3", Kind: KindObservation, SourceRevision: 3,
+		CausalParentIDs: []string{"voice-1"}, Producer: Producer{Phase: PhaseUser}, Content: "complete",
+		Event: event("voice-3", "asr", "voice", 1),
+	}
+	index, err := ResolveObservationSupersession([]Item{voice, independent}, replacement)
+	if err != nil || index != 0 {
+		t.Fatalf("resolved target = %d, %v; want 0, nil", index, err)
+	}
+
+	stalePrefix := []Item{voice, independent, {
+		ID: "voice-4", Kind: KindObservation, SourceRevision: 4,
+		CausalParentIDs: []string{"voice-1"}, Producer: Producer{Phase: PhaseUser}, Content: "newer",
+		Event: event("voice-4", "asr", "voice", 1),
+	}}
+	replacement.ID = "voice-5"
+	replacement.SourceRevision = 5
+	replacement.Event = event("voice-5", "asr", "voice", 1)
+	if _, err := ResolveObservationSupersession(stalePrefix, replacement); err == nil ||
+		!strings.Contains(err.Error(), "latest canonical observation") {
+		t.Fatalf("stale supersession was resolved: %v", err)
+	}
+
+	malformed := replacement
+	malformed.Event = &EventMetadata{Source: "asr", Channel: "voice", SupersedesRevision: 1}
+	if _, err := ResolveObservationSupersession([]Item{voice}, malformed); err == nil ||
+		!strings.Contains(err.Error(), "event metadata requires") {
+		t.Fatalf("malformed supersession was resolved: %v", err)
+	}
+}
+
+func TestObservationSupersessionIsOrderedPerSourceStream(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	audio := func(id string, revision uint64, supersedes uint64, parent string) Item {
+		item := Item{
+			ID: id, Kind: KindObservation, SourceRevision: revision,
+			Producer: Producer{Phase: PhaseUser}, Content: id,
+			Event: &EventMetadata{
+				EventID: "event-" + id, Type: "audio.revision", Source: "audio", Channel: "microphone",
+				SupersedesRevision: supersedes,
+			},
+		}
+		if parent != "" {
+			item.CausalParentIDs = []string{parent}
+		}
+		return item
+	}
+	if err := store.Append(audio("audio-1", 1, 0, "")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{
+		ID: "vision-1", Kind: KindObservation, SourceRevision: 2,
+		Producer: Producer{Phase: PhaseObserver}, Content: "screen changed",
+		Observation: &ObservationMeta{Observer: "vision", Source: "screen", Authority: AuthorityObserver},
+		Event: &EventMetadata{
+			EventID: "event-vision", Type: "vision.revision", Source: "vision", Channel: "screen",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(audio("audio-2", 3, 1, "audio-1")); err != nil {
+		t.Fatalf("an interleaved visual observation made the audio revision stale: %v", err)
+	}
+	if err := store.Append(audio("audio-stale", 4, 1, "audio-1")); err == nil {
+		t.Fatal("a branch that skipped the latest audio revision was accepted")
+	}
+}
+
+func TestLegacyVoiceHandoffKeepsOneCanonicalRevisionStream(t *testing.T) {
+	t.Parallel()
+	store := NewStore()
+	if err := store.Append(Item{
+		ID: "spoken", Kind: KindObservation, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseUser}, Content: "please read the notes file",
+		Event: &EventMetadata{
+			EventID: "audio-final", Type: "audio.endpoint", Source: "audio", Channel: "voice",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(Item{
+		ID: "typed", Kind: KindObservation, SourceRevision: 2,
+		CausalParentIDs: []string{"spoken"}, Producer: Producer{Phase: PhaseUser},
+		Content: "please read the notes file",
+		Event: &EventMetadata{
+			EventID: "client-final", Type: "client.endpoint", Source: "client", Channel: "voice",
+			SupersedesRevision: 1,
+		},
+	}); err != nil {
+		t.Fatalf("legacy audio-to-client voice handoff was split into different streams: %v", err)
+	}
+
+	if err := store.Append(Item{
+		ID: "observer", Kind: KindObservation, SourceRevision: 3,
+		CausalParentIDs: []string{"typed"}, Producer: Producer{Phase: PhaseObserver},
+		Content:     "screen changed",
+		Observation: &ObservationMeta{Observer: "vision", Source: "screen", Authority: AuthorityObserver},
+		Event: &EventMetadata{
+			EventID: "vision", Type: "vision.revision", Source: "vision", Channel: "voice",
+			SupersedesRevision: 2,
+		},
+	}); err == nil {
+		t.Fatal("observer input sharing a channel superseded authoritative participant input")
+	}
+}
+
+// A barge-in is reported twice, by two authorities: the server when playout
+// finishes, and the client when it says where playback actually stopped. The
+// second report is the one that knows what a person heard.
+//
+// Refusing it was not harmless strictness - the refusal failed the whole batch
+// commit, so an ordinary barge-in from a well-behaved client destroyed the
+// session it happened in.
+func TestTheClientMayRefineAPlayedDuration(t *testing.T) {
+	store := NewStore()
+	if err := store.AppendBatch([]Item{{
+		ID: "assistant-1", Kind: KindAssistant, MonotonicNS: 1, SourceRevision: 1,
+		Producer: Producer{
+			Phase: PhaseFast, SpeechAuthority: "voice",
+		},
+		Content: "the balance is forty dollars",
+	}}); err != nil {
+		t.Fatalf("append assistant: %v", err)
+	}
+
+	// The server finishes playout and says so.
+	if err := store.AppendBatch([]Item{{
+		ID: "state-1", Kind: KindAssistantState, MonotonicNS: 2, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "assistant-1",
+			Visibility:      VisibilityPlayed, PlayedAudioMS: 5000,
+		},
+	}}); err != nil {
+		t.Fatalf("server played transition: %v", err)
+	}
+
+	// The client then reports that playback stopped a second in.
+	if err := store.AppendBatch([]Item{{
+		ID: "state-2", Kind: KindAssistantState, MonotonicNS: 3, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "assistant-1",
+			Visibility:      VisibilityPlayed, PlayedAudioMS: 1200,
+		},
+	}}); err != nil {
+		t.Fatalf("the client must be able to refine what was heard: %v", err)
+	}
+}
+
+// Audio that reached somebody cannot be un-heard. Allowing the claim would let
+// a repair obligation disappear.
+func TestPlayedAudioCannotBecomeCancelled(t *testing.T) {
+	store := NewStore()
+	if err := store.AppendBatch([]Item{{
+		ID: "assistant-1", Kind: KindAssistant, MonotonicNS: 1, SourceRevision: 1,
+		Producer: Producer{
+			Phase: PhaseFast, SpeechAuthority: "voice",
+		},
+		Content: "the balance is forty dollars",
+	}}); err != nil {
+		t.Fatalf("append assistant: %v", err)
+	}
+	if err := store.AppendBatch([]Item{{
+		ID: "state-1", Kind: KindAssistantState, MonotonicNS: 2, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "assistant-1",
+			Visibility:      VisibilityPlayed, PlayedAudioMS: 5000,
+		},
+	}}); err != nil {
+		t.Fatalf("played transition: %v", err)
+	}
+	err := store.AppendBatch([]Item{{
+		ID: "state-2", Kind: KindAssistantState, MonotonicNS: 3, SourceRevision: 1,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "assistant-1", Visibility: VisibilityCancelled,
+		},
+	}})
+	if err == nil {
+		t.Fatal("played audio must not be able to become cancelled")
+	}
+}
+
+// Two authorities can observe one cancellation: a turn superseded by newer
+// evidence is cancelled where it is superseded, and again where the commitment
+// is reconciled. Refusing the repeat is not harmless - it fails the whole
+// batch, and the session with it.
+func TestCancellingATurnTwiceIsNotAContradiction(t *testing.T) {
+	store := NewStore()
+	item := Item{
+		ID: "item-1", Kind: KindAssistant, Content: "one moment",
+		Visibility: VisibilityPrepared, MonotonicNS: 1,
+		Producer: Producer{Phase: PhaseFast, SpeechAuthority: "voice"},
+	}
+	if err := store.Append(item); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	cancel := Item{
+		ID: "state-1", Kind: KindAssistantState, MonotonicNS: 2,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "item-1", Visibility: VisibilityCancelled,
+		},
+	}
+	if err := store.Append(cancel); err != nil {
+		t.Fatalf("first cancellation: %v", err)
+	}
+	cancel.ID, cancel.MonotonicNS = "state-2", 3
+	if err := store.Append(cancel); err != nil {
+		t.Fatalf("the same cancellation reported twice must not fail the batch: %v", err)
+	}
+	// The direction that matters is still refused: audio nobody heard cannot
+	// later be claimed as heard.
+	played := Item{
+		ID: "state-3", Kind: KindAssistantState, MonotonicNS: 4,
+		Producer: Producer{Phase: PhaseFast},
+		AssistantState: &AssistantState{
+			AssistantItemID: "item-1", Visibility: VisibilityPlayed,
+		},
+	}
+	if err := store.Append(played); err == nil {
+		t.Fatal("a cancelled turn must not become a played one")
+	}
+}

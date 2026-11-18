@@ -1,0 +1,161 @@
+# Contributing to OpenRealtime
+
+Thanks for helping build open infrastructure for realtime agents. Contributions
+are welcome across the Go runtime, model adapters, protocol support, clients,
+benchmarks, documentation, examples, and developer experience.
+
+Read the [Code of Conduct](CODE_OF_CONDUCT.md) before participating. Report
+vulnerabilities privately through [SECURITY.md](SECURITY.md).
+
+## Ways to contribute
+
+- Fix a bug or improve an error message.
+- Add or maintain a model/provider adapter.
+- Improve an example, guide, or protocol explanation.
+- Add coverage for a wire, concurrency, authority, or lifecycle edge case.
+- Reproduce a benchmark result or identify a measurement flaw.
+- Propose a new component, graph element, architecture revision, or client
+  integration.
+
+Small, focused pull requests are easiest to review. For a large architecture or
+protocol change, open a discussion or draft ADR before investing in the full
+implementation.
+
+## Good first contributions
+
+- Walk through the quickstart on a clean machine and improve a missing step.
+- Add a minimal example for a supported provider or client integration.
+- Reproduce one interaction failure and include the configuration and observed behavior.
+- Improve a configuration error so it names the setting and how to correct it.
+
+For a bug report, include the source version, launch command with credentials
+removed, expected behavior, actual behavior, and the smallest reproduction you
+can provide. For an integration, state which provider and transport you used.
+
+## Development setup
+
+Install Go 1.25 or newer, clone the repository, and run the same gate used by
+CI:
+
+```bash
+git clone https://github.com/bojieli/OpenRealtime.git
+cd OpenRealtime
+git switch -c your-change
+./scripts/check.sh
+```
+
+The gate runs formatting, `go vet`, race-enabled tests across every module,
+protocol conformance, the prompt-injection safety gate, examples, and shell
+checks. It is offline and runs every stage before reporting failures.
+
+The scripts resolve Go from `OPENREALTIME_GO_BIN`,
+`/usr/local/go/bin/go`, or `PATH`, in that order. Use the shared helper when an
+older system toolchain comes first:
+
+```bash
+source scripts/go-toolchain.sh
+go_bin="$(openrealtime_go_bin)"
+"$go_bin" test -race ./eventloop/...
+```
+
+The module pins a patched Go toolchain. Initial dependency or toolchain setup
+may need network access; subsequent developer checks run without model services.
+During development, run the tests for the package you changed. Before submitting,
+run the complete gate and report failures or skipped integrations.
+
+Benchmark workspaces under `.runtime` and `artifacts` are gitignored. Inspect
+old generated files with `./scripts/workspace-inventory.sh -older-than 30`.
+Adding `-delete` removes eligible entries; these files are not recoverable from
+Git. Entries marked `dep` are referenced by tracked files and are excluded.
+
+Model-, dataset-, browser-, and GPU-dependent checks are provisioned release or
+measurement gates rather than part of the offline developer gate. A skipped
+optional integration is not evidence that the integration passed; the release
+matrix records which environments are required for each public claim.
+
+## Pull request checklist
+
+Every pull request should:
+
+1. Explain the problem, user impact, and chosen approach.
+2. Keep the change scoped; call out intentional follow-up work explicitly.
+3. Add tests for affected state, ordering, revision, cancellation, timing, wire,
+   or authority invariants.
+4. Run `./scripts/check.sh` and report any additional checks performed.
+5. Update user-facing documentation and the changelog when behavior changes.
+6. Declare the origin and license of imported code, data, prompts, model
+   weights, and generated assets. Write “none” when there are none.
+7. Avoid committing credentials, private audio, personal data, or provider
+   output whose terms prohibit redistribution.
+8. When reporting measurements, include negative and ambiguous results.
+
+Contributors certify that they have the right to submit their work under the
+repository's applicable license.
+
+## Compatibility and stable surfaces
+
+Keep the OpenAI Realtime wire shape compatible. Project timing, causality, and
+experiment metadata belongs in the separate trace envelope, never in a client
+or server event sent on the wire.
+
+Treat `api/v1` as stable. A breaking interface or semantic change requires a
+new versioned import path, migration documentation, and a major release.
+
+Treat the canonical trajectory and reasoning data as internal. Raw reasoning
+retention must be opt-in, permitted by the provider, consented to where
+applicable, and unnecessary for ordinary wire compatibility or timing
+evidence.
+
+Substantial architecture or protocol decisions belong in `docs/adr/`. Follow
+the existing ADR shape and describe context, decision, alternatives,
+consequences, and compatibility impact.
+
+Protocol code is generated by `cmd/specsync`; do not hand-edit generated wire
+registries. Python belongs in the sidecar library/reference sidecars and in
+model runners that require Python. The server runtime remains Go, and sidecars
+remain separate processes behind a documented protocol.
+
+## Test the test
+
+A new regression test should fail for the defect it claims to catch. Before
+trusting it, temporarily reintroduce the defect or make the smallest equivalent
+mutation, confirm the test fails for the expected reason, then restore the
+implementation.
+
+Assert what a consumer actually receives or renders. Source-text checks and
+wire-only checks can pass while the feature is unreachable, skipped, or broken
+at the final boundary. When a gate may skip because an optional dependency is
+missing, make that skip explicit and ensure the provisioned release gate turns
+it into a failure.
+
+## Performance and benchmark changes
+
+Use a focused reproduction and a regression check to verify a repair. A full
+campaign, new result archive, external model review, or score report is not
+required for ordinary fixes.
+
+If you make a quantitative performance claim, include the command, environment,
+configuration, comparison, sample counts, and limitations. Report negative and
+ambiguous results. See [Benchmarks](docs/benchmarks.md) for tooling and
+[Research](docs/research.md) for how to interpret the evidence.
+
+## Documentation changes
+
+Use the [documentation home](docs/README.md) to place new material:
+
+- task instructions belong in a guide;
+- stable behavior belongs in reference documentation;
+- chronological trials and negative results belong in an evidence record;
+- future architecture belongs in a proposal or ADR.
+
+Keep the README focused on the value of the project and the shortest successful
+path. Link to depth instead of moving design notebooks back into onboarding.
+
+For readable technical documentation:
+
+- Lead with the task, result, or contract and identify who needs the page.
+- Define unfamiliar terms on first use or link to [Core concepts](docs/concepts.md).
+- Put prerequisites before commands and expected results after them.
+- Keep current behavior separate from debugging history and design targets.
+- Include limits next to the claims they qualify.
+- Link to detailed contracts instead of repeating them in every guide.

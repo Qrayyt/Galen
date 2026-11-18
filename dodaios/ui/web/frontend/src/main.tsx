@@ -146,7 +146,9 @@ const AppshotEditorWindow = React.lazy(() =>
 // "Select all" outside a text field selects the conversation, not the window.
 installSelectAllScope();
 
+const GalenHudWindow = React.lazy(() => import("./components/galen/hud/GalenHud").then((m)=>({default:m.GalenHud})));
 const isEditorWindow = new URLSearchParams(window.location.search).get("view") === "appshot-editor";
+const isGalenHudWindow = new URLSearchParams(window.location.search).get("view") === "galen-hud";
 
 function renderApp(): void {
   ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -171,6 +173,7 @@ function renderApp(): void {
                 <>
                   <App />
                   <DesignLayer />
+                  {isGalenHudWindow && <React.Suspense fallback={null}><GalenHudWindow /></React.Suspense>}
                 </>
               )}
             </AuthGate>

@@ -1,0 +1,1072 @@
+{
+  "version": 1,
+  "gates": [
+    {
+      "id": "external.benchmark.candidate.fdb15",
+      "description": "Retain the graph-native candidate for all 498 Full-Duplex-Bench v1.5 recordings",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "fdb", "-dataset", "{root}/.runtime/full-duplex-bench-v1.5/dataset", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-prefix", "{artifacts}/candidate-fdb15-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-fdb15.json"],
+      "timeout": "30h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/full-duplex-bench-v1.5/dataset", "description": "the digest-checked FDB v1.5 dataset is prepared"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash candidate-review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.source/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.source.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.aggregate/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.aggregate/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb15-review.aggregate.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^candidate review: 498/498 recordings evaluated by gemini-3\\.7-flash \\(advisory\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 498 completed, 0 failed, of 498 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.candidate.fdb3",
+      "description": "Retain the graph-native candidate for all 100 Full-Duplex-Bench v3 tool-use recordings",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "fdbv3", "-dataset", "{root}/.runtime/full-duplex-bench-v3/dataset/fdb_v3_data_released", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-model", "openrealtime", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-prefix", "{artifacts}/candidate-fdb3-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-fdb3.json"],
+      "timeout": "12h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/full-duplex-bench-v3/dataset/fdb_v3_data_released", "description": "the digest-checked FDB v3 dataset is prepared"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash candidate-review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.source/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.source.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.aggregate/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.aggregate/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdb3-review.aggregate.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^candidate review: 100/100 recordings evaluated by gemini-3\\.7-flash \\(advisory\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 100 completed, 0 failed, of 100 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.candidate.fdbench",
+      "description": "Retain the graph-native candidate for all 6,147 FD-Bench conversations",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "fdbench", "-dataset", "{root}/.runtime/fd-bench/dataset", "-conditions", "chattts-single-round-combine-easy,chattts-single-round-combine-hard,chattts-single-round-combine-med,cosyvoice2-single-round-combine-easy,cosyvoice2-single-round-combine-easy-noisy-bg-0dB,cosyvoice2-single-round-combine-easy-noisy-bg-10dB,cosyvoice2-single-round-combine-easy-noisy-bg-20dB,cosyvoice2-single-round-combine-easy-noisy-gap-0dB,cosyvoice2-single-round-combine-easy-noisy-gap-10dB,cosyvoice2-single-round-combine-easy-noisy-gap-20dB,cosyvoice2-single-round-combine-hard,cosyvoice2-single-round-combine-med,f5tts-single-round-combine-easy,f5tts-single-round-combine-easy-noisy-bg-0dB,f5tts-single-round-combine-easy-noisy-bg-10dB,f5tts-single-round-combine-easy-noisy-bg-20dB,f5tts-single-round-combine-easy-noisy-gap-0dB,f5tts-single-round-combine-easy-noisy-gap-10dB,f5tts-single-round-combine-easy-noisy-gap-20dB,f5tts-single-round-combine-hard,f5tts-single-round-combine-med", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-prefix", "{artifacts}/candidate-fdbench6147-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-fdbench6147.json"],
+      "timeout": "120h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/fd-bench/dataset", "description": "the digest-checked FD-Bench dataset is prepared"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash candidate-review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.source/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.source.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.aggregate/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.aggregate/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-fdbench6147-review.aggregate.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^candidate review: 6147/6147 recordings evaluated by gemini-3\\.7-flash \\(advisory\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 6147 completed, 0 failed, of 6147 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.dynacu",
+      "description": "Optionally run the pinned upstream DynaCU 150-task browser suite without restrictions",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "dynacu", "-aoi-dir", "{root}/.runtime/dynacu-bench/aoi", "-python", "{root}/.runtime/dynacu-bench/aoi/.venv/bin/python", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-out", "{artifacts}/dynacu.json"],
+      "timeout": "12h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/dynacu-bench/aoi/.git", "description": "the pinned DynaCU checkout is prepared"},
+        {"kind": "executable", "value": "{root}/.runtime/dynacu-bench/aoi/.venv/bin/python", "description": "the DynaCU Python environment is prepared"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/dynacu.json"},
+        {"kind": "stdout_regex", "value": "(?m)^completed  : 150$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.meeting.cascade",
+      "description": "Retain the graph-native candidate for all four Meeting Assistant cases through the composable cascade foreground",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "meeting", "-foreground", "cascade", "-transport", "websocket", "-endpoint", "{env:OPENREALTIME_MEETING_CASCADE_ENDPOINT}", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-dir", "{artifacts}/candidate-meeting-cascade-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-out", "{artifacts}/candidate-meeting-cascade.json"],
+      "timeout": "2h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "bwrap", "description": "bubblewrap is available for review media sandboxing"},
+        {"kind": "command", "value": "ffmpeg", "description": "FFmpeg is available for synchronized review video encoding"},
+        {"kind": "command", "value": "ffprobe", "description": "FFprobe is available for full-decode review media attestation"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash Meeting review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_MEETING_CASCADE_ENDPOINT", "description": "the cascade Realtime endpoint is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/source/media/01-open-share-present-trial-01/audio.stereo.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/source/media/01-open-share-present-trial-01/screen.review.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/source/media/04-spoken-navigation-correction-trial-01/audio.stereo.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/source/media/04-spoken-navigation-correction-trial-01/screen.review.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/evaluations/01-open-share-present-trial-01/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/evaluations/01-open-share-present-trial-01/media-002.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/evaluations/04-spoken-navigation-correction-trial-01/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review/evaluations/04-spoken-navigation-correction-trial-01/media-002.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review.source-receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review.evaluation-receipts/01-open-share-present-trial-01.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-meeting-cascade-review.evaluation-receipts/04-spoken-navigation-correction-trial-01.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^meeting source receipt retained at .+$"},
+        {"kind": "stdout_regex", "value": "(?m)^meeting review bundle sealed at .+ \\(sha256:[a-f0-9]{64}\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 4 completed, 0 infrastructure failures, of 4 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.meeting.omni",
+      "description": "Optionally validate all four Meeting Assistant cases through the composable native-audio foreground",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "meeting", "-foreground", "omni", "-transport", "webrtc", "-endpoint", "{env:OPENREALTIME_MEETING_OMNI_ENDPOINT}", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-out", "{artifacts}/meeting-omni.json"],
+      "timeout": "2h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_MEETING_OMNI_ENDPOINT", "description": "the native-audio Realtime endpoint is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/meeting-omni.json"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 4 completed, 0 infrastructure failures, of 4 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.realtime-cu",
+      "description": "Retain the graph-native candidate for all sixteen Realtime-CU cases across both grounding modes",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "realtime-cu", "-grounding", "pixel,set_of_mark", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-dir", "{artifacts}/candidate-realtime-cu-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-realtime-cu.json"],
+      "timeout": "4h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "bwrap", "description": "bubblewrap is available for review media sandboxing"},
+        {"kind": "command", "value": "ffmpeg", "description": "FFmpeg is available for synchronized review video encoding"},
+        {"kind": "command", "value": "ffprobe", "description": "FFprobe is available for full-decode review media attestation"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash Realtime-CU review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/SOURCE_REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/media/01-static-control-pixel-trial-01/audio.stereo.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/media/01-static-control-pixel-trial-01/screen.review.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/media/16-typed-incident-code-set-of-mark-trial-01/audio.stereo.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/media/16-typed-incident-code-set-of-mark-trial-01/screen.review.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/reviews/01-static-control-pixel-trial-01/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/reviews/01-static-control-pixel-trial-01/media-002.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/reviews/16-typed-incident-code-set-of-mark-trial-01/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review/reviews/16-typed-incident-code-set-of-mark-trial-01/media-002.mp4"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review.source-receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review.evaluation-receipts/01-static-control-pixel-trial-01.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-realtime-cu-review.evaluation-receipts/16-typed-incident-code-set-of-mark-trial-01.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^Realtime-CU source receipt retained at .+$"},
+        {"kind": "stdout_regex", "value": "(?m)^Realtime-CU review bundle sealed at .+ \\(sha256:[a-f0-9]{64}\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^evidence-complete reportable \\(deterministic score \\+ exact16 synchronized A/V \\+ Gemini 3\\.7 Flash\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 16 completed, 0 infrastructure failures, of 16 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.scenario",
+      "description": "Retain the graph-native candidate for all twelve owned scenarios at fifteen repetitions",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "scenario", "-url", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-speech-url", "{env:OPENREALTIME_SPEECH_ENDPOINT}", "-transcribe-url", "{env:OPENREALTIME_SCENARIO_TRANSCRIBE_ENDPOINT}", "-transcribe-model", "{env:OPENREALTIME_SCENARIO_TRANSCRIBE_MODEL}", "-repeat", "15", "-architecture-manifest", "{env:OPENREALTIME_SCENARIO_ARCHITECTURE_MANIFEST}", "-architecture-cell", "{env:OPENREALTIME_SCENARIO_ARCHITECTURE_CELL}", "-launch-profile", "{env:OPENREALTIME_SCENARIO_LAUNCH_PROFILE}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-review-dir", "{artifacts}/candidate-scenario-review", "-review-receipt", "{artifacts}/candidate-scenario-review.receipt.json", "-record", "{artifacts}/candidate-scenario.json"],
+      "timeout": "24h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_SCENARIO_ARCHITECTURE_MANIFEST", "description": "the reviewed graph architecture manifest is supplied"},
+        {"kind": "env", "value": "OPENREALTIME_SCENARIO_ARCHITECTURE_CELL", "description": "the exact runnable architecture cell is named"},
+        {"kind": "env_file", "value": "OPENREALTIME_SCENARIO_LAUNCH_PROFILE", "description": "the immutable graph-native scenario launch profile is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_SPEECH_ENDPOINT", "description": "the speech synthesis endpoint is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_SCENARIO_TRANSCRIBE_ENDPOINT", "description": "an independent word recognizer can score the agent waveform"},
+        {"kind": "env", "value": "OPENREALTIME_SCENARIO_TRANSCRIBE_MODEL", "description": "the exact independent transcription model is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/checklist.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/CHECKLIST.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/source-manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review/architecture-result.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-review.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^  reportable graph-native checklist$"},
+        {"kind": "stdout_regex", "value": "(?m)^  reportable architecture cell$"},
+        {"kind": "stdout_regex", "value": "(?m)^  scenarios 180/180$"},
+        {"kind": "stdout_regex", "value": "(?m)^  source       sha256:[a-f0-9]{64}$"},
+        {"kind": "stdout_regex", "value": "(?m)^  receipt      .+/candidate-scenario-review\\.receipt\\.json$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.tau.control",
+      "description": "Retain the graph-native candidate for all 278 pinned tau2 control-speech tasks",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "tau-voice", "-tau2", "{root}/.runtime/tau2-bench", "-python", "{root}/.runtime/tau2-bench/.venv/bin/python", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-user-model", "qwen-fast", "-user-model-url", "{env:OPENREALTIME_TAU_USER_MODEL_ENDPOINT}", "-agent-voice", "default", "-agent-transcription-model", "Qwen/Qwen3-ASR-0.6B", "-synthesis", "fish_audio", "-synthesis-url", "{env:OPENREALTIME_TAU_SYNTHESIS_ENDPOINT}", "-synthesis-model", "fishaudio/s2-pro", "-synthesis-voice", "default", "-run-prefix", "candidate-tau-control", "-trials", "1", "-seed", "300", "-max-concurrency", "3", "-workers", "0", "-cadence", "0.2", "-task-timeout", "10m", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-condition", "control", "-review-prefix", "{artifacts}/candidate-tau-control-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-tau-control.json"],
+      "timeout": "72h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/tau2-bench/.git", "description": "the pinned and patched tau2 checkout is prepared"},
+        {"kind": "executable", "value": "{root}/.runtime/tau2-bench/.venv/bin/python", "description": "the complete tau2 voice environment is prepared"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash candidate-review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_TAU_SYNTHESIS_ENDPOINT", "description": "the simulated caller speech endpoint is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_TAU_USER_MODEL_ENDPOINT", "description": "the simulated caller model endpoint is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.source/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.source.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.aggregate/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.aggregate/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-control-review.aggregate.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^candidate review: 278/278 recordings evaluated by gemini-3\\.7-flash \\(advisory\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 278 completed, 0 failed, of 278 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.tau.regular",
+      "description": "Retain the graph-native candidate for all 278 pinned tau2 regular-speech tasks",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "bench", "tau-voice", "-tau2", "{root}/.runtime/tau2-bench", "-python", "{root}/.runtime/tau2-bench/.venv/bin/python", "-endpoint", "{env:OPENREALTIME_BENCH_ENDPOINT}", "-user-model", "qwen-fast", "-user-model-url", "{env:OPENREALTIME_TAU_USER_MODEL_ENDPOINT}", "-agent-voice", "default", "-agent-transcription-model", "Qwen/Qwen3-ASR-0.6B", "-synthesis", "fish_audio", "-synthesis-url", "{env:OPENREALTIME_TAU_SYNTHESIS_ENDPOINT}", "-synthesis-model", "fishaudio/s2-pro", "-synthesis-voice", "default", "-run-prefix", "candidate-tau-regular", "-trials", "1", "-seed", "300", "-max-concurrency", "3", "-workers", "0", "-cadence", "0.2", "-task-timeout", "10m", "-execution", "{env:OPENREALTIME_BENCH_EXECUTION}", "-inspection-graph", "{env:OPENREALTIME_BENCH_INSPECTION_GRAPH}", "-condition", "regular", "-review-prefix", "{artifacts}/candidate-tau-regular-review", "-review-provider", "google.gemini-3.7-flash", "-review-key-env", "GEMINI_API_KEY", "-review-concurrency", "16", "-out", "{artifacts}/candidate-tau-regular.json"],
+      "timeout": "72h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/tau2-bench/.git", "description": "the pinned and patched tau2 checkout is prepared"},
+        {"kind": "executable", "value": "{root}/.runtime/tau2-bench/.venv/bin/python", "description": "the complete tau2 voice environment is prepared"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the exact Gemini 3.7 Flash candidate-review credential is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_EXECUTION", "description": "the reviewed execution requirement is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_BENCH_ENDPOINT", "description": "a credential-free Realtime endpoint URL is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_BENCH_INSPECTION_GRAPH", "description": "the exact graph inspection evidence is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_TAU_SYNTHESIS_ENDPOINT", "description": "the simulated caller speech endpoint is supplied"},
+        {"kind": "env_url", "value": "OPENREALTIME_TAU_USER_MODEL_ENDPOINT", "description": "the simulated caller model endpoint is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.source/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.source/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.source.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.aggregate/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.aggregate/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-tau-regular-review.aggregate.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^candidate review: 278/278 recordings evaluated by gemini-3\\.7-flash \\(advisory\\)$"},
+        {"kind": "stdout_regex", "value": "(?m)^reportable$"},
+        {"kind": "stdout_regex", "value": "(?m)^tasks      : 278 completed, 0 failed, of 278 expected$"}
+      ]
+    },
+    {
+      "id": "external.benchmark.validation.behavioral",
+      "description": "Optionally compare eight complete graph-native campaigns against registered behavioral, safety, deadline, latency, and repair-lineage targets",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./internal/releasevalidation/cmd/behavioracceptance", "-targets", "{root}/scripts/behavioral-acceptance-targets.json", "-candidate", "{env:OPENREALTIME_BEHAVIORAL_CANDIDATE}", "-closure", "fd-bench={artifacts}/candidate-fdbench6147.closure.json", "-closure", "fdb-v1.5={artifacts}/candidate-fdb15.closure.json", "-closure", "fdb-v3={artifacts}/candidate-fdb3.closure.json", "-closure", "meeting-cascade={artifacts}/candidate-meeting-cascade.closure.json", "-closure", "realtime-cu={artifacts}/candidate-realtime-cu.closure.json", "-closure", "scenario={artifacts}/candidate-scenario.closure.json", "-closure", "tau-control={artifacts}/candidate-tau-control.closure.json", "-closure", "tau-regular={artifacts}/candidate-tau-regular.closure.json", "-report", "{artifacts}/behavioral-acceptance.json"],
+      "timeout": "10m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "file", "value": "{root}/scripts/behavioral-acceptance-targets.json", "description": "the checked preregistered behavioral target registry is present"},
+        {"kind": "env_file", "value": "OPENREALTIME_BEHAVIORAL_CANDIDATE", "description": "the pre-run frozen clean candidate declaration is supplied as an absolute path"},
+        {"kind": "file", "value": "{artifacts}/candidate-fdbench6147.closure.json", "description": "the complete 6,147-conversation FD-Bench campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-fdb15.closure.json", "description": "the complete 498-recording FDB v1.5 campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-fdb3.closure.json", "description": "the complete 100-example FDB v3 campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-meeting-cascade.closure.json", "description": "the complete four-case cascade Meeting Assistant campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-realtime-cu.closure.json", "description": "the complete sixteen-case Realtime-CU campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-scenario.closure.json", "description": "the complete 180-attempt scenario campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-tau-control.closure.json", "description": "the complete 278-task tau control campaign closure is present"},
+        {"kind": "file", "value": "{artifacts}/candidate-tau-regular.closure.json", "description": "the complete 278-task tau regular campaign closure is present"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/behavioral-acceptance.json"},
+        {"kind": "stdout_regex", "value": "(?m)^behavioral acceptance: passed$"}
+      ]
+    },
+    {
+      "id": "external.macos.signed-e2e",
+      "description": "Verify a nonce-bound browser-then-signed-native run against one exact gate-built server and retain its strict contract and receipt",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-tags", "signed_macos_e2e", "./macos", "-run", "^TestSignedNativeRunnerReleaseGate$", "-count=1", "-v"],
+      "environment": {
+        "OPENREALTIME_SIGNED_MACOS_E2E": "1",
+        "OPENREALTIME_MACOS_E2E_LAUNCH_PROFILE": "{env:OPENREALTIME_MACOS_E2E_LAUNCH_PROFILE}",
+        "OPENREALTIME_MACOS_E2E_GRAPH_FINGERPRINT": "{env:OPENREALTIME_MACOS_E2E_GRAPH_FINGERPRINT}",
+        "OPENREALTIME_MACOS_E2E_SERVER_PROFILE_FINGERPRINT": "{env:OPENREALTIME_MACOS_E2E_SERVER_PROFILE_FINGERPRINT}",
+        "OPENREALTIME_SIGNED_MACOS_VERIFIED_CONTRACT": "{artifacts}/signed-macos-companion.contract.json",
+        "OPENREALTIME_SIGNED_MACOS_VERIFIED_RECEIPT": "{artifacts}/signed-macos-companion.receipt.json"
+      },
+      "timeout": "30m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "codesign", "description": "Apple codesign is available"},
+        {"kind": "env_directory", "value": "OPENREALTIME_SIGNED_APP", "description": "an absolute signed OpenRealtime.app is supplied"},
+        {"kind": "env_executable", "value": "OPENREALTIME_MACOS_E2E_RUNNER", "description": "the trusted native E2E driver is supplied"},
+        {"kind": "env_file", "value": "OPENREALTIME_MACOS_E2E_LAUNCH_PROFILE", "description": "the exact frozen server launch profile is supplied"},
+        {"kind": "env", "value": "OPENREALTIME_MACOS_E2E_GRAPH_FINGERPRINT", "description": "the exact expected server Graph fingerprint is supplied"},
+        {"kind": "env", "value": "OPENREALTIME_MACOS_E2E_SERVER_PROFILE_FINGERPRINT", "description": "the exact expected active server profile fingerprint is supplied"},
+        {"kind": "os", "value": "darwin", "description": "the job runs on macOS"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/signed-macos-companion.contract.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/signed-macos-companion.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^signed macOS companion contract verified sha256:[0-9a-f]{64}$"},
+        {"kind": "stdout_regex", "value": "(?m)^signed macOS companion receipt verified sha256:[0-9a-f]{64}$"}
+      ]
+    },
+    {
+      "id": "external.model.gemini-review",
+      "description": "Retain and receipt a live multimodal review exchange from the exact Gemini 3.7 Flash plug-in",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./bench/review/gemini", "-run", "^TestLiveGeminiMultimodalReview$"],
+      "environment": {
+        "OPENREALTIME_GEMINI_LIVE": "1",
+        "OPENREALTIME_GEMINI_LIVE_REVIEW_DIR": "{artifacts}/gemini-live-review"
+      },
+      "timeout": "30m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "ffmpeg", "description": "FFmpeg is available to construct the synchronized audiovisual transport fixture"},
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the Gemini 3.7 Flash review credential is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/gemini-live-review/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/gemini-live-review/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/gemini-live-review.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)retained pinned-model gemini-3\\.7-flash store=false exchange"}
+      ],
+      "covers": ["live-review:gemini-3.7-flash"]
+    },
+    {
+      "id": "external.model.live-presentation",
+      "description": "Drive the descriptor-locked composable browser client against a provisioned real-model Realtime API",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./presentation/browser", "-run", "^TestLiveComposablePresentationClientAgainstRealModelInChromium$"],
+      "environment": {
+        "OPENREALTIME_PRESENTATION_LIVE_ENDPOINT": "{env:OPENREALTIME_PRESENTATION_LIVE_ENDPOINT}",
+        "OPENREALTIME_PRESENTATION_LIVE_REQUIRED": "1",
+        "OPENREALTIME_RELEASE_GATE": "1"
+      },
+      "timeout": "30m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "node", "description": "Node.js is available"},
+        {"kind": "env_url", "value": "OPENREALTIME_PRESENTATION_LIVE_ENDPOINT", "description": "the public live model-backed Realtime endpoint is supplied explicitly"}
+      ],
+      "assertions": [
+        {"kind": "stdout_regex", "value": "(?m)^live composable presentation client completed$"}
+      ],
+      "covers": ["presentation:browser:real-model"]
+    },
+    {
+      "id": "external.model.scenario-review",
+      "description": "Review all 180 sealed graph-native scenario attempts with the exact Gemini 3.7 Flash plug-in",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "review", "scenario", "-source-dir", "{artifacts}/candidate-scenario-review", "-source-receipt", "{artifacts}/candidate-scenario-review.receipt.json", "-out", "{artifacts}/candidate-scenario-evaluations", "-out-receipt", "{artifacts}/candidate-scenario-evaluations.receipt.json", "-provider", "google.gemini-3.7-flash", "-parallel", "4", "-timeout", "12m"],
+      "timeout": "24h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "env", "value": "GEMINI_API_KEY", "description": "the Gemini 3.7 Flash review credential is supplied"}
+      ],
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/manifest.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/REVIEW.md"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/0001-case-01-trial-001.evaluation/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/0001-case-01-trial-001.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/0180-case-12-trial-015.evaluation/media-001.wav"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations/0180-case-12-trial-015.receipt.json"},
+        {"kind": "file_nonempty", "value": "{artifacts}/candidate-scenario-evaluations.receipt.json"},
+        {"kind": "stdout_regex", "value": "(?m)^  provider     google\\.gemini-3\\.7-flash$"},
+        {"kind": "stdout_regex", "value": "(?m)^  evaluations  180/180$"}
+      ],
+      "covers": ["scenario-review:gemini-3.7-flash:180"]
+    },
+    {
+      "id": "external.tau.upstream",
+      "description": "Run tau2 check-data, lint, formatting, full tests, and the audio-native provider suite",
+      "availability": "provisioned",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{root}/scripts/release-tau-upstream-gate.sh"],
+      "environment": {"TAU2_DIR": "{root}/.runtime/tau2-bench"},
+      "timeout": "3h",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "directory", "value": "{root}/.runtime/tau2-bench/.git", "description": "the pinned and patched tau2 checkout is prepared"},
+        {"kind": "env", "value": "DASHSCOPE_API_KEY", "description": "Qwen Realtime credentials are supplied"},
+        {"kind": "env", "value": "DEEPGRAM_API_KEY", "description": "LiveKit cascaded speech credentials are supplied"},
+        {"kind": "any_env", "alternatives": ["GEMINI_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SERVICE_ACCOUNT_KEY"], "description": "one supported Gemini credential source is supplied"},
+        {"kind": "env", "value": "LIVEKIT_TEST_ENABLED", "description": "both LiveKit cascaded profiles are explicitly enabled"},
+        {"kind": "command", "value": "make", "description": "make is available"},
+        {"kind": "env", "value": "NOVA_TEST_ENABLED", "description": "Amazon Nova Sonic is explicitly enabled"},
+        {"kind": "env", "value": "OPENAI_API_KEY", "description": "OpenAI Realtime and LiveKit model credentials are supplied"},
+        {"kind": "any_env", "alternatives": ["AWS_ACCESS_KEY_ID", "AWS_PROFILE", "AWS_WEB_IDENTITY_TOKEN_FILE"], "description": "one supported AWS credential source is supplied for Nova Sonic"},
+        {"kind": "command", "value": "uv", "description": "uv is available"},
+        {"kind": "env", "value": "XAI_API_KEY", "description": "xAI Realtime credentials are supplied"}
+      ]
+    },
+    {
+      "id": "local.build.release",
+      "description": "Build and checksum every declared release target",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{root}/scripts/build-release.sh", "{artifacts}/release"],
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "sha256sum", "description": "sha256sum is available"}
+      ],
+      "assertions": [
+        {"kind": "stdout_regex", "value": "(?m)^checksums: .*/SHA256SUMS-[^/]+\\.txt$"}
+      ]
+    },
+    {
+      "id": "local.client.javascript",
+      "description": "Run the language-neutral reducer corpus in the JavaScript client",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{root}/scripts/release-local-gate.sh", "javascript-client"],
+      "timeout": "5m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "node", "description": "Node.js is available"}
+      ]
+    },
+    {
+      "id": "local.client.swift-linux",
+      "description": "Test and strict-concurrency build the shared Swift client in the pinned Linux container",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{root}/scripts/release-local-gate.sh", "swift-linux"],
+      "timeout": "20m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "docker", "description": "Docker is available"},
+        {"kind": "docker_image", "value": "swift:5.10-jammy", "description": "the pinned Swift Linux image is already present"}
+      ]
+    },
+    {
+      "id": "local.conformance.extension",
+      "description": "Run the OpenAI Realtime and OpenRealtime extension wire conformance suites",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "conformance", "all"],
+      "timeout": "10m",
+      "skip_policy": "forbid"
+    },
+    {
+      "id": "local.conformance.sidecar",
+      "description": "Drive the bundled protocol-v4 Python element and the three reference model sidecars in mock mode through the sidecar conformance suite as real subprocesses",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./sidecar", "-run", "^(TestRunConformanceV4AgainstBundledPythonSDK|TestReferenceSidecarsPassConformanceInMockMode)$"],
+      "environment": {"OPENREALTIME_RELEASE_GATE": "1"},
+      "timeout": "10m",
+      "skip_policy": "forbid",
+      "assertions": [
+        {"kind": "stdout_regex", "value": "(?m)^--- PASS: TestRunConformanceV4AgainstBundledPythonSDK"},
+        {"kind": "stdout_regex", "value": "(?m)^--- PASS: TestReferenceSidecarsPassConformanceInMockMode"}
+      ]
+    },
+    {
+      "id": "local.efficiency",
+      "description": "Produce the efficiency report on this machine: idle and changing video gating, bandwidth, context growth, and the audio gate",
+      "availability": "local",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "run", "./cmd/openrealtime", "efficiency", "-seconds", "10", "-out", "{artifacts}/efficiency.json"],
+      "timeout": "10m",
+      "skip_policy": "forbid",
+      "assertions": [
+        {"kind": "file_nonempty", "value": "{artifacts}/efficiency.json"},
+        {"kind": "stdout_regex", "value": "\"audio_gate\""}
+      ]
+    },
+    {
+      "id": "local.fuzz.authority.canonical-effect-arguments",
+      "description": "Fuzz canonical effect arguments",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzCanonicalEffectArguments$", "-fuzztime", "150000x", "./authority"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:authority/FuzzCanonicalEffectArguments"]
+    },
+    {
+      "id": "local.fuzz.authority.effect-receipt",
+      "description": "Fuzz effect-receipt tamper resistance",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzEffectReceiptTamperNeverAuthorizes$", "-fuzztime", "30000x", "./authority"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:authority/FuzzEffectReceiptTamperNeverAuthorizes"]
+    },
+    {
+      "id": "local.fuzz.bench-review-gemini.credential-scanner",
+      "description": "Fuzz fail-closed Gemini review credential scanning",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzCredentialScanner$", "-fuzztime", "75000x", "./bench/review/gemini"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:bench/review/gemini/FuzzCredentialScanner"]
+    },
+    {
+      "id": "local.fuzz.client.reducer-corpus",
+      "description": "Fuzz the language-neutral reducer corpus loader",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzLoadCorpus$", "-fuzztime", "1000x", "./client/reducer"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:client/reducer/FuzzLoadCorpus"]
+    },
+    {
+      "id": "local.fuzz.elements.standard-config",
+      "description": "Fuzz exact standard element config schema resolution",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzStandardConfigSchemaResolverIsExactAndSnapshotIsolated$", "-fuzztime", "100000x", "./elements"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:elements/FuzzStandardConfigSchemaResolverIsExactAndSnapshotIsolated"]
+    },
+    {
+      "id": "local.fuzz.graph.assembly-inventory",
+      "description": "Fuzz graph assembly implementation-inventory drift rejection",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzPreflightRejectsImplementationInventoryDriftBeforeAcquisition$", "-fuzztime", "75000x", "./graph/assembly"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/assembly/FuzzPreflightRejectsImplementationInventoryDriftBeforeAcquisition"]
+    },
+    {
+      "id": "local.fuzz.graph.catalog",
+      "description": "Fuzz strict graph catalog parsing",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzCatalogParseNeverPanics$", "-fuzztime", "5000x", "./graph/catalog"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/catalog/FuzzCatalogParseNeverPanics"]
+    },
+    {
+      "id": "local.fuzz.graph.config-values",
+      "description": "Fuzz graph values artifact creation",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzCreateValuesArtifactNeverPanics$", "-fuzztime", "20000x", "./graph/config"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/config/FuzzCreateValuesArtifactNeverPanics"]
+    },
+    {
+      "id": "local.fuzz.graph.deployment-evidence",
+      "description": "Fuzz deployment evidence fingerprint admission",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzDeploymentEvidenceRejectsUnsafeFingerprint$", "-fuzztime", "50000x", "./graph/inspect"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/inspect/FuzzDeploymentEvidenceRejectsUnsafeFingerprint"]
+    },
+    {
+      "id": "local.fuzz.graph.evidence",
+      "description": "Fuzz graph evidence parsing and refingerprinting",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzEvidenceParsersNeverPanicAndSuccessfulDocumentsRefingerprint$", "-fuzztime", "80000x", "./graph/evidence"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/evidence/FuzzEvidenceParsersNeverPanicAndSuccessfulDocumentsRefingerprint"]
+    },
+    {
+      "id": "local.fuzz.graph.property-metadata",
+      "description": "Fuzz graph property metadata determinism",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzPropertyMetadataNeverAdmitsInvalidOrNondeterministicSchema$", "-fuzztime", "150000x", "./graph/schema"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/schema/FuzzPropertyMetadataNeverAdmitsInvalidOrNondeterministicSchema"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-broadcast-accounting",
+      "description": "Fuzz atomic broadcast tee accounting",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzBroadcastTeeAtomicAccounting$", "-fuzztime", "75000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzBroadcastTeeAtomicAccounting"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-broadcast-cancellation",
+      "description": "Fuzz atomic broadcast cancellation",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzBroadcastTeeCancellationIsAtomic$", "-fuzztime", "75000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzBroadcastTeeCancellationIsAtomic"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-mux",
+      "description": "Fuzz fair FIFO receive-any multiplexing",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzReceiveAnyMuxFairFIFO$", "-fuzztime", "50000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzReceiveAnyMuxFairFIFO"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-prepare",
+      "description": "Fuzz exact prepared-plan profile drift rejection",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzPreparePlanRejectsExactProfileDrift$", "-fuzztime", "25000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzPreparePlanRejectsExactProfileDrift"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-queue-cancellation",
+      "description": "Fuzz queue cancellation race quiescence",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzQueueCancellationRacesQuiesce$", "-fuzztime", "50000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzQueueCancellationRacesQuiesce"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-queue-fifo",
+      "description": "Fuzz queue FIFO and drop accounting",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzQueueFIFOAndDropAccounting$", "-fuzztime", "12000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzQueueFIFOAndDropAccounting"]
+    },
+    {
+      "id": "local.fuzz.graph.runtime-waiter-close",
+      "description": "Fuzz queue waiter cancellation and close quiescence",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzQueueWaiterCancellationAndCloseQuiesce$", "-fuzztime", "50000x", "./graph/runtime"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/runtime/FuzzQueueWaiterCancellationAndCloseQuiesce"]
+    },
+    {
+      "id": "local.fuzz.graph.syntax-recovery",
+      "description": "Fuzz bounded graph syntax recovery",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzRecoveryIsBoundedAndNeverPromotesToStrictParse$", "-fuzztime", "250000x", "./graph/syntax"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:graph/syntax/FuzzRecoveryIsBoundedAndNeverPromotesToStrictParse"]
+    },
+    {
+      "id": "local.fuzz.internal.strictjson",
+      "description": "Fuzz bounded duplicate-safe strict JSON validation",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzValidate$", "-fuzztime", "300000x", "./internal/strictjson"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:internal/strictjson/FuzzValidate"]
+    },
+    {
+      "id": "local.fuzz.presentation.effect-arguments",
+      "description": "Fuzz presentation effect argument admission",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzEffectArgumentAdmission$", "-fuzztime", "30000x", "./presentation/host"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:presentation/host/FuzzEffectArgumentAdmission"]
+    },
+    {
+      "id": "local.fuzz.presentation.effect-wire",
+      "description": "Fuzz presentation effect wire decoding",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-run", "^$", "-fuzz", "^FuzzEffectWireMessageDecoding$", "-fuzztime", "60000x", "./presentation/host"],
+      "timeout": "2m",
+      "skip_policy": "forbid",
+      "covers": ["fuzz:presentation/host/FuzzEffectWireMessageDecoding"]
+    },
+    {
+      "id": "local.go.livekit.normal",
+      "description": "Run normal tests in the isolated LiveKit integration module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": "integrations/livekit",
+      "command": ["{go}", "test", "-json", "-count=1", "-timeout", "20m", "./..."],
+      "timeout": "15m",
+      "skip_policy": "record",
+      "covers": ["go:normal:integrations/livekit"]
+    },
+    {
+      "id": "local.go.livekit.race",
+      "description": "Run race-instrumented tests in the isolated LiveKit integration module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": "integrations/livekit",
+      "command": ["{go}", "test", "-json", "-race", "-count=1", "-timeout", "20m", "./..."],
+      "timeout": "30m",
+      "skip_policy": "record",
+      "covers": ["go:race:integrations/livekit"]
+    },
+    {
+      "id": "local.go.livekit.vet",
+      "description": "Vet every package in the isolated LiveKit integration module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": "integrations/livekit",
+      "command": ["{go}", "vet", "./..."],
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "covers": ["go:vet:integrations/livekit"]
+    },
+    {
+      "id": "local.go.root.normal",
+      "description": "Run every normal Go test in the root module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-json", "-count=1", "-timeout", "20m", "./..."],
+      "timeout": "30m",
+      "skip_policy": "record",
+      "covers": ["go:normal:."]
+    },
+    {
+      "id": "local.go.root.race",
+      "description": "Run every race-instrumented Go test in the root module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-json", "-race", "-count=1", "-timeout", "20m", "./..."],
+      "timeout": "60m",
+      "skip_policy": "record",
+      "covers": ["go:race:."]
+    },
+    {
+      "id": "local.go.root.vet",
+      "description": "Vet every package in the root Go module",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "vet", "./..."],
+      "timeout": "30m",
+      "skip_policy": "forbid",
+      "covers": ["go:vet:."]
+    },
+    {
+      "id": "local.go.webrtc.opus",
+      "description": "Compile and test the cgo Opus encoder behind the opus build tag, which no default build reaches",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-tags", "opus", "-count=1", "-v", "./transport/webrtc"],
+      "prerequisites": [
+        {"kind": "command", "value": "pkg-config", "description": "pkg-config is available to locate the C libraries"},
+        {"kind": "pkg_config", "value": "opus", "description": "the libopus development files are installed"},
+        {"kind": "pkg_config", "value": "opusfile", "description": "the libopusfile development files are installed"}
+      ],
+      "timeout": "10m",
+      "skip_policy": "forbid",
+      "assertions": [
+        {"kind": "stdout_regex", "value": "(?m)^--- PASS: TestOpusEncoderProducesDecodablePackets"}
+      ]
+    },
+    {
+      "id": "local.presentation.chromium",
+      "description": "Run every composable browser presentation test in real Chromium with release skip refusal",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./presentation/browser"],
+      "environment": {"OPENREALTIME_RELEASE_GATE": "1"},
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "node", "description": "Node.js is available"}
+      ]
+    },
+    {
+      "id": "local.presentation.companion",
+      "description": "Drive the public companion supervisor through real serve and present child processes with Chromium WebRTC and the exact native WebSocket profile, then prove clean shutdown",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./cmd/openrealtime", "-run", "^TestPublicCompanionCommandRunsRealBrowserAndNativeClients$"],
+      "environment": {"OPENREALTIME_RELEASE_GATE": "1"},
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "node", "description": "Node.js is available"}
+      ]
+    },
+    {
+      "id": "local.presentation.shared-server",
+      "description": "Drive real Chromium and a native-manifest-derived wire probe from the exact macOS client profile through one unchanged clean Realtime server; signed app evidence is a separate Darwin gate",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./presentation", "-run", "^TestBrowserAndMacOSProfilesUseOneUnchangedCleanServerAPI$"],
+      "environment": {"OPENREALTIME_RELEASE_GATE": "1"},
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "node", "description": "Node.js is available"}
+      ]
+    },
+    {
+      "id": "local.prompt-injection",
+      "description": "Run the complete prompt-injection authority package under the race detector",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-race", "-count=1", "-v", "./computeruse/injection"],
+      "timeout": "10m",
+      "skip_policy": "forbid"
+    },
+    {
+      "id": "local.python.sidecars",
+      "description": "Run Python sidecar protocol and Qwen integration conformance",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["python3", "-m", "pytest", "-q", "sidecars/test_protocol.py", "sidecars/test_qwen3_omni_sidecar.py"],
+      "environment": {"PYTHONPATH": "{root}/sidecars"},
+      "timeout": "10m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "python3", "description": "Python 3 is available"},
+        {"kind": "python_module", "value": "python3:pytest", "description": "pytest is installed for Python 3"}
+      ]
+    },
+    {
+      "id": "local.scenario.profiled-websocket",
+      "description": "Exercise the exact twelve-case graph-native scenario contract through profiled WebSocket sessions",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./bench/scenario/graphnative", "-run", "^TestProfiledGraphNativeWebSocketExercisesExactTwelveScenarioContract$"],
+      "timeout": "5m",
+      "skip_policy": "forbid"
+    },
+    {
+      "id": "local.sdk.official",
+      "description": "Run the unmodified official OpenAI Realtime SDK over WebSocket and WebRTC",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-v", "./examples/sdk-client", "-run", "^TestTheOfficialSDKCompletesAToolUsingSessionOver(WebSocket|WebRTC)$"],
+      "environment": {"OPENREALTIME_RELEASE_GATE": "1"},
+      "timeout": "15m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "browser", "description": "a real Chromium executable is available"},
+        {"kind": "command", "value": "node", "description": "Node.js is available"},
+        {"kind": "directory", "value": "{root}/examples/sdk-client/node_modules/@openai/agents-realtime", "description": "the official SDK dependency is installed"}
+      ]
+    },
+    {
+      "id": "local.shell",
+      "description": "Parse and shellcheck every repository release and macOS shell script",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{root}/scripts/release-local-gate.sh", "shell"],
+      "timeout": "5m",
+      "skip_policy": "forbid",
+      "prerequisites": [
+        {"kind": "command", "value": "shellcheck", "description": "shellcheck is available and cannot be silently omitted"}
+      ]
+    },
+    {
+      "id": "local.source.gofmt",
+      "description": "Require gofmt-clean Go sources outside provisioned runtime checkouts",
+      "availability": "local",
+      "selection": "default",
+      "required": true,
+      "working_directory": ".",
+      "command": ["{root}/scripts/release-local-gate.sh", "gofmt"],
+      "timeout": "5m",
+      "skip_policy": "forbid"
+    },
+    {
+      "id": "performance.review-bundles",
+      "description": "Exercise the direct four-case Meeting and exact-16 Realtime-CU review bundles with allocation and benchmark evidence",
+      "availability": "local",
+      "selection": "opt_in",
+      "required": false,
+      "working_directory": ".",
+      "command": ["{go}", "test", "-count=1", "-run", "^TestMeetingReviewBundleFourCaseAllocationThreshold$", "-bench", "^Benchmark(MeetingReviewBundleFourCases|ReviewBundleSixteenHermeticReviewedCases)$", "-benchtime", "1x", "-benchmem", "./bench/meeting", "./bench/realtimecu"],
+      "timeout": "30m",
+      "skip_policy": "forbid",
+      "assertions": [
+        {"kind": "stdout_regex", "value": "BenchmarkMeetingReviewBundleFourCases"},
+        {"kind": "stdout_regex", "value": "BenchmarkReviewBundleSixteenHermeticReviewedCases"}
+      ]
+    }
+  ]
+}

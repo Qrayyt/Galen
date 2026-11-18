@@ -1,0 +1,387 @@
+package scenario
+
+// Suite is the scripted behaviour an interaction model exists to produce.
+//
+// Every scenario here is a claim that could not be made by any other suite in
+// this repository, because every one of them is about when somebody speaks
+// rather than about what they conclude. They come from two places: the
+// capabilities a full-duplex model was demonstrated doing, and the cases that
+// turn up in production the moment an agent has to hold a phone call.
+//
+// The control scenario is not padding. Most of these ask the agent to stay
+// quiet, and a system that had simply stopped talking would pass all of them.
+func Suite() []Scenario {
+	base := []Scenario{
+		{
+			Name:         "count-as-they-go",
+			Note:         "a policy set out loud, honoured while the speaker keeps talking and ignored in their pauses",
+			Instructions: "You are a voice assistant. Follow the instructions the person gives you about when to speak.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I'm going to tell you about my afternoon. Count the animals out loud as I mention them, and say nothing else."},
+				// The gap exposes unsolicited acknowledgements before the story.
+				// "Say nothing else" requires silence here as well as between
+				// animals; setup speech cannot satisfy a later count window.
+				{Speaker: "user", AtMS: 13000, Text: "It was a warm afternoon and I was walking along by the river."},
+				{Speaker: "user", AtMS: 21000, Text: "A capybara wandered over and sat down next to me."},
+				{Speaker: "user", AtMS: 29000, Text: "Then a heron landed on the far bank and stared at us."},
+			},
+			TrailingMS: 4000,
+			Checks: []Check{
+				{Kind: CheckSilent, Line: 1, AfterMS: 3000,
+					Note: "no animal was mentioned and the pause afterwards is not an invitation"},
+				// Two claims, kept apart. Whether it counted the right animal is a
+				// capability; how soon is a latency, and folding them into one
+				// window scored a run that counted both correctly as a failure
+				// for being three hundred milliseconds late.
+				{Kind: CheckEventCounts, Events: []CountEvent{
+					{Line: 2, Number: 1, WithinMS: 5000},
+					{Line: 3, Number: 2, WithinMS: 5000},
+				}, Note: "hear exactly one count for each animal, and nothing else anywhere in the recording"},
+				{Kind: CheckNotSaid, Line: 2, AfterMS: 5000, Any: []string{"?"},
+					Note: "they asked to be counted at, not interviewed"},
+				{Kind: CheckAnsweredWithin, Line: 2, AfterMS: 5000, DuringTrigger: true,
+					Note: "counting as somebody goes is a claim about timing, so it is measured as one"},
+			},
+		},
+		{
+			Name:         "asked not to be interrupted",
+			Note:         "the same silence, held for the opposite reason: they said so",
+			Instructions: "You are a voice assistant. Follow the instructions the person gives you about when to speak.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I want to think out loud for a minute. Please don't interrupt me, and don't answer until I ask you to."},
+				{Speaker: "user", AtMS: 9000, Text: "So the first option would be to rewrite the whole thing from scratch."},
+				{Speaker: "user", AtMS: 18000, Text: "But that would take most of a month and I'm not sure it's worth it."},
+			},
+			TrailingMS: 5000,
+			Checks: []Check{
+				{Kind: CheckSilent, Line: 1, AfterMS: 4000, Note: "a long pause is still not permission"},
+				{Kind: CheckSilent, Line: 2, AfterMS: 4000, Note: "they have not asked yet"},
+			},
+		},
+		{
+			Name: "a recorded menu",
+			Note: "the useful act is silent, and talking to a recording achieves nothing",
+			Instructions: "You are calling a company's support line on behalf of the user. " +
+				"When a recorded menu offers an option that matches what the user wants, press that key.",
+			Tools: []Tool{{
+				Name: "press_key", Description: "Send a keypad tone on the open call.",
+				Parameters: []string{"digit"},
+			}},
+			// A menu that answers. Pressing two reaches order status and
+			// pressing anything else reaches somewhere with no way back, so
+			// hurrying costs what it costs on a real call.
+			Menu: OrderStatusMenu,
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "Call them and find out where my order has got to."},
+				{Speaker: "other", AtMS: 7000, Text: "Thank you for calling. Press one for billing. Press two for order status. Press three for technical support. Press four to repeat these options."},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckToolCalled, Tool: "press_key", Line: -1,
+					Note: "the menu named the option the user asked for"},
+				{Kind: CheckSilent, Line: 1, AfterMS: 500,
+					Note: "a recording cannot hear you, so speaking over it is wasted and covers the menu"},
+				{Kind: CheckAnsweredWithin, Line: 1, AfterMS: 4000, Tool: "press_key",
+					Note: "a menu moves on, and a key pressed after it has is pressed into the next option"},
+				// The menu answers now, so where the call ended is a fact
+				// rather than an inference. Nine presses on one call was
+				// invisible while the recording played to the end whatever the
+				// agent did.
+				{Kind: CheckReachedMenu,
+					Note: "the call has to end at order status, which is what it was for"},
+			},
+		},
+		{
+			Name: "cutting in on something wrong",
+			Note: "waiting until they finish makes the correction useless, which is why interrupting exists",
+			Instructions: "You are a voice assistant helping plan a project. The deadline the client gave is " +
+				"the third of the month. If the person says a date that contradicts that, correct them " +
+				"immediately, even in the middle of their sentence.",
+			// Split where the mistake starts, because one line could not tell a
+			// correction from a guess. Measured on the single-line version, an
+			// agent said "the deadline is the third of the month, not the
+			// fifth" at 4.8 seconds - before the person had mentioned any date
+			// at all, inventing the fifth - and passed, because the check only
+			// looked for the word "third" somewhere in the window. Eleven runs
+			// of fifteen passed that way, and the agent that stayed quiet
+			// until it heard something wrong scored two.
+			//
+			// So the first line contains no mistake and is checked for
+			// silence, and the correction is required inside the line that
+			// does. What this scenario is about is reacting to an error, which
+			// means there has to be a moment before the error to be wrong in.
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "Right, so let me plan this out. We'll do the design review next week."},
+				{Speaker: "user", AtMS: 5000, Text: "And then ship it by the thirteenth, which gives us plenty of time to get the documentation finished and send everything over to their team for sign off."},
+			},
+			TrailingMS: 5000,
+			Checks: []Check{
+				{Kind: CheckSilent, Line: 0, AfterMS: 0,
+					Note: "nothing has been said wrong yet, so there is nothing to correct"},
+				{Kind: CheckSpoke, Line: 1, AfterMS: -3000,
+					Note: "cutting in means before they finish; waiting politely for the end is the behaviour this replaces"},
+				{Kind: CheckSaid, Line: 1, AfterMS: 2000, Any: []string{"third", "3rd", "the 3"},
+					Note: "and it has to be the correction; interrupting with an unrelated question is worse than waiting"},
+			},
+		},
+		{
+			Name: "ordering from a waiter",
+			Note: "a third party lists options and the moment worth acting on passes if you wait for a pause",
+			Instructions: "You are helping the user in a restaurant. They have told you what they want. " +
+				"When the waiter says something that matches it, say so straight away - the waiter " +
+				"will move on to the next item and the moment will be gone.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I want fish tonight. Order for me when you hear something that fits."},
+				{Speaker: "other", AtMS: 7000, Text: "Good evening. Tonight we have three specials. The first is a ribeye steak with peppercorn sauce. The second is a duck confit with cherries. The third is a sea bass with fennel and new potatoes."},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckSpoke, Line: 1, AfterMS: 2000,
+					Note: "the dish that fits was named and the waiter kept going"},
+				{Kind: CheckSaid, Line: 1, AfterMS: 4000, Any: []string{"sea bass", "bass", "fish"},
+					Note: "and it has to be about the right dish, not just a noise at the right time"},
+			},
+		},
+		{
+			Name: "translating as they speak",
+			Note: "the simultaneous-speech case: a policy never to yield the floor, and speech that " +
+				"does not end anybody's turn",
+			Instructions: "You are interpreting for the user. Do exactly what they ask you to do.",
+			// Mandarin rather than a European language, because the recogniser
+			// this suite runs against covers Chinese, English, Cantonese,
+			// Japanese and Korean and nothing else. Asked to interpret German
+			// it returned the right sounds spelled as English words, and the
+			// agent faithfully translated the nonsense - which measures the
+			// recogniser's language coverage rather than anything about
+			// interaction. Live interpreting is bounded by what the recogniser
+			// can hear, and that bound belongs in the scenario rather than in
+			// its result.
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "My colleague only speaks Mandarin. Translate everything he says into English as he goes, and don't wait for him to finish."},
+				{Speaker: "other", AtMS: 13000, Text: "你好，很高兴见到你。"},
+				{Speaker: "other", AtMS: 20000, Text: "我们明天下午三点在办公室见面。"},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckSpoke, Line: 1, AfterMS: 4000, Note: "the first sentence should be carried over"},
+				{Kind: CheckSaid, Line: 1, AfterMS: 5000,
+					Any:  []string{"good day", "good afternoon", "hello", "hi", "greetings"},
+					Note: "and carried over into English rather than commented on"},
+				{Kind: CheckSaid, Line: 1, AfterMS: 5000,
+					Any:  []string{"nice to meet", "pleased to meet", "glad to meet", "happy to meet", "good to meet", "lovely to meet", "pleasure to meet", "pleasure meeting", "nice meeting"},
+					Note: "the greeting also says they are pleased to meet; hello alone omits that"},
+				// Each fact is required separately. One matching word used to
+				// pass the complete appointment, even when its time or place was
+				// omitted. Alternative phrasings within a fact remain acceptable.
+				{Kind: CheckSaid, Line: 2, AfterMS: 5000,
+					Any:  []string{"meet", "meeting", "see you", "get together"},
+					Note: "the second sentence arranges a meeting"},
+				{Kind: CheckSaid, Line: 2, AfterMS: 5000,
+					Any:  []string{"tomorrow"},
+					Note: "the meeting is tomorrow"},
+				{Kind: CheckSaid, Line: 2, AfterMS: 5000,
+					Any:  []string{"three", "3", "15:00", "15.00"},
+					Note: "the meeting time is three"},
+				{Kind: CheckSaid, Line: 2, AfterMS: 5000,
+					Any:  []string{"afternoon", "p.m.", "pm", "p. m.", "15:00", "15.00"},
+					Note: "three in the afternoon, not an unspecified or morning time"},
+				{Kind: CheckSaid, Line: 2, AfterMS: 5000,
+					Any:  []string{"office"},
+					Note: "the meeting place is the office"},
+			},
+		},
+		{
+			Name: "waiting out a silence they asked for",
+			Note: "the trigger is the clock: nothing is said and nothing is seen, and the moment " +
+				"arrives because time passed",
+			Instructions: "You are a voice assistant. Follow the instructions the person gives you " +
+				"about when to speak.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I'm going to read something now, so I'll be quiet for a while. If I haven't said anything for about fifteen seconds, ask whether I'm still there."},
+			},
+			// Long enough for the condition to arrive and for a premature
+			// answer to be distinguishable from a punctual one.
+			TrailingMS: 30000,
+			Checks: []Check{
+				// Every other scenario here is triggered by speech or a frame.
+				// This one has neither after the instruction, so the only
+				// thing that can move the agent is the silence lengthening -
+				// which is the one input the interaction model is given on
+				// every decision and has never been asked to act on.
+				// From five seconds, because saying "I will" is what the
+				// voice is told to do when somebody sets a policy, and the
+				// scenarios beside this one depend on it happening.
+				{Kind: CheckSilent, Line: 0, FromMS: 5000, AfterMS: 12000,
+					Note: "they said fifteen seconds; speaking at eight is not waiting"},
+				// From twelve seconds, and not from the line. The agreement to
+				// do this contains the words the check-in would - "I'll check
+				// in to see if you're still there" - so a window that opens at
+				// the line is satisfied by the promise instead of the act, and
+				// one run passed that way while saying nothing afterwards at
+				// all. "all right" is gone for the same reason: it matches an
+				// acknowledgement that agrees to anything.
+				{Kind: CheckSaid, Line: 0, FromMS: 12000, AfterMS: 26000,
+					Any:  []string{"still there", "still with", "you there", "everything all right"},
+					Note: "and when it does arrive it is the thing they asked for, not the promise to do it"},
+			},
+		},
+		{
+			Name: "somebody else's conversation",
+			Note: "the complement of the waiter: a third party talking near the microphone who is " +
+				"not addressing the agent at all",
+			Instructions: "You are a voice assistant helping the user with their work. " +
+				"Answer them when they speak to you.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I'm just going to get on with this for a bit."},
+				// Directed at each other, in the room, about nothing the agent
+				// has anything to do with. Every word of it is a well-formed
+				// request to somebody.
+				{Speaker: "other", AtMS: 8000, Text: "Did you get the milk on the way in? I looked in the fridge and there wasn't any."},
+				{Speaker: "other", AtMS: 16000, Text: "No, I forgot again. Can you put it on the list for tomorrow?"},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckSilent, Line: 1, AfterMS: 4000,
+					Note: "a question in the room is not a question to the agent"},
+				{Kind: CheckSilent, Line: 2, AfterMS: 4000,
+					Note: "and neither is the answer to it"},
+			},
+		},
+		{
+			Name: "an acknowledgement is not an interruption",
+			Note: "the agent is mid-sentence and somebody says mhm; stopping would be wrong",
+			Instructions: "You are a helpful voice assistant for the fictional Northwind store. " +
+				"The following refund policy is known source material for this conversation. " +
+				"First, find the order number and purchase email, and check that the request is within thirty days of delivery. " +
+				"Second, pack the item with all accessories in its original packaging; photograph any damage before packing. " +
+				"Third, support emails a prepaid return label. Attach it outside the parcel and keep the carrier receipt as proof of return. " +
+				"Fourth, the warehouse inspects the returned item, normally within two business days, and sends an approval or explains a rejection. " +
+				"Fifth, an approved refund goes to the original payment method within five business days; shipping is refunded only for damaged items. " +
+				"When asked for detail, explain all five steps in order, with a complete sentence explaining each step. " +
+				"Use this policy; no lookup or additional customer information is needed to explain the process.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "Tell me everything you know about the refund process, in as much detail as you can manage."},
+				{Speaker: "user", AtMS: 9000, Text: "Mhm."},
+				{Speaker: "user", AtMS: 11500, Text: "Right, yeah."},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckSpoke, Line: 0, AfterMS: 5000, Note: "they asked for detail"},
+				{Kind: CheckSaid, Line: -1, Any: []string{"order number"}, Note: "explain how to identify the purchase"},
+				{Kind: CheckSaid, Line: -1,
+					Any:  []string{"purchase email", "confirmation email", "email confirmation", "order confirmation"},
+					Note: "include the purchase confirmation needed alongside the order number"},
+				{Kind: CheckSaid, Line: -1, Any: []string{"return label"}, Note: "explain the supplied return procedure"},
+				{Kind: CheckSaid, Line: -1, Any: []string{"original payment method"}, Note: "explain where the approved refund goes"},
+				// 800 rather than 500: a synthesised explanation pauses for up to
+				// half a second between its own sentences (measured 520 ms inside
+				// one segment while playback ran on), and a stop is seconds long.
+				{Kind: CheckHeldAcross, Line: 1, BeforeMS: 1000, AfterMS: 1000, MaxGapMS: 800,
+					Note: "mhm acknowledges the explanation; the agent must keep speaking through it"},
+				{Kind: CheckHeldAcross, Line: 2, BeforeMS: 1000, AfterMS: 1000, MaxGapMS: 800,
+					Note: "right, yeah is another backchannel; the explanation must continue through it too"},
+				{Kind: CheckNotSaid, Line: 2, AfterMS: 4000,
+					Any:  []string{"what would you like", "how can I help", "anything else", "sorry"},
+					Note: "an acknowledgement is not a new question and must not restart the turn",
+				},
+			},
+		},
+		{
+			Name: "telling them what it saw",
+			Note: "the visual case: nobody is speaking at all, and what makes the moment is something " +
+				"the agent saw",
+			Instructions: "You are watching the user's screen while they work. Follow the instructions " +
+				"they give you about when to speak.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "I'm going to read for a bit. Tell me the moment the build finishes, and don't say anything else."},
+			},
+			Sees: []Sight{
+				{AtMS: 7000, Path: "bench/scenario/testdata/build-running.png",
+					Note: "the condition has not happened; nothing here is worth speaking about"},
+				{AtMS: 16000, Path: "bench/scenario/testdata/build-finished.png",
+					Note: "the condition they asked to be told about"},
+			},
+			TrailingMS: 18000,
+			Checks: []Check{
+				// Four seconds. The frame is narrated by a vision model before
+				// it is an observation at all, and measured it lands 1.8s after
+				// the frame - so this is a real bound rather than a generous
+				// one. An earlier version allowed fifteen, which turned out to
+				// be measuring a duplicate acknowledgement rather than latency.
+				{Kind: CheckSaid, Sight: 2, AfterMS: 4000,
+					Any:  []string{"finished", "done", "built", "passed", "complete"},
+					Note: "after seeing it finish, not when acknowledging that they would watch for it"},
+				{Kind: CheckAnsweredWithin, Sight: 2, AfterMS: 3000,
+					Note: "\"the moment it finishes\" is a claim about latency, so it is measured as one"},
+				{Kind: CheckSilent, Sight: 1, AfterMS: 7000,
+					Note: "the first screen shows it still running, which is not the moment they asked for"},
+				// Before anything has been seen at all. A model that can look
+				// at frames announced "the build has finished" three seconds
+				// before the first one arrived, then corrected itself twice -
+				// and passed every other check here, because they all ask
+				// whether it said the right thing near the right moment and
+				// none of them asked whether it knew.
+				{Kind: CheckNotSaid, Line: 0, AfterMS: 3000,
+					Any:  []string{"has finished", "is finished", "finished successfully", "is complete", "has completed"},
+					Note: "nothing has been seen yet, so there is nothing it can know has finished"},
+			},
+		},
+		{
+			Name: "an ordinary question",
+			Note: "the control: most of this suite asks for silence, and a system that had simply " +
+				"stopped talking would pass all of it",
+			Instructions: "You are a helpful voice assistant. Answer briefly.",
+			Script: []Line{
+				{Speaker: "user", AtMS: 0, Text: "What's the capital of France?"},
+			},
+			TrailingMS: 6000,
+			Checks: []Check{
+				{Kind: CheckSpoke, Line: 0, AfterMS: 4000, Note: "a finished question with nothing standing in the way"},
+				{Kind: CheckAnsweredWithin, Line: 0, AfterMS: 2500,
+					Note: "waveform time: from the last sample of their question to the first of the answer"},
+				{Kind: CheckSaid, Any: []string{"paris"}, Line: -1, Note: "and the answer should be right"},
+			},
+		},
+	}
+	return append(base, SubturnSuite()...)
+}
+
+// SubturnSuite is the focused extension for behavior whose correctness depends
+// on a boundary inside the assistant's own speech. It remains a named group so
+// focused diagnostics can select it, but Suite includes it in the reviewed
+// twelve-case acceptance contract and its 180-attempt reportable population.
+func SubturnSuite() []Scenario {
+	return []Scenario{{
+		Name: "picking up where it was cut off",
+		Note: "an interruption is a boundary inside a sentence, and carrying on means " +
+			"carrying on from the word they heard rather than from the word it wrote; " +
+			"the bounded recording tests stopping and resumed progression, not completion of all forty numbers",
+		// Counting is the instrument, not the subject. Any long turn can be
+		// interrupted, but only a count makes the boundary legible from outside:
+		// every item is distinct, ordered, and equally long, so where the agent
+		// resumes says exactly what it believed it had already said.
+		Instructions: "You are a voice assistant. Do exactly what the person asks. " +
+			"If they stop you and then ask you to carry on, carry on from where you " +
+			"had actually got to.",
+		Script: []Line{
+			// Two sentences, because that is how it arrives: the recogniser ends
+			// the utterance at the pause after "for me", the agent has begun,
+			// and the rest of the instruction reaches it mid-count. The harness
+			// says a line one sentence at a time and now meets the same split.
+			{Speaker: "user", AtMS: 0, Text: "Count out loud from one to forty for me. Slowly, one number at a time, and don't say anything else."},
+			{Speaker: "user", AtMS: 15000, Text: "Okay, hold on a moment."},
+			{Speaker: "user", AtMS: 25000, Text: "Right, carry on from where you got to."},
+		},
+		TrailingMS: 14000,
+		Checks: []Check{
+			{Kind: CheckSilent, Line: 1, FromMS: 2500, AfterMS: 8000,
+				Note: "they stopped it, and it has to stay stopped until they say otherwise"},
+			{Kind: CheckSpoke, Line: 2, AfterMS: 6000,
+				Note: "they asked it to carry on"},
+			{Kind: CheckResumed, Line: 2, Interrupted: 1, AfterMS: 12000, BeforeMS: 2000,
+				Count: &CountRequirement{From: 1, Through: 40, MinimumBefore: 3, MinimumAfter: 3, StopWithinMS: 2500},
+				Note: "carrying on means from the last number they heard, not from the " +
+					"last one it had written and not from the beginning; sustain an ordered count on both sides and be audible near the interruption"},
+		},
+	}}
+}

@@ -1,0 +1,9 @@
+
+@keyframes galen-dex-spin {to {transform:rotate(360deg)}}
+@keyframes galen-dex-spin-rev {to {transform:rotate(-360deg)}}
+@keyframes galen-dex-bar {0%,100%{transform:scaleY(.4)}50%{transform:scaleY(1)}}
+.animate-dex-spin {animation:galen-dex-spin 12s linear infinite}
+.animate-dex-spin-slow {animation:galen-dex-spin 22s linear infinite}
+.animate-dex-spin-slower {animation:galen-dex-spin 42s linear infinite}
+.animate-dex-spin-rev {animation:galen-dex-spin-rev 18s linear infinite}
+.animate-dex-bar {animation:galen-dex-bar 1.2s ease-in-out infinite}

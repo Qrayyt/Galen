@@ -1,0 +1,13 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "policy.GenerateOnObservation",
+      "identity": {
+        "name": "policy.GenerateOnObservation",
+        "revision": 3,
+        "digest": "sha256:7c43ec6bd816082a56a62808573faac2e8949d3c2d594bd348a4d3464fcae5aa"
+      }
+    }
+  ]
+}

@@ -1,0 +1,179 @@
+package scenarioconversation
+
+import (
+	"context"
+	"encoding/json"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	legacyaction "github.com/bojieli/OpenRealtime/action"
+	v1 "github.com/bojieli/OpenRealtime/api/v1"
+	projectarch "github.com/bojieli/OpenRealtime/architecture"
+	legacy "github.com/bojieli/OpenRealtime/binding"
+	"github.com/bojieli/OpenRealtime/computeruse"
+	"github.com/bojieli/OpenRealtime/continuation"
+	cognitionelements "github.com/bojieli/OpenRealtime/elements/cognition"
+	perceptionelements "github.com/bojieli/OpenRealtime/elements/perception"
+	policyelements "github.com/bojieli/OpenRealtime/elements/policy"
+	speechelements "github.com/bojieli/OpenRealtime/elements/speech"
+	"github.com/bojieli/OpenRealtime/graph/inspect"
+	"github.com/bojieli/OpenRealtime/perception"
+	"github.com/bojieli/OpenRealtime/spoken"
+	"github.com/bojieli/OpenRealtime/trajectory"
+)
+
+type pluginWordAligner struct{}
+
+func (pluginWordAligner) Words(context.Context, spoken.Audio) ([]spoken.Word, error) {
+	return []spoken.Word{{Text: "heard", StartMS: 0, EndMS: 100}}, nil
+}
+
+func TestPluginInventoryIsResourceFreeAndPinsProviderDependencies(t *testing.T) {
+	architecture, err := projectarch.Default().Resolve("cascade.composed-policy@1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asrOpened, policyOpened, modelOpened, ttsOpened, wordTimingOpened atomic.Int32
+	artifact := func(name string) inspect.ArtifactIdentity {
+		return inspect.ArtifactIdentity{ID: "plugin://test/" + name, Revision: "build:1"}
+	}
+	config := PluginConfig{
+		RuntimeArtifact: artifact("adapter"), DependencyArtifact: artifact("session-services"),
+		Architecture: architecture,
+		ASR: ASRPlugin{
+			Reference: ASRReference, Artifact: artifact("asr"),
+			Descriptor: v1.Descriptor{Name: "test-asr", Version: "1", Capabilities: v1.Capabilities{}},
+			Factory: func(context.Context, legacy.Options) (v1.PerceptionProvider, error) {
+				asrOpened.Add(1)
+				return nil, nil
+			},
+		},
+		Policy: PolicyPlugin{
+			Reference: PolicyReference, Artifact: artifact("policy"),
+			Descriptor: policyelements.SemanticDeciderDescriptor{
+				Provider: "test", Model: "test-policy", Protocol: "test-enumerated", Revision: "1",
+				ConfigurationDigest: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+				DecisionTimeoutMS:   1000,
+			},
+			Factory: func(context.Context, legacy.Options) (policyelements.SemanticDecider, error) {
+				policyOpened.Add(1)
+				return nil, nil
+			},
+		},
+		Model: ModelPlugin{
+			Reference: ModelReference, Artifact: artifact("model"),
+			Descriptor: continuation.Descriptor{
+				Provider: "test", Model: "test-model", Phase: trajectory.PhaseFast,
+				Effort: continuation.EffortLow, Streaming: true,
+				ToolAuthority:   continuation.ToolAuthorityPropose,
+				SpeechAuthority: continuation.SpeechAuthorityVoice,
+			},
+			Factory: func(context.Context, legacy.Options) (continuation.Provider, error) {
+				modelOpened.Add(1)
+				return nil, nil
+			},
+		},
+		TTS: TTSPlugin{
+			Reference: TTSReference, Artifact: artifact("tts"), Voice: "test-voice",
+			Descriptor: v1.Descriptor{Name: "test-tts", Version: "1", Capabilities: v1.Capabilities{v1.CapabilityPCM16Output: true}},
+			Factory: func(context.Context, legacy.Options) (v1.SpeechProvider, error) {
+				ttsOpened.Add(1)
+				return nil, nil
+			},
+		},
+		WordTiming: &WordTimingPlugin{
+			Reference: WordTimingReference, Artifact: artifact("word-timing"),
+			Interval: 900 * time.Millisecond,
+			Factory: func(context.Context, legacy.Options) (spoken.Aligner, error) {
+				wordTimingOpened.Add(1)
+				return pluginWordAligner{}, nil
+			},
+		},
+		Target: computeruse.Target{Name: "browser", Sources: []string{"screen"}, Width: 1280, Height: 720},
+		Gate:   perception.DefaultGateConfig(), MaxOutputTokens: 1024,
+	}
+	plugin, err := NewPlugin(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plugin.AdapterPlugin().Reference != AdapterReference || plugin.Selection().ProfileName != ProfileName {
+		t.Fatalf("adapter inventory = %+v / %+v", plugin.AdapterPlugin(), plugin.Selection())
+	}
+
+	assembly := plugin.AssemblyDependencies()
+	mount := plugin.MountDependencies()
+	if len(assembly) != len(dependencyNames) || len(mount) != len(dependencyNames) {
+		t.Fatalf("dependency inventory = %d/%d, want %d", len(assembly), len(mount), len(dependencyNames))
+	}
+	wantProvider := map[string]inspect.ArtifactIdentity{
+		cognitionelements.ProviderRegistryService:     config.Model.Artifact,
+		perceptionelements.ASRProviderRegistryService: config.ASR.Artifact,
+		policyelements.SemanticDeciderRegistryService: config.Policy.Artifact,
+		speechelements.TTSProviderRegistryService:     config.TTS.Artifact,
+	}
+	for index, dependency := range assembly {
+		want := config.DependencyArtifact
+		if provider, found := wantProvider[dependency.Name]; found {
+			want = provider
+		}
+		if dependency.Artifact != want || mount[index].Name != dependency.Name || mount[index].Artifact != want {
+			t.Fatalf("dependency %q artifact = %+v / %+v, want %+v",
+				dependency.Name, dependency.Artifact, mount[index].Artifact, want)
+		}
+	}
+	if asrOpened.Load() != 0 || policyOpened.Load() != 0 || modelOpened.Load() != 0 ||
+		ttsOpened.Load() != 0 || wordTimingOpened.Load() != 0 {
+		t.Fatalf("resource-free inventory opened providers: asr=%d policy=%d model=%d tts=%d timing=%d",
+			asrOpened.Load(), policyOpened.Load(), modelOpened.Load(), ttsOpened.Load(), wordTimingOpened.Load())
+	}
+
+	if asrOpened.Load() != 0 || policyOpened.Load() != 0 || modelOpened.Load() != 0 ||
+		ttsOpened.Load() != 0 || wordTimingOpened.Load() != 0 {
+		t.Fatal("reading resource-free graph inventory opened a provider")
+	}
+	bundle, err := newSessionBundle(context.Background(), legacy.Options{
+		SessionID: "word-timing-session", Sink: &playbackClientSink{},
+	}, plugin.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bundle.Close(nil)
+	timing := bundle.playback.PlaybackTiming()
+	if wordTimingOpened.Load() != 1 || timing.Aligner == nil || timing.Interval != 900*time.Millisecond {
+		t.Fatalf("session-local word timing = opened %d config %+v", wordTimingOpened.Load(), timing)
+	}
+}
+
+func TestNormalizedToolDeclarationsOwnDeploymentNormalizerMetadata(t *testing.T) {
+	source := []ToolDeclaration{{
+		Name: "track_order", Description: "track an order",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"order_id":{"type":"string"}}}`),
+		ArgumentNormalizers: []legacyaction.ToolArgumentNormalizer{{
+			Argument: "order_id", Normalizer: legacyaction.ToolParameterCompactASCIIAlphanumericV1,
+		}},
+	}}
+	normalized, err := normalizeToolDeclarations(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized[0].ArgumentNormalizers) != 1 ||
+		normalized[0].ArgumentNormalizers[0].Normalizer !=
+			legacyaction.ToolParameterCompactASCIIAlphanumericV1 {
+		t.Fatalf("normalized deployment lost argument policy: %+v", normalized[0])
+	}
+	source[0].Parameters[0] = '['
+	source[0].ArgumentNormalizers[0].Argument = "mutated-source"
+	if string(normalized[0].Parameters) !=
+		`{"properties":{"order_id":{"type":"string"}},"type":"object"}` ||
+		normalized[0].ArgumentNormalizers[0].Argument != "order_id" {
+		t.Fatalf("normalized declaration retained caller-owned buffers: %+v", normalized[0])
+	}
+
+	cloned := cloneToolDeclarations(normalized)
+	cloned[0].Parameters[0] = '['
+	cloned[0].ArgumentNormalizers[0].Argument = "mutated-clone"
+	if normalized[0].Parameters[0] != '{' || normalized[0].ArgumentNormalizers[0].Argument != "order_id" {
+		t.Fatalf("tool declaration clone shares private metadata: %+v", normalized[0])
+	}
+}

@@ -1,0 +1,141 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "action.AuthorizedCallCommit",
+      "identity": {
+        "name": "action.AuthorizedCallCommit",
+        "revision": 4,
+        "digest": "sha256:370afcb26b5c434c69fe8b7896ad4a66f45c7eac221add2d0ee00951af9c5feb"
+      }
+    },
+    {
+      "reference": "action.Dispatch",
+      "identity": {
+        "name": "action.Dispatch",
+        "revision": 3,
+        "digest": "sha256:9b5840098e40fc35cb86f758e417460ce2b7d4254a0d1b0ab21f74786c96027a"
+      }
+    },
+    {
+      "reference": "action.LedgerCommit",
+      "identity": {
+        "name": "action.LedgerCommit",
+        "revision": 2,
+        "digest": "sha256:d0936589c792953801bface1a615434486d6523bb2d05ae967e04f7d453f0f96"
+      }
+    },
+    {
+      "reference": "action.ToolLookup",
+      "identity": {
+        "name": "action.ToolLookup",
+        "revision": 2,
+        "digest": "sha256:944908a3b1db1151ad6d3d85f575b7b1b7402f7d91c1c6fed05349c1da1d59ab"
+      }
+    },
+    {
+      "reference": "action.ToolResultCommit",
+      "identity": {
+        "name": "action.ToolResultCommit",
+        "revision": 4,
+        "digest": "sha256:9fc6057e1e47de87b14ae0ff7ec43df59d81240a4ae9ac93e8e9eca89094de95"
+      }
+    },
+    {
+      "reference": "authority.Confirmation",
+      "identity": {
+        "name": "authority.Confirmation",
+        "revision": 3,
+        "digest": "sha256:152370cb35f3f2bf8273bedf3ccee0ba893fef92dbd10225cf102dadf4def775"
+      }
+    },
+    {
+      "reference": "authority.ProposalAdmission",
+      "identity": {
+        "name": "authority.ProposalAdmission",
+        "revision": 3,
+        "digest": "sha256:ad0d65d84433491b5ee882a79dc8593b84a157f346863a3340261dd3ea8e47fb"
+      }
+    },
+    {
+      "reference": "authority.ProvenanceJoin",
+      "identity": {
+        "name": "authority.ProvenanceJoin",
+        "revision": 2,
+        "digest": "sha256:43a1ac4dad1242b31225b6252b093f94fca6f32172d936877f9b468acc648bc3"
+      }
+    },
+    {
+      "reference": "authority.TargetFence",
+      "identity": {
+        "name": "authority.TargetFence",
+        "revision": 2,
+        "digest": "sha256:d146c02a24175e70b861ef4f3ae5e0134e603e5e65e021a859b23995e61bba2d"
+      }
+    },
+    {
+      "reference": "cognition.TextModel",
+      "identity": {
+        "name": "cognition.TextModel",
+        "revision": 3,
+        "digest": "sha256:1596e62d7da68f20107787c8b627b1cc32ba6ff5f3f0c1b3f4f3a5a7a7bf52df"
+      }
+    },
+    {
+      "reference": "flow.Mux",
+      "identity": {
+        "name": "flow.Mux",
+        "revision": 1,
+        "digest": "sha256:91976286e56562ebb11b6598d20c70394dae476d324ac209f3e775ec4b89b6fc"
+      }
+    },
+    {
+      "reference": "flow.Tee",
+      "identity": {
+        "name": "flow.Tee",
+        "revision": 1,
+        "digest": "sha256:54c309b4fa80950ca8815b63de7bb84947c9aa890fc3f638cd6a5afc574e40d6"
+      }
+    },
+    {
+      "reference": "interaction.ControlSerializationQuarantine",
+      "identity": {
+        "name": "interaction.ControlSerializationQuarantine",
+        "revision": 2,
+        "digest": "sha256:f5d773fcdfe5fe831b37e853185bea03ef86276f5b30999532d8cecb33654f62"
+      }
+    },
+    {
+      "reference": "interaction.ModelResultCommit",
+      "identity": {
+        "name": "interaction.ModelResultCommit",
+        "revision": 3,
+        "digest": "sha256:c3fdf3b43e31f4409fa33a513a37690c15167a131d4dd660e56ea2bc91c07a12"
+      }
+    },
+    {
+      "reference": "policy.GenerateOnObservation",
+      "identity": {
+        "name": "policy.GenerateOnObservation",
+        "revision": 3,
+        "digest": "sha256:7c43ec6bd816082a56a62808573faac2e8949d3c2d594bd348a4d3464fcae5aa"
+      }
+    },
+    {
+      "reference": "state.ObservationCommit",
+      "identity": {
+        "name": "state.ObservationCommit",
+        "revision": 2,
+        "digest": "sha256:c66bb9dccc83f20e053bf6bdd0289bd46d185718ff0f458c00eca1533bcd5b35"
+      }
+    },
+    {
+      "reference": "state.TrajectoryStore",
+      "identity": {
+        "name": "state.TrajectoryStore",
+        "revision": 2,
+        "digest": "sha256:b3d813911f931b5e61b6a2edb782ad25a3d4ffe6e256b8a713a1e61c1b2dead7"
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "elements": [
+    {
+      "reference": "perception.ASR",
+      "identity": {
+        "name": "perception.ASR",
+        "revision": 2,
+        "digest": "sha256:eb5702c5fdc955f766e04ea767dde51c3d740580c6b1e368a99f335a963054a6"
+      }
+    },
+    {
+      "reference": "state.ObservationCommit",
+      "identity": {
+        "name": "state.ObservationCommit",
+        "revision": 2,
+        "digest": "sha256:c66bb9dccc83f20e053bf6bdd0289bd46d185718ff0f458c00eca1533bcd5b35"
+      }
+    },
+    {
+      "reference": "state.TrajectoryStore",
+      "identity": {
+        "name": "state.TrajectoryStore",
+        "revision": 2,
+        "digest": "sha256:b3d813911f931b5e61b6a2edb782ad25a3d4ffe6e256b8a713a1e61c1b2dead7"
+      }
+    }
+  ]
+}

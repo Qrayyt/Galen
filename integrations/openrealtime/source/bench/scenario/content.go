@@ -1,0 +1,234 @@
+package scenario
+
+import (
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/bojieli/OpenRealtime/bench"
+)
+
+// ScorerVersion changes whenever the deterministic checks or their matching
+// semantics change. Earlier unversioned results used substring matching and
+// weaker translation requirements. Version 2 added whole-word content checks;
+// version 3 also requires recorded acoustic continuity across acknowledgements.
+// Version 4 supplies refund source content, checks explanation coverage, and
+// retains response-terminal evidence without inferring cancellation from silence.
+// Version 5 also requires attributed audio and rejects responses aborted before
+// the hold ends, even when replacement audio fills the acoustic window.
+// Earlier scores are not evidence for this version.
+// Version 6 resolves speech-triggered diagnostic cues from retained input and
+// independently observed agent PCM, failing missing opportunities explicitly.
+// Version 7 requires the purchase-confirmation detail in both acknowledgement
+// scenarios; mentioning the unrelated return-label email cannot replace it.
+// Version 8 requires a sufficiently long ordered count on both sides of an
+// interruption, within its authored range, and recent captured speech before it.
+// Version 9 includes speech heard during the allowed stopping interval in the
+// resumed prefix and requires captured silence until the request to resume.
+// Version 10 independently recognizes exact event-count content and checks
+// captured silence everywhere outside the authored count-response windows.
+const ScorerVersion uint64 = 10
+
+func validateCheckKind(check Check) error {
+	switch check.Kind {
+	case CheckSilent, CheckSpoke, CheckAnsweredWithin:
+	case CheckEventCounts:
+		if len(check.Events) == 0 || len(check.Events) > 64 || check.Line != 0 || check.Sight != 0 ||
+			check.FromMS != 0 || check.AfterMS != 0 || check.Count != nil || len(check.Any) != 0 ||
+			check.Interrupted != 0 || check.BeforeMS != 0 || check.MaxGapMS != 0 || check.DuringTrigger || check.Tool != "" {
+			return errors.New("event counts require one bounded authored event inventory without another window or content rule")
+		}
+		previous := -1
+		for _, event := range check.Events {
+			if event.Line <= previous || event.Number < 1 || event.Number > 99 || event.WithinMS < 1 || event.WithinMS > 10000 {
+				return errors.New("event counts require increasing source lines, numbers from 1 to 99, and response windows up to ten seconds")
+			}
+			previous = event.Line
+		}
+	case CheckResumed:
+		count := check.Count
+		if count == nil || count.From < 1 || count.Through > 99 || count.Through <= count.From ||
+			count.MinimumBefore < 3 || count.MinimumAfter < 3 ||
+			count.MinimumBefore > count.Through-count.From || count.MinimumAfter > count.Through-count.From ||
+			check.Line < 0 || check.Sight != 0 || check.FromMS != 0 || check.AfterMS <= 0 ||
+			check.BeforeMS <= audibleMS || check.BeforeMS > 10_000 || count.StopWithinMS < 0 || count.StopWithinMS > 10_000 {
+			return errors.New("resumed check requires a bounded counting range, at least three observed numbers on each side, and a positive acoustic lookback")
+		}
+	case CheckHeldAcross:
+		if check.Line < 0 || check.Sight != 0 || check.FromMS != 0 ||
+			check.BeforeMS <= 0 || check.AfterMS <= 0 || check.MaxGapMS <= 0 {
+			return errors.New("held-across check requires a spoken line and positive before, after, and gap windows")
+		}
+		if check.BeforeMS > 10_000 || check.AfterMS > 10_000 || check.MaxGapMS > 10_000 {
+			return errors.New("held-across check window exceeds ten seconds")
+		}
+	case CheckToolCalled:
+		if strings.TrimSpace(check.Tool) == "" {
+			return errors.New("tool check has no tool name")
+		}
+	case CheckReachedMenu:
+	case CheckSaid, CheckNotSaid:
+		if len(check.Any) == 0 {
+			return errors.New("content check has no phrases")
+		}
+		for _, phrase := range check.Any {
+			if strings.TrimSpace(phrase) == "" {
+				return errors.New("content check has an empty phrase")
+			}
+		}
+	default:
+		return fmt.Errorf("unknown kind %q", check.Kind)
+	}
+	return nil
+}
+
+func validateCheckAnchor(check Check, lines, sights int) error {
+	if check.Kind == CheckEventCounts {
+		for _, event := range check.Events {
+			if event.Line < 0 || event.Line >= lines {
+				return errors.New("count event is absent from the timeline")
+			}
+		}
+		return nil
+	}
+	// These two checks concern the call's complete action history, not a
+	// timed response. Their zero-valued Line does not require spoken input.
+	if check.Kind == CheckToolCalled || check.Kind == CheckReachedMenu {
+		return nil
+	}
+	if check.Sight < 0 || check.Sight > sights {
+		return fmt.Errorf("sight %d is absent from the timeline", check.Sight)
+	}
+	if check.Sight == 0 && check.Line >= lines {
+		return fmt.Errorf("line %d is absent from the timeline", check.Line)
+	}
+	if check.Kind == CheckResumed && (check.Interrupted < 0 || check.Interrupted >= lines) {
+		return errors.New("interruption is absent from the timeline")
+	}
+	return nil
+}
+
+func validateScenarioChecks(item Scenario) error {
+	if len(item.Checks) == 0 {
+		return errors.New("scenario has no behavior checks")
+	}
+	for _, check := range item.Checks {
+		if err := validateCheckKind(check); err != nil {
+			return err
+		}
+		if err := validateCheckAnchor(check, len(item.Script), len(item.Sees)); err != nil {
+			return err
+		}
+		if check.Kind == CheckReachedMenu && item.Menu == nil {
+			return errors.New("menu outcome is unavailable")
+		}
+	}
+	return nil
+}
+
+func validateCheck(check Check, timeline Timeline) error {
+	if err := validateCheckKind(check); err != nil {
+		return err
+	}
+	if err := validateCheckAnchor(check, len(timeline.Spans), len(timeline.Sights)); err != nil {
+		return err
+	}
+	if check.Kind == CheckToolCalled || check.Kind == CheckReachedMenu {
+		return nil
+	}
+	if check.Sight > 0 {
+		if !canAddMS(timeline.Sights[check.Sight-1], check.AfterMS) {
+			return errors.New("sight window is outside the timeline clock")
+		}
+	} else if check.Line >= 0 {
+		span := timeline.Spans[check.Line]
+		if span.StartMS < 0 || span.EndMS <= span.StartMS ||
+			!canAddMS(span.EndMS, check.AfterMS) || !canAddMS(span.EndMS, check.FromMS) {
+			return errors.New("line window is outside the timeline clock")
+		}
+	}
+	return nil
+}
+
+func canAddMS(base, offset int) bool {
+	return base >= 0 && offset >= -base && (offset <= 0 || base <= math.MaxInt-offset)
+}
+
+func checkedText(check Check, transcript bench.Transcript, from, to int) string {
+	line := check.Line
+	if check.Sight > 0 {
+		// A sight owns its window even if Line requests the whole conversation.
+		line = 0
+	}
+	return normalizePhrase(saidBetween(transcript, line, from, to))
+}
+
+func normalizePhrase(text string) string {
+	return strings.ToLower(strings.Join(strings.Fields(text), " "))
+}
+
+func phraseWord(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r) || r == '_'
+}
+
+// containsPhrase keeps punctuation checks such as "?" literal, but a word or
+// number cannot be found inside a different word or number. In particular,
+// "none", "undone", and "30" are not evidence for "one", "done", or "3".
+//
+// A phrase of words is also looked for across the punctuation a voice puts
+// between the pieces of a running translation: "pleased. to meet you" said
+// the phrase "pleased to meet", one piece ending where the recogniser's
+// partial did. A phrase that carries punctuation of its own stays literal.
+func containsPhrase(text, phrase string) bool {
+	if containsPhraseLiteral(text, phrase) {
+		return true
+	}
+	if !strings.ContainsAny(phrase, " ") || strings.ContainsAny(phrase, ".,!?;:") {
+		return false
+	}
+	return containsPhraseLiteral(withoutClausePunctuation(text), phrase)
+}
+
+func withoutClausePunctuation(text string) string {
+	return strings.Map(func(r rune) rune {
+		if strings.ContainsRune(".,!?;:", r) {
+			return -1
+		}
+		return r
+	}, text)
+}
+
+func containsPhraseLiteral(text, phrase string) bool {
+	phrase = normalizePhrase(phrase)
+	if phrase == "" {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(phrase)
+	last, _ := utf8.DecodeLastRuneInString(phrase)
+	for offset := 0; offset < len(text); {
+		index := strings.Index(text[offset:], phrase)
+		if index < 0 {
+			return false
+		}
+		start := offset + index
+		end := start + len(phrase)
+		left, right := true, true
+		if start > 0 && phraseWord(first) {
+			previous, _ := utf8.DecodeLastRuneInString(text[:start])
+			left = !phraseWord(previous)
+		}
+		if end < len(text) && phraseWord(last) {
+			next, _ := utf8.DecodeRuneInString(text[end:])
+			right = !phraseWord(next)
+		}
+		if left && right {
+			return true
+		}
+		_, size := utf8.DecodeRuneInString(text[start:])
+		offset = start + size
+	}
+	return false
+}
