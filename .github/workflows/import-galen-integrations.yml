@@ -1,0 +1,76 @@
+name: Import pinned Galen integrations
+
+on:
+  push:
+    branches:
+      - feat/galen-1.0-dodaios
+    paths:
+      - scripts/galen/import_integrations.py
+      - .github/workflows/import-galen-integrations.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  source-integrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download exact upstream source commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .galen-upstream-checkouts
+          fetch_repo() {
+            local name="$1" repo="$2" commit="$3"
+            git clone -q --filter=blob:none --no-checkout "https://github.com/$repo.git" ".galen-upstream-checkouts/$name"
+            git -C ".galen-upstream-checkouts/$name" fetch -q --depth=1 origin "$commit"
+            if [ "$name" = "kaizumi" ]; then
+              git -C ".galen-upstream-checkouts/$name" sparse-checkout init --no-cone
+              git -C ".galen-upstream-checkouts/$name" sparse-checkout set --no-cone LICENSE actions/computer_control.py
+            fi
+            git -C ".galen-upstream-checkouts/$name" checkout -q --detach "$commit"
+            test "$(git -C ".galen-upstream-checkouts/$name" rev-parse HEAD)" = "$commit"
+          }
+          fetch_repo opendex wassgha/opendex 3e898343d1127c8d5075b459acdd55da83b83f04
+          fetch_repo kaizumi MusayevDoniyor/kaizumi 8085f243dd0d0a44603bd8e74d8f822ed8a88836
+          fetch_repo elissa inginddie/elissa 283c59e4061f954d8f7025105973d9953f2fa407
+          fetch_repo openrealtime bojieli/OpenRealtime d474a3469117f56ded45d79b431b9956d7acec97
+      - name: Integrate actual upstream implementation modules
+        run: python scripts/galen/import_integrations.py
+      - name: Basic syntax checks
+        run: |
+          python -m py_compile scripts/galen/import_integrations.py \
+             dodaios/plugins/tool/galen_kaizumi.py \
+             dodaios/plugins/tool/galen_audio_focus.py \
+             dodaios/galen_sources/kaizumi/computer_control.py \
+             dodaios/galen_sources/elissa/audio_mixer.py
+          test -f integrations/openrealtime/source/go.mod
+          test -f dodaios/ui/web/frontend/src/components/galen/hud/GalenHud.tsx
+          test -f third_party/galen-elissa/LICENSE
+      - name: Commit integrations to the feature branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add third_party/galen-opendex third_party/galen-kaizumi \
+             third_party/galen-elissa third_party/galen-openrealtime \
+             dodaios/ui/web/frontend/src/components/galen \
+             dodaios/ui/web/frontend/src/main.tsx \
+             dodaios/galen_sources \
+             dodaios/plugins/tool/galen_kaizumi.py \
+             dodaios/plugins/tool/galen_audio_focus.py \
+             integrations/openrealtime \
+             packaging/windows/build.ps1 pyproject.toml
+          if ! git diff --cached --quiet; then
+            git commit -m "feat(integrations): ship OpenDex HUD, Kaizumi actions, Elissa mixer and OpenRealtime companion"
+            git push origin HEAD:feat/galen-1.0-dodaios
+          fi
