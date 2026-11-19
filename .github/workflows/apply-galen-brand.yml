@@ -48,7 +48,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add dodaios.spec dodaios/__init__.py pyproject.toml dodaios/core/branding.py \
+          git add dodaios.spec dodaios.toml.example dodaios/__init__.py pyproject.toml dodaios/core/branding.py \
             dodaios/core/update_contract.py install/update-contract.json \
             dodaios/ui/web/frontend/src/lib/branding.ts \
             dodaios/ui/web/frontend/src/i18n/locales \

@@ -10,6 +10,38 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      frontend: ${{ steps.diff.outputs.frontend }}
+      release_candidate: ${{ steps.diff.outputs.release_candidate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Detect which checks this push invalidated
+        id: diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          if [[ "${{ github.event_name }}" == 'workflow_dispatch' || -z "$base" || "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+
+          frontend=false
+          if ! git diff --quiet "$base" "$GITHUB_SHA" -- dodaios/ui/web/frontend; then
+            frontend=true
+          fi
+
+          release_candidate=false
+          if git diff --name-only "$base" "$GITHUB_SHA" -- .galen-release-candidate | grep -qx '.galen-release-candidate'; then
+            release_candidate=true
+          fi
+
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+          echo "release_candidate=$release_candidate" >> "$GITHUB_OUTPUT"
+
   backend-syntax:
     runs-on: ubuntu-latest
     steps:
@@ -50,17 +82,40 @@ jobs:
           PY
 
   frontend-build:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' && needs.changes.outputs.release_candidate != 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: dodaios/ui/web/frontend
     steps:
       - uses: actions/checkout@v4
+      - name: Restore an already verified frontend with identical inputs
+        id: frontend-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            dodaios/ui/web/frontend/dist
+            .ci-cache/frontend-verified
+          key: galen-frontend-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
       - uses: actions/setup-node@v4
+        if: steps.frontend-cache.outputs.cache-hit != 'true'
         with:
           node-version: '22'
-      - run: npm ci
-      - run: npm test
-      - run: npm run build
+          cache: npm
+          cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
+      - if: steps.frontend-cache.outputs.cache-hit != 'true'
+        run: npm ci
+      - if: steps.frontend-cache.outputs.cache-hit != 'true'
+        run: npm test
+      - if: steps.frontend-cache.outputs.cache-hit != 'true'
+        run: |
+          npm run build
+          mkdir -p ../../../../.ci-cache
+          printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-verified
         env:
           NODE_OPTIONS: --max-old-space-size=6144
+      - name: Verify the cached or rebuilt bundle
+        run: |
+          test -s dist/index.html
+          test -s ../../../../.ci-cache/frontend-verified
