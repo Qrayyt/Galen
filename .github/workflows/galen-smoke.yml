@@ -19,9 +19,11 @@ jobs:
           python-version: '3.12'
       - name: Compile changed Python modules
         run: |
-          python -m py_compile dodaios/core/config.py dodaios/ui/web/settings_routes.py \
+          python -m py_compile dodaios/core/config.py dodaios/core/update_contract.py \
+            dodaios/ui/relauncher.py dodaios/ui/web/settings_routes.py \
             packaging/pyinstaller_rthook_frozen.py scripts/galen/brand.py \
             scripts/galen/validate_release.py
+          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'galen.toml'"
           python scripts/galen/validate_release.py
       - name: Validate Russian locale data
         run: |

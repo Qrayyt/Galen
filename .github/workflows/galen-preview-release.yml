@@ -31,6 +31,7 @@ jobs:
       - name: Validate Python and source provenance
         run: |
           python -m py_compile dodaios/__init__.py dodaios/core/branding.py \
+            dodaios/core/update_contract.py dodaios/ui/relauncher.py \
             packaging/pyinstaller_rthook_frozen.py scripts/galen/validate_release.py \
             dodaios/plugins/tool/galen_kaizumi.py \
             dodaios/plugins/tool/galen_audio_focus.py \
@@ -41,7 +42,7 @@ jobs:
           tree=ast.parse(pathlib.Path('dodaios/core/branding.py').read_text())
           constants={n.targets[0].id:n.value.value for n in tree.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and isinstance(n.value,ast.Constant)}
           assert constants['PRODUCT_NAME']=='Galen'
-          assert constants['WINDOWS_USER_DATA_DIR_NAME']=='Galen'
+          assert constants['WINDOWS_USER_DATA_DIR_NAME']=='GalenData'
           assert constants['DEFAULT_OFFICIAL_REPO_SLUG']=='Qrayyt/Galen'
           assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0'
           assert pathlib.Path('integrations/openrealtime/source/go.mod').is_file()
@@ -50,6 +51,7 @@ jobs:
           assert pathlib.Path('third_party/galen-elissa/LICENSE').is_file()
           assert pathlib.Path('third_party/galen-openrealtime/LICENSE').is_file()
           PY
+          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'galen.toml'"
           python scripts/galen/validate_release.py
       - name: Build original Dodaios React workspace with Galen integrations
         working-directory: dodaios/ui/web/frontend

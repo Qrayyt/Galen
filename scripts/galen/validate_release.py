@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -52,9 +53,10 @@ def digest(relative: str) -> str:
 def main() -> None:
     branding = literal_assignments("dodaios/core/branding.py")
     expect(branding.get("PRODUCT_NAME"), "Galen", "product name")
-    expect(branding.get("WINDOWS_USER_DATA_DIR_NAME"), "Galen", "Windows profile")
+    expect(branding.get("WINDOWS_USER_DATA_DIR_NAME"), "GalenData", "Windows profile")
     expect(branding.get("LEGACY_WINDOWS_USER_DATA_DIR_NAMES"), (), "profile isolation")
     expect(branding.get("CONFIG_FILE_NAME"), "galen.toml", "configuration file")
+    expect(branding.get("MACOS_BUNDLE_ID"), "com.galen.desktop", "macOS managed bundle id")
     expect(branding.get("WINDOWS_MUTEX_NAME"), r"Global\Galen_v1", "Windows mutex")
     expect(branding.get("DEFAULT_OFFICIAL_REPO_SLUG"), "Qrayyt/Galen", "repository")
 
@@ -77,7 +79,7 @@ def main() -> None:
     expect_text("dodaios.spec", '"CFBundleDisplayName": "Galen"')
 
     hook = literal_assignments("packaging/pyinstaller_rthook_frozen.py")
-    expect(hook.get("_WINDOWS_USER_DATA_DIR_NAME"), "Galen", "frozen Windows profile")
+    expect(hook.get("_WINDOWS_USER_DATA_DIR_NAME"), "GalenData", "frozen Windows profile")
     expect(hook.get("_LEGACY_WINDOWS_USER_DATA_DIR_NAMES"), (), "frozen profile isolation")
     expect(hook.get("_CONFIG_FILE_NAME"), "galen.toml", "frozen configuration")
     expect(hook.get("_GUI_EXE_NAMES"), ("GalenApp", "PersonalJarvis"), "frozen GUI names")
@@ -95,6 +97,17 @@ def main() -> None:
     expect_text("packaging/windows/Dodaios.iss", '#define SignedSetupBaseName "Galen-Setup-x64"')
     expect_text("packaging/windows/Dodaios.iss", '#define LegacyCliExeName "dodaios.exe"')
     expect_text("packaging/windows/Dodaios.iss", 'Add the ""galen"" command to PATH')
+    expect_text("packaging/windows/Dodaios.iss", '#define UserDataDirDisplay "%LOCALAPPDATA%\\GalenData"')
+
+    contract = json.loads(read("install/update-contract.json"))
+    expect(contract.get("config_file"), "galen.toml", "update contract config")
+    expect(contract.get("config_files"), ["galen.toml"], "update contract configs")
+    expect(contract.get("macos_app_dir_name"), "Galen.app", "update contract macOS app")
+    expect(contract.get("macos_bundle_id"), "com.galen.desktop", "update contract bundle id")
+    expect_text(
+        "dodaios/core/update_contract.py",
+        "LEGACY_CONFIG_FILE_NAMES[0] if LEGACY_CONFIG_FILE_NAMES else CONFIG_FILE_NAME",
+    )
 
     icon_png = digest("assets/galen-brand/icon.png")
     for target in (

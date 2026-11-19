@@ -125,10 +125,13 @@ def test_the_contract_agrees_with_every_other_copy_of_these_names() -> None:
     from dodaios.autostart.command import LAUNCHER_MODULE as autostart_launcher
     from dodaios.ui import relauncher
 
-    # Legacy name first: an existing jarvis.toml stays the configuration, and
-    # an updater from before ``config_files`` reads the one name it knows.
+    # A downstream identity may deliberately have no legacy config names. In
+    # that case both fields use the current config instead of crashing while
+    # this module is imported.
     assert DEFAULT_CONTRACT.config_files == (*LEGACY_CONFIG_FILE_NAMES, CONFIG_FILE_NAME)
-    assert DEFAULT_CONTRACT.config_file == LEGACY_CONFIG_FILE_NAMES[0]
+    assert DEFAULT_CONTRACT.config_file == (
+        LEGACY_CONFIG_FILE_NAMES[0] if LEGACY_CONFIG_FILE_NAMES else CONFIG_FILE_NAME
+    )
     assert DEFAULT_CONTRACT.macos_app_dir_name == MACOS_APP_DIR_NAME
     assert DEFAULT_CONTRACT.macos_bundle_id == MACOS_BUNDLE_ID
     assert DEFAULT_CONTRACT.launcher_module == autostart_launcher
@@ -363,10 +366,12 @@ SHIPPED_DOCUMENT = """{
   "ui_bundle_dir": "dodaios/ui/web/dist",
   "launcher_module": "dodaios.ui.web.launcher",
   "version_file": "dodaios/__init__.py",
-  "config_file": "jarvis.toml",
-  "config_files": ["jarvis.toml", "dodaios.toml"],
-  "macos_app_dir_name": "Dodaios.app",
-  "macos_bundle_id": "com.personal-jarvis.desktop",
+  "config_file": "galen.toml",
+  "config_files": [
+    "galen.toml"
+  ],
+  "macos_app_dir_name": "Galen.app",
+  "macos_bundle_id": "com.galen.desktop",
   "rollback_hook": "dodaios/setup/update_rollback.py"
 }
 """
@@ -400,10 +405,10 @@ SCHEMA_1_GOLDEN = [
             ui_bundle_dir="dodaios/ui/web/dist",
             launcher_module="dodaios.ui.web.launcher",
             version_file="dodaios/__init__.py",
-            config_file="jarvis.toml",
-            config_files=("jarvis.toml", "dodaios.toml"),
-            macos_app_dir_name="Dodaios.app",
-            macos_bundle_id="com.personal-jarvis.desktop",
+            config_file="galen.toml",
+            config_files=("galen.toml",),
+            macos_app_dir_name="Galen.app",
+            macos_bundle_id="com.galen.desktop",
             rollback_hook="dodaios/setup/update_rollback.py",
         ),
     ),
@@ -461,8 +466,9 @@ def test_the_shipped_contract_is_the_first_golden_document() -> None:
     """Byte for byte: what an installed copy of the previous version will read."""
     shipped = (REPO / CONTRACT_PATH).read_bytes().replace(b"\r\n", b"\n")
     assert shipped.decode("utf-8") == SHIPPED_DOCUMENT
-    # The single name an older updater reads is a file such an install has.
-    assert json.loads(SHIPPED_DOCUMENT)["config_file"] == LEGACY_CONFIG_FILE_NAMES[0]
+    # The single name an older updater reads is always a file this identity has.
+    expected = LEGACY_CONFIG_FILE_NAMES[0] if LEGACY_CONFIG_FILE_NAMES else CONFIG_FILE_NAME
+    assert json.loads(SHIPPED_DOCUMENT)["config_file"] == expected
 
 
 def test_a_document_that_names_one_config_file_means_only_that_one() -> None:

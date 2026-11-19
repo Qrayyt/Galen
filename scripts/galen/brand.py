@@ -86,7 +86,7 @@ brand = {
     "LEGACY_CLI_COMMAND_NAMES": '("dodaios", "jarvis")',
     "LEGACY_CONTROL_CLI_COMMAND_NAMES": '("dodaiosctl", "jarvisctl")',
     # Keep the install separate from an existing original Dodaios installation.
-    "WINDOWS_USER_DATA_DIR_NAME": '"Galen"',
+    "WINDOWS_USER_DATA_DIR_NAME": '"GalenData"',
     "LEGACY_WINDOWS_USER_DATA_DIR_NAMES": "()",
     "FALLBACK_USER_DATA_DIR_NAME": '".galen-data"',
     "LEGACY_FALLBACK_USER_DATA_DIR_NAMES": "()",
@@ -112,6 +112,7 @@ brand = {
     "LEGACY_MACOS_APP_NAMES": "()",
     "MACOS_EXECUTABLE_NAME": '"GalenApp"',
     "LEGACY_MACOS_EXECUTABLE_NAMES": '("PersonalJarvis",)',
+    "MACOS_BUNDLE_ID": '"com.galen.desktop"',
     "LINUX_APP_NAME": '"Galen"',
     "LEGACY_LINUX_APP_NAMES": "()",
     "LINUX_DESKTOP_ENTRY_FILE_NAME": '"galen.desktop"',
@@ -129,6 +130,29 @@ brand = {
 
 def main() -> None:
     edit("dodaios/core/branding.py", assignments(brand))
+    edit(
+        "dodaios/core/update_contract.py",
+        replace(
+            "config_file: str = LEGACY_CONFIG_FILE_NAMES[0]",
+            "config_file: str = (\n"
+            "        LEGACY_CONFIG_FILE_NAMES[0] if LEGACY_CONFIG_FILE_NAMES else CONFIG_FILE_NAME\n"
+            "    )",
+        ),
+    )
+
+    def update_contract_document(s: str) -> str:
+        data = json.loads(s)
+        data.update(
+            {
+                "config_file": "galen.toml",
+                "config_files": ["galen.toml"],
+                "macos_app_dir_name": "Galen.app",
+                "macos_bundle_id": "com.galen.desktop",
+            }
+        )
+        return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+    edit("install/update-contract.json", update_contract_document)
     edit("dodaios/ui/web/frontend/src/lib/branding.ts", chain(
         replace('PRODUCT_NAME = "Dodaios";', 'PRODUCT_NAME = "Galen";'),
         replace('OFFICIAL_REPO_SLUG = "Dodaios/Dodaios";', 'OFFICIAL_REPO_SLUG = "Qrayyt/Galen";'),
@@ -180,7 +204,7 @@ def main() -> None:
     ))
     edit("packaging/pyinstaller_rthook_frozen.py", chain(
         assignments({
-            "_WINDOWS_USER_DATA_DIR_NAME": '"Galen"',
+            "_WINDOWS_USER_DATA_DIR_NAME": '"GalenData"',
             "_LEGACY_WINDOWS_USER_DATA_DIR_NAMES": "()",
             "_FALLBACK_USER_DATA_DIR_NAME": '".galen-data"',
             "_LEGACY_FALLBACK_USER_DATA_DIR_NAMES": "()",
@@ -197,7 +221,7 @@ def main() -> None:
             '    "Global\\\\Galen_v1_dev",\n)',
         ),
         replace('``%LOCALAPPDATA%\\\\Dodaios`` on Windows, ``~/.dodaios-data``',
-                '``%LOCALAPPDATA%\\\\Galen`` on Windows, ``~/.galen-data``'),
+                '``%LOCALAPPDATA%\\\\GalenData`` on Windows, ``~/.galen-data``'),
         replace('stream.write(f"[jarvis] {message}\\n")',
                 'stream.write(f"[galen] {message}\\n")'),
     ))
@@ -220,7 +244,7 @@ def main() -> None:
             "SignedSetupBaseName": '"Galen-Setup-x64"',
             "CliExeName": '"galen.exe"',
             "LegacyCliExeName": '"dodaios.exe"',
-            "UserDataDirDisplay": r'"%LOCALAPPDATA%\Galen"',
+            "UserDataDirDisplay": r'"%LOCALAPPDATA%\GalenData"',
             "AppGuid": '"6F548C6A-7FA9-4A2B-A1C3-1780B6D14E97"',
         }
         for key, value in repl.items():

@@ -119,7 +119,7 @@ FISH_CONF_FILE_NAME = f"{PERSISTENT_SLUG}.fish"
 # elsewhere. An existing installation keeps its directory under the earlier
 # name until the primary instance moves it (``dodaios.core.identity_boot``);
 # while a real directory still stands under an earlier name, that one is used.
-WINDOWS_USER_DATA_DIR_NAME = "Galen"
+WINDOWS_USER_DATA_DIR_NAME = "GalenData"
 LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ()
 FALLBACK_USER_DATA_DIR_NAME = ".galen-data"
 LEGACY_FALLBACK_USER_DATA_DIR_NAMES = ()
@@ -205,7 +205,7 @@ MACOS_APP_DIR_NAMES = (MACOS_APP_DIR_NAME, *LEGACY_MACOS_APP_DIR_NAMES)
 # rename keeps every privacy grant.
 MACOS_EXECUTABLE_NAME = "GalenApp"
 LEGACY_MACOS_EXECUTABLE_NAMES = ("PersonalJarvis",)
-MACOS_BUNDLE_ID = f"com.{PERSISTENT_SLUG}.desktop"
+MACOS_BUNDLE_ID = "com.galen.desktop"
 # The downloadable .dmg (PyInstaller, ``dodaios.spec``) is a second, equally
 # legitimate installed app: its own bundle id and therefore its own macOS
 # privacy grants. ``dodaios.spec`` cannot import this module, so a parity test

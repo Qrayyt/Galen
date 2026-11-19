@@ -53,7 +53,7 @@ import sys
 from pathlib import Path
 
 # Mirror dodaios.core.branding (tests/unit/core/test_identity_single_source.py).
-_WINDOWS_USER_DATA_DIR_NAME = "Galen"
+_WINDOWS_USER_DATA_DIR_NAME = "GalenData"
 _LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ()
 _FALLBACK_USER_DATA_DIR_NAME = ".galen-data"
 _LEGACY_FALLBACK_USER_DATA_DIR_NAMES = ()
@@ -186,7 +186,7 @@ def _resolve_home(engine) -> Path:
 
 
 def _user_data_dir() -> Path:
-    """``%LOCALAPPDATA%\\Galen`` on Windows, ``~/.galen-data`` everywhere else.
+    """``%LOCALAPPDATA%\\GalenData`` on Windows, ``~/.galen-data`` everywhere else.
 
     The directory under its earlier name while that is still a real directory.
     """

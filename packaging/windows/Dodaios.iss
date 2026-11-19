@@ -70,7 +70,7 @@
 ; The command's earlier name. The bundle ships it beside CliExeName, in the
 ; same folder the PATH task adds, so both names work in a terminal.
 #define LegacyCliExeName "dodaios.exe"
-#define UserDataDirDisplay "%LOCALAPPDATA%\Galen"
+#define UserDataDirDisplay "%LOCALAPPDATA%\GalenData"
 
 [Setup]
 ; NEVER change AppGuid's default (see its #define above).
