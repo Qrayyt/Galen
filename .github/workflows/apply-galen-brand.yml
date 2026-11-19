@@ -27,16 +27,18 @@ jobs:
         run: python scripts/galen/brand.py
       - name: Validate brand identifiers and source attribution
         run: |
-          python -m py_compile dodaios/core/branding.py dodaios/__init__.py \
+          python -m py_compile dodaios/core/branding.py dodaios/core/update_contract.py \
+            dodaios/__init__.py \
             scripts/galen/brand.py scripts/galen/validate_release.py
           python scripts/galen/validate_release.py
+          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'galen.toml'"
           python - <<'PY'
           import ast
           from pathlib import Path
           p = ast.parse(Path("dodaios/core/branding.py").read_text(encoding="utf-8"))
           names = {n.targets[0].id:ast.literal_eval(n.value) for n in p.body if isinstance(n,ast.Assign) and len(n.targets)==1 and isinstance(n.targets[0],ast.Name) and n.targets[0].id in {'PRODUCT_NAME','WINDOWS_USER_DATA_DIR_NAME','DEFAULT_OFFICIAL_REPO_SLUG','WINDOWS_MUTEX_NAME'}}
           assert names["PRODUCT_NAME"] == "Galen"
-          assert names["WINDOWS_USER_DATA_DIR_NAME"] == "Galen"
+          assert names["WINDOWS_USER_DATA_DIR_NAME"] == "GalenData"
           assert names["DEFAULT_OFFICIAL_REPO_SLUG"] == "Qrayyt/Galen"
           assert names["WINDOWS_MUTEX_NAME"] == r"Global\Galen_v1"
           assert Path("NOTICE").exists() and Path("LICENSE").exists()
@@ -47,6 +49,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add dodaios.spec dodaios/__init__.py pyproject.toml dodaios/core/branding.py \
+            dodaios/core/update_contract.py install/update-contract.json \
             dodaios/ui/web/frontend/src/lib/branding.ts \
             dodaios/ui/web/frontend/src/i18n/locales \
             dodaios/ui/web/frontend/public/dodaios-logo.png \
