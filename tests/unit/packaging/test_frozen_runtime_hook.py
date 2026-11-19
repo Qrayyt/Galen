@@ -165,6 +165,36 @@ def test_apply_still_sets_the_path_when_seeding_fails(
     assert not (home / "dodaios.toml").exists()
 
 
+def test_galen_preview_moves_the_old_default_port_once(hook: ModuleType, tmp_path: Path) -> None:
+    home = tmp_path / "GalenData"
+    home.mkdir()
+    config = home / "galen.toml"
+    config.write_text("[ui]\nadmin_api_port = 47821\n", encoding="utf-8")
+
+    hook._migrate_default_admin_port(config, home)
+
+    assert "admin_api_port = 47921" in config.read_text(encoding="utf-8")
+    assert (home / hook._ADMIN_PORT_MIGRATION_MARKER).is_file()
+
+    # A person may deliberately choose the earlier port after migration. The
+    # marker makes this a one-time release migration, not a permanent override.
+    config.write_text("[ui]\nadmin_api_port = 47821\n", encoding="utf-8")
+    hook._migrate_default_admin_port(config, home)
+    assert "admin_api_port = 47821" in config.read_text(encoding="utf-8")
+
+
+def test_galen_port_migration_preserves_a_custom_port(hook: ModuleType, tmp_path: Path) -> None:
+    home = tmp_path / "GalenData"
+    home.mkdir()
+    config = home / "galen.toml"
+    config.write_text("[ui]\nadmin_api_port = 48123\n", encoding="utf-8")
+
+    hook._migrate_default_admin_port(config, home)
+
+    assert "admin_api_port = 48123" in config.read_text(encoding="utf-8")
+    assert (home / hook._ADMIN_PORT_MIGRATION_MARKER).is_file()
+
+
 # ---------------------------------------------------------------------------
 # The data directory under its earlier name
 # ---------------------------------------------------------------------------

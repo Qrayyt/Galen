@@ -73,6 +73,9 @@ _MUTEX_NAMES = (
 _PRIMARY_LOCK_FILES = ("instance.lock", os.path.join("data", "jarvis.lock"))
 # The name the bundle ships its default configuration under (dodaios.spec).
 _BUNDLED_CONFIG_FILE_NAME = "jarvis.toml"
+_LEGACY_ADMIN_PORT = 47821
+_DEFAULT_ADMIN_PORT = 47921
+_ADMIN_PORT_MIGRATION_MARKER = ".galen-admin-port-47921"
 # Where dodaios.spec puts the migration engine inside the bundle.
 _ENGINE_PATH = ("dodaios", "core", "identity_migration.py")
 _MIGRATION_WAIT_SECONDS = 2.0
@@ -278,6 +281,27 @@ def _names_legacy_default(name: str, legacy_dirs, leaf_names) -> bool:
     )
 
 
+def _migrate_default_admin_port(config_path: Path, home: Path) -> None:
+    """Move the Galen preview default away from the original Dodaios port once."""
+    marker = home / _ADMIN_PORT_MIGRATION_MARKER
+    if marker.exists():
+        return
+    try:
+        if not config_path.is_file():
+            return
+        text = config_path.read_text(encoding="utf-8")
+        old = f"admin_api_port = {_LEGACY_ADMIN_PORT}"
+        new = f"admin_api_port = {_DEFAULT_ADMIN_PORT}"
+        if old in text and new not in text:
+            config_path.write_text(
+                text.replace(old, new, 1), encoding="utf-8", newline="\n"
+            )
+        home.mkdir(parents=True, exist_ok=True)
+        marker.write_text("Galen 1.0 port migration complete\n", encoding="utf-8")
+    except OSError as exc:
+        _warn(f"could not migrate the default admin port: {exc}")
+
+
 def _is_set(name: str) -> bool:
     value = os.environ.get(name)
     return bool(value and value.strip())
@@ -339,6 +363,7 @@ def _apply() -> None:
                 # A windowed bundle has no stderr yet — ensure_standard_streams()
                 # runs later — so writing to it must never become the crash.
                 _warn(f"could not seed {config_path}: {exc}")
+        _migrate_default_admin_port(config_path, home)
         os.environ["JARVIS_CONFIG"] = str(config_path)
 
     if not _is_set("JARVIS_DATA_DIR"):

@@ -201,7 +201,7 @@ enabled = true
 # ── UI / tray ──
 [ui]
 tray_enabled = true
-admin_api_port = 47821
+admin_api_port = 47921
 startup_chime = true
 # On-screen overlay shown by default on a desktop install: the slim
 # "jarvis_bar" (the Dodaios Bar). Alternatives: "voice_orb" (the procedural

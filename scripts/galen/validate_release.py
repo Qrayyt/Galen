@@ -98,6 +98,7 @@ def main() -> None:
     expect_text("packaging/windows/Dodaios.iss", '#define LegacyCliExeName "dodaios.exe"')
     expect_text("packaging/windows/Dodaios.iss", 'Add the ""galen"" command to PATH')
     expect_text("packaging/windows/Dodaios.iss", '#define UserDataDirDisplay "%LOCALAPPDATA%\\GalenData"')
+    expect_text("dodaios.toml.example", "admin_api_port = 47921")
 
     contract = json.loads(read("install/update-contract.json"))
     expect(contract.get("config_file"), "galen.toml", "update contract config")
@@ -108,6 +109,9 @@ def main() -> None:
         "dodaios/core/update_contract.py",
         "LEGACY_CONFIG_FILE_NAMES[0] if LEGACY_CONFIG_FILE_NAMES else CONFIG_FILE_NAME",
     )
+    expect(hook.get("_LEGACY_ADMIN_PORT"), 47821, "legacy admin port")
+    expect(hook.get("_DEFAULT_ADMIN_PORT"), 47921, "Galen admin port")
+    expect_text("packaging/pyinstaller_rthook_frozen.py", "_migrate_default_admin_port(config_path, home)")
 
     icon_png = digest("assets/galen-brand/icon.png")
     for target in (

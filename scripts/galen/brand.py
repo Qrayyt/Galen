@@ -54,6 +54,16 @@ def replace(needle: str, value: str):
     return run
 
 
+def ensure_before(marker: str, block: str):
+    def run(text: str) -> str:
+        if block in text:
+            return text
+        if text.count(marker) != 1:
+            raise RuntimeError(f"expected exactly one insertion marker: {marker[:70]!r}")
+        return text.replace(marker, block + marker)
+    return run
+
+
 def chain(*funcs):
     def run(s):
         for fn in funcs:
@@ -153,6 +163,10 @@ def main() -> None:
         return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
 
     edit("install/update-contract.json", update_contract_document)
+    edit(
+        "dodaios.toml.example",
+        replace("admin_api_port = 47821", "admin_api_port = 47921"),
+    )
     edit("dodaios/ui/web/frontend/src/lib/branding.ts", chain(
         replace('PRODUCT_NAME = "Dodaios";', 'PRODUCT_NAME = "Galen";'),
         replace('OFFICIAL_REPO_SLUG = "Dodaios/Dodaios";', 'OFFICIAL_REPO_SLUG = "Qrayyt/Galen";'),
@@ -212,6 +226,39 @@ def main() -> None:
             "_LEGACY_CONFIG_FILE_NAMES": "()",
             "_GUI_EXE_NAMES": '("GalenApp", "PersonalJarvis")',
         }),
+        ensure_before(
+            '# Where dodaios.spec puts the migration engine inside the bundle.\n',
+            '_LEGACY_ADMIN_PORT = 47821\n'
+            '_DEFAULT_ADMIN_PORT = 47921\n'
+            '_ADMIN_PORT_MIGRATION_MARKER = ".galen-admin-port-47921"\n',
+        ),
+        ensure_before(
+            "def _is_set(name: str) -> bool:\n",
+            "def _migrate_default_admin_port(config_path: Path, home: Path) -> None:\n"
+            "    \"\"\"Move the Galen preview default away from the original Dodaios port once.\"\"\"\n"
+            "    marker = home / _ADMIN_PORT_MIGRATION_MARKER\n"
+            "    if marker.exists():\n"
+            "        return\n"
+            "    try:\n"
+            "        if not config_path.is_file():\n"
+            "            return\n"
+            "        text = config_path.read_text(encoding=\"utf-8\")\n"
+            "        old = f\"admin_api_port = {_LEGACY_ADMIN_PORT}\"\n"
+            "        new = f\"admin_api_port = {_DEFAULT_ADMIN_PORT}\"\n"
+            "        if old in text and new not in text:\n"
+            "            config_path.write_text(\n"
+            "                text.replace(old, new, 1), encoding=\"utf-8\", newline=\"\\n\"\n"
+            "            )\n"
+            "        home.mkdir(parents=True, exist_ok=True)\n"
+            "        marker.write_text(\"Galen 1.0 port migration complete\\n\", encoding=\"utf-8\")\n"
+            "    except OSError as exc:\n"
+            "        _warn(f\"could not migrate the default admin port: {exc}\")\n"
+            "\n\n",
+        ),
+        ensure_before(
+            '        os.environ["JARVIS_CONFIG"] = str(config_path)\n',
+            "        _migrate_default_admin_port(config_path, home)\n",
+        ),
         replace(
             '_MUTEX_NAMES = (\n    "Global\\\\Dodaios_v1",\n'
             '    "Global\\\\Dodaios_v1_dev",\n'
