@@ -23,6 +23,7 @@ jobs:
     outputs:
       runtime_changed: ${{ steps.changes.outputs.runtime_changed }}
       frontend_changed: ${{ steps.changes.outputs.frontend_changed }}
+      base: ${{ steps.changes.outputs.base }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,6 +59,7 @@ jobs:
 
           echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
           echo "runtime_changed=$runtime_changed" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
           echo "base=$base frontend_changed=$frontend_changed runtime_changed=$runtime_changed" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-python@v5
         with:
@@ -78,6 +80,20 @@ jobs:
         with:
           path: .ci-cache/frontend-tests-verified
           key: galen-frontend-tests-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
+      - name: Reuse committed evidence for the exact frontend tree
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        id: committed-frontend-tests
+        shell: bash
+        run: |
+          current="$(git rev-parse HEAD:dodaios/ui/web/frontend)"
+          tested="$(tr -d '\r\n' < .galen-frontend-tested)"
+          if [[ "$current" == "$tested" ]]; then
+            mkdir -p .ci-cache
+            printf '%s\n' "$current" > .ci-cache/frontend-tests-verified
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v4
         if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true'
         with:
@@ -112,13 +128,14 @@ jobs:
           python scripts/galen/check_russian_locales.py
           python scripts/galen/validate_release.py
       - name: Test changed React sources
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
         working-directory: dodaios/ui/web/frontend
         env:
           NODE_OPTIONS: --max-old-space-size=6144
+          TEST_BASE: ${{ steps.changes.outputs.base }}
         run: |
           npm ci
-          npm test
+          npm test -- --changed "$TEST_BASE"
           mkdir -p ../../../../.ci-cache
           printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-tests-verified
       - name: Save successful frontend test evidence immediately

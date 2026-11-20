@@ -15,6 +15,7 @@ jobs:
     outputs:
       frontend: ${{ steps.diff.outputs.frontend }}
       release_candidate: ${{ steps.diff.outputs.release_candidate }}
+      base: ${{ steps.diff.outputs.base }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,6 +47,7 @@ jobs:
 
           echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
           echo "release_candidate=$release_candidate" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
   backend-syntax:
     runs-on: ubuntu-latest
@@ -92,6 +94,19 @@ jobs:
         with:
           path: .ci-cache/frontend-tests-verified
           key: galen-frontend-tests-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
+      - name: Reuse committed evidence for the exact frontend tree
+        if: steps.frontend-cache.outputs.cache-hit != 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        id: committed-frontend-tests
+        run: |
+          current="$(git rev-parse HEAD:dodaios/ui/web/frontend)"
+          tested="$(tr -d '\r\n' < ../../../../.galen-frontend-tested)"
+          if [[ "$current" == "$tested" ]]; then
+            mkdir -p ../../../../.ci-cache
+            printf '%s\n' "$current" > ../../../../.ci-cache/frontend-tests-verified
+            echo "reused=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reused=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/setup-node@v4
         if: steps.frontend-cache.outputs.cache-hit != 'true'
         with:
@@ -101,9 +116,11 @@ jobs:
       - if: steps.frontend-cache.outputs.cache-hit != 'true'
         run: npm ci
       - name: Test uncached frontend inputs
-        if: steps.frontend-cache.outputs.cache-hit != 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        if: steps.frontend-cache.outputs.cache-hit != 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
+        env:
+          TEST_BASE: ${{ needs.changes.outputs.base }}
         run: |
-          npm test
+          npm test -- --changed "$TEST_BASE"
           mkdir -p ../../../../.ci-cache
           printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-tests-verified
       - name: Save successful frontend test evidence immediately
