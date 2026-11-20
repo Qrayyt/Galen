@@ -1,9 +1,9 @@
-Galen 1.0 Preview 1 release candidate
+Galen 1.0 Preview 2 release candidate
 Branch: feat/galen-1.0-dodaios
-Version: 1.0.0
+Version: 1.0.0-preview.2
 License: Apache-2.0 + MIT third-party notices
 Platforms targeted by this candidate: Windows 11 x64
 Includes: Dodaios core, Galenite desktop identity, RU UI, OpenDex HUD, Kaizumi actions, Elissa audio focus, OpenRealtime Go companion
 Publishing gate: Python validation + React build + Windows PyInstaller/Inno Setup + SHA256
 
-Candidate revision: 9 (isolate the Galen backend port from a concurrently running Dodaios)
+Candidate revision: 10 (publish the verified Russian UI, Galen branding, and safe updater)

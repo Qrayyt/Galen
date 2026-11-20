@@ -17,7 +17,7 @@
 [![Исходники](https://img.shields.io/badge/исходный%20код-GitHub-222?style=flat-square&logo=github)](https://github.com/Qrayyt/Galen)
 [![Galenite](https://img.shields.io/badge/GALENITE-galenite.org-222?style=flat-square)](https://galenite.org/)
 
-**[Скачать Galen 1.0 Preview 1 для Windows](https://github.com/Qrayyt/Galen/releases/tag/v1.0.0-preview.1)** · **[Все версии](https://github.com/Qrayyt/Galen/releases)** · **[Возможности](#возможности)** · **[Подключение-моделей-и-сервисов](#подключение-моделей-и-сервисов)**
+**[Скачать Galen 1.0 Preview 2 для Windows](https://github.com/Qrayyt/Galen/releases/tag/v1.0.0-preview.2)** · **[Все версии](https://github.com/Qrayyt/Galen/releases)** · **[Возможности](#возможности)** · **[Подключение-моделей-и-сервисов](#подключение-моделей-и-сервисов)**
 
 </div>
 
