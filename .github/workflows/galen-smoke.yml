@@ -24,9 +24,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          base="${{ github.event.before }}"
-          if [[ "${{ github.event_name }}" == 'workflow_dispatch' || -z "$base" || "$base" =~ ^0+$ ]]; then
-            base="$(git rev-parse HEAD^)"
+          published='v1.0.0-preview.1'
+          if git rev-parse --verify "refs/tags/$published" >/dev/null 2>&1; then
+            base="$published"
+          else
+            base="${{ github.event.before }}"
+            if [[ "${{ github.event_name }}" == 'workflow_dispatch' || -z "$base" || "$base" =~ ^0+$ ]]; then
+              base="$(git rev-parse HEAD^)"
+            fi
           fi
 
           frontend=false
