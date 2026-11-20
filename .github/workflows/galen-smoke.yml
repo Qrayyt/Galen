@@ -82,9 +82,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            dodaios/ui/web/frontend/dist
+            dodaios/ui/web/dist
             .ci-cache/frontend-verified
           key: galen-frontend-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
+      - name: Restore test evidence for identical frontend inputs
+        if: steps.frontend-cache.outputs.cache-hit != 'true'
+        id: frontend-tests-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-cache/frontend-tests-verified
+          key: galen-frontend-tests-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
       - uses: actions/setup-node@v4
         if: steps.frontend-cache.outputs.cache-hit != 'true'
         with:
@@ -93,8 +100,18 @@ jobs:
           cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
       - if: steps.frontend-cache.outputs.cache-hit != 'true'
         run: npm ci
-      - if: steps.frontend-cache.outputs.cache-hit != 'true'
-        run: npm test
+      - name: Test uncached frontend inputs
+        if: steps.frontend-cache.outputs.cache-hit != 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        run: |
+          npm test
+          mkdir -p ../../../../.ci-cache
+          printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-tests-verified
+      - name: Save successful frontend test evidence immediately
+        if: steps.frontend-cache.outputs.cache-hit != 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-cache/frontend-tests-verified
+          key: ${{ steps.frontend-tests-cache.outputs.cache-primary-key }}
       - if: steps.frontend-cache.outputs.cache-hit != 'true'
         run: |
           npm run build
@@ -104,5 +121,5 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=6144
       - name: Verify the cached or rebuilt bundle
         run: |
-          test -s dist/index.html
+          test -s ../dist/index.html
           test -s ../../../../.ci-cache/frontend-verified
