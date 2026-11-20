@@ -31,7 +31,7 @@ jobs:
             dodaios/__init__.py \
             scripts/galen/brand.py scripts/galen/validate_release.py
           python scripts/galen/validate_release.py
-          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'galen.toml'"
+          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'dodaios.toml'; assert DEFAULT_CONTRACT.config_files == ('dodaios.toml', 'jarvis.toml', 'galen.toml')"
           python - <<'PY'
           import ast
           from pathlib import Path
