@@ -215,6 +215,7 @@ jobs:
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true' && steps.realtime-cache.outputs.cache-hit != 'true'
         with:
           go-version: '1.25'
+          cache-dependency-path: integrations/openrealtime/source/go.sum
       - name: Install Python desktop dependencies
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
         shell: pwsh
