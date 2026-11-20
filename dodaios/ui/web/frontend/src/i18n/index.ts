@@ -173,7 +173,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/marketplace/es.json"),
     zh: () => import("./locales/marketplace/zh.json"),
     pt: () => import("./locales/marketplace/pt.json"),
-    ru: () => import("./locales/marketplace/en.json"),
+    ru: () => import("./locales/marketplace/ru.json"),
   },
   local_models: {
     en: () => import("./locales/local_models/en.json"),
@@ -181,7 +181,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/local_models/es.json"),
     zh: () => import("./locales/local_models/zh.json"),
     pt: () => import("./locales/local_models/pt.json"),
-    ru: () => import("./locales/local_models/en.json"),
+    ru: () => import("./locales/local_models/ru.json"),
   },
   society: {
     en: () => import("./locales/society/en.json"),
@@ -189,7 +189,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/society/es.json"),
     zh: () => import("./locales/society/zh.json"),
     pt: () => import("./locales/society/pt.json"),
-    ru: () => import("./locales/society/en.json"),
+    ru: () => import("./locales/society/ru.json"),
   },
   computers: {
     en: () => import("./locales/computers/en.json"),
@@ -197,7 +197,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/computers/es.json"),
     zh: () => import("./locales/computers/zh.json"),
     pt: () => import("./locales/computers/pt.json"),
-    ru: () => import("./locales/computers/en.json"),
+    ru: () => import("./locales/computers/ru.json"),
   },
   // First-run guide and app tour: read on one boot, then only on a replay.
   onboarding: {
@@ -206,7 +206,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/onboarding/es.json"),
     zh: () => import("./locales/onboarding/zh.json"),
     pt: () => import("./locales/onboarding/pt.json"),
-    ru: () => import("./locales/onboarding/en.json"),
+    ru: () => import("./locales/onboarding/ru.json"),
   },
   // The node editors (a sheet, deck, document, page, dashboard or clip in Edit):
   // several hundred strings that only an open editor reads.
@@ -216,7 +216,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/node_editors/es.json"),
     zh: () => import("./locales/node_editors/zh.json"),
     pt: () => import("./locales/node_editors/pt.json"),
-    ru: () => import("./locales/node_editors/en.json"),
+    ru: () => import("./locales/node_editors/ru.json"),
   },
   // The appshot editor: opened from a capture, never on start.
   appshot_editor: {
@@ -225,7 +225,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/appshot_editor/es.json"),
     zh: () => import("./locales/appshot_editor/zh.json"),
     pt: () => import("./locales/appshot_editor/pt.json"),
-    ru: () => import("./locales/appshot_editor/en.json"),
+    ru: () => import("./locales/appshot_editor/ru.json"),
   },
   // The provider page (Settings → API Keys).
   providers: {
@@ -234,7 +234,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/providers/es.json"),
     zh: () => import("./locales/providers/zh.json"),
     pt: () => import("./locales/providers/pt.json"),
-    ru: () => import("./locales/providers/en.json"),
+    ru: () => import("./locales/providers/ru.json"),
   },
   // A pane's "Review changes" dialog: opened from its title bar, never on start.
   custom_cli: {
@@ -243,7 +243,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/custom_cli/es.json"),
     zh: () => import("./locales/custom_cli/zh.json"),
     pt: () => import("./locales/custom_cli/pt.json"),
-    ru: () => import("./locales/custom_cli/en.json"),
+    ru: () => import("./locales/custom_cli/ru.json"),
   },
   pane_review: {
     en: () => import("./locales/pane_review/en.json"),
@@ -251,11 +251,11 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/pane_review/es.json"),
     zh: () => import("./locales/pane_review/zh.json"),
     pt: () => import("./locales/pane_review/pt.json"),
-    ru: () => import("./locales/pane_review/en.json"),
+    ru: () => import("./locales/pane_review/ru.json"),
   },
   // The Dodaios Verse starship (Agents > Dodaios Verse, the IDE's engineering tab).
   // Its strings live in several files per language (`ship/<lang>.json` and `ship/<area>.<lang>.json`).
-  ship: { en: shipLocale("en"), de: shipLocale("de"), es: shipLocale("es"), zh: shipLocale("zh"), pt: shipLocale("pt"), ru: shipLocale("en") },
+  ship: { en: shipLocale("en"), de: shipLocale("de"), es: shipLocale("es"), zh: shipLocale("zh"), pt: shipLocale("pt"), ru: shipLocale("ru") },
   // The Memory section (the vault reader, map and editor).
   memory: {
     en: () => import("./locales/memory/en.json"),
@@ -263,7 +263,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/memory/es.json"),
     zh: () => import("./locales/memory/zh.json"),
     pt: () => import("./locales/memory/pt.json"),
-    ru: () => import("./locales/memory/en.json"),
+    ru: () => import("./locales/memory/ru.json"),
   },
   // "Built for you": what the self-building loop made, opened from its nav row.
   self_build: {
@@ -272,7 +272,7 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/self_build/es.json"),
     zh: () => import("./locales/self_build/zh.json"),
     pt: () => import("./locales/self_build/pt.json"),
-    ru: () => import("./locales/self_build/en.json"),
+    ru: () => import("./locales/self_build/ru.json"),
   },
   // Settings → Trust and privacy: the rules page and the "what it knows" overview.
   // The nav label and the undo toast ride in the startup bundle (`trust.*` in
@@ -283,11 +283,11 @@ const CHUNK_LOADERS: Record<LocaleChunk, Record<UiLanguage, () => Promise<unknow
     es: () => import("./locales/trust/es.json"),
     zh: () => import("./locales/trust/zh.json"),
     pt: () => import("./locales/trust/pt.json"),
-    ru: () => import("./locales/trust/en.json"),
+    ru: () => import("./locales/trust/ru.json"),
   },
   // The Voice section. One file per tab and language (`voice/<tab>.<lang>.json`),
   // every key under the `voiceui` root.
-  voice: { en: voiceLocale("en"), de: voiceLocale("de"), es: voiceLocale("es"), zh: voiceLocale("zh"), pt: voiceLocale("pt"), ru: voiceLocale("en") },
+  voice: { en: voiceLocale("en"), de: voiceLocale("de"), es: voiceLocale("es"), zh: voiceLocale("zh"), pt: voiceLocale("pt"), ru: voiceLocale("ru") },
 };
 
 const EXTRA: Record<UiLanguage, Record<string, unknown>[]> = { en: [], de: [], es: [], zh: [], pt: [], ru: [] };

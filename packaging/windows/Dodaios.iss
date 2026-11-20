@@ -30,7 +30,10 @@
 ;   ISCC.exe /DAppVersion=1.5.3 /DSourceDir=<dist\Jarvis> /DOutputDir=<out> ...
 
 #ifndef AppVersion
-  #define AppVersion "0.0.0"
+  #define AppVersion "0.0.0.0"
+#endif
+#ifndef AppDisplayVersion
+  #define AppDisplayVersion AppVersion
 #endif
 #ifndef SourceDir
   #define SourceDir "..\..\dist\Jarvis"
@@ -76,8 +79,8 @@
 ; NEVER change AppGuid's default (see its #define above).
 AppId={{{#AppGuid}}
 AppName={#AppName}
-AppVersion={#AppVersion}
-AppVerName={#AppName} {#AppVersion}
+AppVersion={#AppDisplayVersion}
+AppVerName={#AppName} {#AppDisplayVersion}
 VersionInfoVersion={#AppVersion}
 ; What the signing configuration checks: see SignedProductName above.
 VersionInfoProductName={#SignedProductName}

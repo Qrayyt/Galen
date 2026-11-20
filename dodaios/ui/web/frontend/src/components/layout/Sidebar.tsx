@@ -288,7 +288,9 @@ export function Sidebar({
           </QuickTooltip>
           {/* The update lives here now, where Claude keeps its download icon:
               in sight on every screen, not among the window buttons. */}
-          <Suspense fallback={null}><UpdateButton placement="sidebar" /></Suspense>
+          <Suspense fallback={null}>
+            <UpdateButton placement="sidebar" announceOnLaunch />
+          </Suspense>
           <QuickTooltip content={railed ? t("nav.marketplace") : ""} side="right" className="flex">
           <button type="button" {...marketplacePrefetch} onClick={() => setActive("marketplace")}
             title={railed ? undefined : t("nav.marketplace")}

@@ -53,7 +53,7 @@ GUI_EXE_NAME = "GalenApp"
 # The windowed launcher under its earlier name, built from the same program:
 # a pinned taskbar button, a logon task or a shortcut of an earlier release
 # starts `{app}\PersonalJarvis.exe`, and must keep finding it.
-LEGACY_GUI_EXE_NAMES = ("PersonalJarvis",)
+LEGACY_GUI_EXE_NAMES = ("DodaiosApp", "PersonalJarvis")
 # Console entry point. Same name as the pip console script on purpose.
 CLI_EXE_NAME = "galen"
 # The console entry point under its earlier name, built from the same program.

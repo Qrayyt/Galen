@@ -61,7 +61,7 @@ def frozen_bundle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path
     # Not the desktop app's executable: these tests are about the paths, and a
     # helper process never moves a directory.
     monkeypatch.setattr(sys, "executable", str(tmp_path / "bundle" / "helper"))
-    return meipass, home / "Dodaios"
+    return meipass, home / "GalenData"
 
 
 def test_hook_directory_matches_jarvis_core_paths(
@@ -88,11 +88,11 @@ def test_apply_points_config_and_data_at_the_user_directory(
     import os
 
     # A fresh install writes its config under the current name.
-    assert Path(os.environ["JARVIS_CONFIG"]) == home / "dodaios.toml"
+    assert Path(os.environ["JARVIS_CONFIG"]) == home / "galen.toml"
     assert Path(os.environ["JARVIS_DATA_DIR"]) == home / "data"
     # First run seeds the config from the copy inside the bundle, so the app
     # starts on the shipped defaults instead of an empty file.
-    assert (home / "dodaios.toml").read_text(encoding="utf-8") == ("[app]\nname = 'bundled'\n")
+    assert (home / "galen.toml").read_text(encoding="utf-8") == ("[app]\nname = 'bundled'\n")
     assert not (home / "jarvis.toml").exists()
 
 
@@ -113,7 +113,7 @@ def test_apply_never_overwrites_an_existing_user_config(
     # name stays the configuration; nothing is renamed or seeded beside it.
     assert (home / "jarvis.toml").read_text(encoding="utf-8") == ("the user's own settings\n")
     assert Path(os.environ["JARVIS_CONFIG"]) == home / "jarvis.toml"
-    assert not (home / "dodaios.toml").exists()
+    assert not (home / "galen.toml").exists()
 
 
 def test_apply_respects_an_explicit_override(
@@ -161,8 +161,8 @@ def test_apply_still_sets_the_path_when_seeding_fails(
 
     import os
 
-    assert Path(os.environ["JARVIS_CONFIG"]) == home / "dodaios.toml"
-    assert not (home / "dodaios.toml").exists()
+    assert Path(os.environ["JARVIS_CONFIG"]) == home / "galen.toml"
+    assert not (home / "galen.toml").exists()
 
 
 def test_galen_preview_moves_the_old_default_port_once(hook: ModuleType, tmp_path: Path) -> None:
@@ -211,7 +211,7 @@ def legacy_home(frozen_bundle: tuple[Path, Path]) -> Path:
     return legacy
 
 
-@pytest.fixture(params=["DodaiosApp.exe", "PersonalJarvis.exe"])
+@pytest.fixture(params=["GalenApp.exe", "DodaiosApp.exe", "PersonalJarvis.exe"])
 def desktop_app(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -269,7 +269,7 @@ def test_the_desktop_app_moves_the_legacy_directory_and_keeps_jarvis_toml(
     # The config file moved with its directory and kept its name.
     assert Path(os.environ["JARVIS_CONFIG"]) == home / "jarvis.toml"
     assert (home / "jarvis.toml").read_text(encoding="utf-8") == "the user's own settings\n"
-    assert not (home / "dodaios.toml").exists()
+    assert not (home / "galen.toml").exists()
     # The old path still reaches the same files.
     assert (legacy_home / "data" / "memory.db").read_bytes() == b"memories"
     assert os.environ[desktop_app._REPORT_ENV_VAR].startswith("INFO|Data directory migration")

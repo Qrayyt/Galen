@@ -30,6 +30,7 @@ import { isApiRunner, pickAgentChatFolder, preloadLocalModel, type CuratedModel 
 import { offeredModels, useSavedHiddenModels } from "@/lib/agentProviderPrefs";
 import { runningTurn, sideThreadOf } from "@/components/agentchat/reduce";
 import { permissionModeIcon } from "@/components/agentchat/permissionIcons";
+import { localizePermissionMode } from "@/components/agentchat/permissionModeCopy";
 import { useComposerDictation } from "@/components/agentchat/useComposerDictation";
 import { releaseHeldFiles, restoreHeldFiles, useChatAttachments } from "@/components/agentchat/useChatAttachments";
 import { usePasteRescue } from "@/components/agentchat/usePasteRescue";
@@ -596,8 +597,10 @@ export function AgentComposer({ autoFocus = false }: { autoFocus?: boolean }) {
   );
 
   const permissionModes = useMemo(
-    () => (provider?.permission_modes ?? []).filter((m) => m.id !== "plan"),
-    [provider],
+    () => (provider?.permission_modes ?? [])
+      .filter((m) => m.id !== "plan")
+      .map((mode) => localizePermissionMode(mode, t)),
+    [provider, t],
   );
   const hasPlan = Boolean((provider?.permission_modes ?? []).some((m) => m.id === "plan"));
   const planOn = draft.permissionMode === "plan";
@@ -654,8 +657,7 @@ export function AgentComposer({ autoFocus = false }: { autoFocus?: boolean }) {
   );
   // While Plan is on, the permission pill shows the mode Build would return to.
   const permissionValue = planOn ? planReturnMode(draft, provider) : draft.permissionMode;
-  const permissionDescription =
-    (provider?.permission_modes ?? []).find((m) => m.id === draft.permissionMode)?.description ?? "";
+  const permissionDescription = permissionModes.find((m) => m.id === draft.permissionMode)?.description ?? "";
   const permissionLabel = permissionModes.find((m) => m.id === permissionValue)?.label ?? "";
 
   const canSend =

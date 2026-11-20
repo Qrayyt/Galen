@@ -90,8 +90,11 @@ $InitFile = Join-Path $RepoRoot "dodaios\__init__.py"
 $InitText = Get-Content -Raw -Encoding UTF8 $InitFile
 $VersionMatch = [regex]::Match($InitText, '__version__\s*=\s*"([^"]+)"')
 if (-not $VersionMatch.Success) { Stop-WithError "dodaios/__init__.py does not define __version__" }
-$AppVersion = $VersionMatch.Groups[1].Value
-Write-Step "Galen $AppVersion"
+$AppDisplayVersion = $VersionMatch.Groups[1].Value
+$VersionNumbers = [regex]::Matches($AppDisplayVersion, '\d+') | ForEach-Object { [int]$_.Value }
+while ($VersionNumbers.Count -lt 4) { $VersionNumbers += 0 }
+$AppVersion = ($VersionNumbers | Select-Object -First 4) -join '.'
+Write-Step "Galen $AppDisplayVersion (Windows version $AppVersion)"
 
 # --- Python ----------------------------------------------------------------
 if ($Python -eq "") {
@@ -154,7 +157,7 @@ if ($SkipPyInstaller) {
 
 # Keep this list in lockstep with dodaios.spec. Checking the branded names first
 # catches identity-overlay drift before Inno Setup publishes a broken payload.
-foreach ($required in @("GalenApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")) {
+foreach ($required in @("GalenApp.exe", "DodaiosApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")) {
     $candidate = Join-Path $BundleDir $required
     if (-not (Test-Path $candidate)) {
         Stop-WithError "the frozen bundle is missing $required (expected at $candidate)"
@@ -223,6 +226,7 @@ New-Item -ItemType Directory -Force -Path $InstallerDir | Out-Null
 
 $IsccArgs = @(
     "/DAppVersion=$AppVersion",
+    "/DAppDisplayVersion=$AppDisplayVersion",
     "/DSourceDir=$BundleDir",
     "/DOutputDir=$InstallerDir",
     "/DIconFile=$IconFile",

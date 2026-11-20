@@ -3,8 +3,10 @@
   "ui_bundle_dir": "dodaios/ui/web/dist",
   "launcher_module": "dodaios.ui.web.launcher",
   "version_file": "dodaios/__init__.py",
-  "config_file": "galen.toml",
+  "config_file": "dodaios.toml",
   "config_files": [
+    "dodaios.toml",
+    "jarvis.toml",
     "galen.toml"
   ],
   "macos_app_dir_name": "Galen.app",

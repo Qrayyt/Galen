@@ -272,3 +272,32 @@ async def test_the_fetcher_identifies_itself(tmp_path: Path) -> None:
     assert seen
     assert all(request.headers["User-Agent"] for request in seen)
     assert all(request.url.scheme == "https" for request in seen)
+
+
+async def test_private_release_auth_is_sent_to_github_but_not_its_cdn(tmp_path: Path) -> None:
+    seen: list[httpx.Request] = []
+    routes = _github_release()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        factory = routes.get(str(request.url))
+        return factory() if factory is not None else httpx.Response(404)
+
+    await download_and_verify(
+        InstallerAsset(ASSET_NAME, f"{RELEASE}/{ASSET_NAME}", len(PAYLOAD), auth_token="private"),
+        InstallerAsset(
+            CHECKSUMS_ASSET_NAME,
+            f"{RELEASE}/{CHECKSUMS_ASSET_NAME}",
+            0,
+            auth_token="private",
+        ),
+        dest_dir=tmp_path,
+        fetcher=HttpxAssetFetcher(
+            transport=httpx.MockTransport(handler), auth_token="private"
+        ),
+    )
+
+    github = [request for request in seen if request.url.host == "github.com"]
+    cdn = [request for request in seen if request.url.host == "release-assets.githubusercontent.com"]
+    assert github and all(request.headers.get("Authorization") == "Bearer private" for request in github)
+    assert cdn and all("Authorization" not in request.headers for request in cdn)

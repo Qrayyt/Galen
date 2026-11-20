@@ -64,6 +64,22 @@ describe("TopBar update button", () => {
     expect(screen.getByTestId("update-dot")).toBeTruthy();
   });
 
+  it("opens the update banner automatically in the installed sidebar", async () => {
+    mockUpdateStatus({
+      managed: true,
+      current: "1.0.0-preview.1",
+      latest: "1.0.0-preview.2",
+      update_available: true,
+      notes: "Russian interface and a new Galen icon",
+      published_at: null,
+    });
+    render(<UpdateButton placement="sidebar" announceOnLaunch />);
+
+    const panel = await screen.findByRole("dialog", { name: "Update available" });
+    expect(panel.textContent).toContain("v1.0.0-preview.2");
+    expect(panel.textContent).toContain("Update & restart");
+  });
+
   it("opens a panel with version, current version and notes on click", async () => {
     mockUpdateStatus({
       managed: true,

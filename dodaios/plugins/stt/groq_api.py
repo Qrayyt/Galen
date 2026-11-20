@@ -339,7 +339,7 @@ class GroqWhisperAPI:
 #: ``LEGACY_KEYRING_SERVICE_NAMES``;
 #: ``tests/unit/core/test_identity_single_source.py`` pins them together.
 _KEYRING_SERVICE = "galen"
-_LEGACY_KEYRING_SERVICES = ()
+_LEGACY_KEYRING_SERVICES = ("dodaios", "personal-jarvis")
 
 
 def _read_keyring_secret(username: str) -> str:

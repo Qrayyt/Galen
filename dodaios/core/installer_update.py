@@ -41,6 +41,7 @@ import hashlib
 import logging
 import os
 import platform as platform_module
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,8 @@ from typing import Any, Protocol
 
 from dodaios.core.branding import (
     LEGACY_MACOS_APP_DIR_NAMES,
+    LEGACY_MACOS_BUNDLE_IDS,
+    LEGACY_MACOS_DMG_BUNDLE_IDS,
     MACOS_APP_DIR_NAME,
     MACOS_APP_DIR_NAMES,
     MACOS_BUNDLE_ID,
@@ -150,6 +153,8 @@ class InstallerAsset:
     name: str
     url: str
     size: int
+    digest: str | None = None
+    auth_token: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The shape the update status route publishes to the UI."""
@@ -181,7 +186,11 @@ class SignedManifestAssets:
 #: LAST name is the one every release ever published carries
 #: (``scripts/ci/release_assets.py`` pins the set for the release pipeline).
 INSTALLER_ASSET_NAMES: dict[tuple[str, str], tuple[str, ...]] = {
-    ("windows", "x64"): ("Dodaios-Setup-x64.exe", "PersonalJarvis-Setup-x64.exe"),
+    ("windows", "x64"): (
+        "Galen-Setup-x64.exe",
+        "Dodaios-Setup-x64.exe",
+        "PersonalJarvis-Setup-x64.exe",
+    ),
     ("macos", "arm64"): ("Dodaios-macOS-arm64.dmg", "PersonalJarvis-macOS-arm64.dmg"),
     ("macos", "x64"): ("Dodaios-macOS-x64.dmg", "PersonalJarvis-macOS-x64.dmg"),
     ("linux", "x64"): (
@@ -304,7 +313,20 @@ def select_asset(assets: Iterable[Any], name: str) -> InstallerAsset | None:
             # oddly still downloads, so an unreadable one reads as unknown
             # rather than failing the update.
             size = 0
-        return InstallerAsset(name=name, url=url, size=size)
+        raw_digest = entry.get("digest")
+        digest = None
+        if isinstance(raw_digest, str) and raw_digest.startswith("sha256:"):
+            candidate = raw_digest.removeprefix("sha256:").lower()
+            if re.fullmatch(r"[0-9a-f]{64}", candidate):
+                digest = candidate
+        auth_token = entry.get("_galen_auth_token")
+        return InstallerAsset(
+            name=name,
+            url=url,
+            size=size,
+            digest=digest,
+            auth_token=auth_token if isinstance(auth_token, str) and auth_token else None,
+        )
     return None
 
 
@@ -427,8 +449,11 @@ class HttpxAssetFetcher:
     leaves it ``None`` and gets httpx's default network transport.
     """
 
-    def __init__(self, *, transport: Any | None = None) -> None:
+    def __init__(
+        self, *, transport: Any | None = None, auth_token: str | None = None
+    ) -> None:
         self._transport = transport
+        self._auth_token = auth_token
 
     def _client(self) -> Any:
         import httpx
@@ -484,9 +509,14 @@ class HttpxAssetFetcher:
                         _report(on_progress, written, total)
         return written
 
-    @staticmethod
-    def _headers() -> dict[str, str]:
-        return {"User-Agent": UPDATER_USER_AGENT, "Accept": "application/octet-stream"}
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": UPDATER_USER_AGENT,
+            "Accept": "application/octet-stream",
+        }
+        if self._auth_token:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
+        return headers
 
 
 async def _require_https(request: Any) -> None:
@@ -546,7 +576,11 @@ async def download_and_verify(
     :class:`InstallerUpdateError` on every failure, leaving nothing executable
     behind.
     """
-    active = HttpxAssetFetcher() if fetcher is None else fetcher
+    active = (
+        HttpxAssetFetcher(auth_token=asset.auth_token or checksums.auth_token)
+        if fetcher is None
+        else fetcher
+    )
 
     def tick(written: int, total: int | None) -> None:
         _report(on_progress, written, total or (asset.size or None))
@@ -569,6 +603,13 @@ async def download_and_verify(
         ) from exc
     except Exception as exc:  # noqa: BLE001 — every transport error is the same refusal
         raise InstallerUpdateError(f"could not download {CHECKSUMS_ASSET_NAME}: {exc}") from exc
+
+    if checksums.digest:
+        manifest_digest = hashlib.sha256(manifest_text.encode("utf-8")).hexdigest()
+        if manifest_digest != checksums.digest:
+            raise InstallerUpdateError(
+                f"{CHECKSUMS_ASSET_NAME} failed its GitHub SHA-256 check — refusing it"
+            )
 
     if signed is not None:
         await _verify_signed_manifest(active, signed, manifest_text)
@@ -618,6 +659,11 @@ async def download_and_verify(
         raise InstallerUpdateError(
             f"{asset.name} failed its SHA-256 check (expected {expected}, got "
             f"{actual}) — the download was NOT installed"
+        )
+    if asset.digest and actual != asset.digest:
+        _discard(target)
+        raise InstallerUpdateError(
+            f"{asset.name} failed its GitHub SHA-256 check — the download was NOT installed"
         )
 
     log.info("[update] verified %s (%d bytes, sha256 %s)", asset.name, written, actual)
@@ -900,7 +946,7 @@ def _handover_windows(
     except OSError as exc:
         raise InstallerUpdateError(f"could not start {installer.name}: {exc}") from exc
     log.info("[update] handed over to %s (log: %s)", installer.name, log_file)
-    return "the Windows installer is running; Dodaios restarts by itself"
+    return "the Windows installer is running; Galen restarts by itself"
 
 
 # Absolute, so the relaunch never depends on the PATH a Finder-started app
@@ -1167,7 +1213,14 @@ def _replace_directory(source: Path, target: Path) -> None:
 # Bundle identifiers this product has shipped under: the installer-built app
 # and the downloadable disk image. Only a bundle that names one of them is
 # ever removed by an update.
-_OWN_MACOS_BUNDLE_IDS = frozenset({MACOS_BUNDLE_ID, MACOS_DMG_BUNDLE_ID})
+_OWN_MACOS_BUNDLE_IDS = frozenset(
+    {
+        MACOS_BUNDLE_ID,
+        MACOS_DMG_BUNDLE_ID,
+        *LEGACY_MACOS_BUNDLE_IDS,
+        *LEGACY_MACOS_DMG_BUNDLE_IDS,
+    }
+)
 
 
 def _macos_bundle_identifier(bundle: Path) -> str | None:

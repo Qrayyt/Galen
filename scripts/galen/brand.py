@@ -78,16 +78,16 @@ brand = {
     "PERSISTENT_COMPACT_NAME": '"Galen"',
     "PERSISTENT_SLUG": '"galen"',
     "LAUNCHER_ENTRY_NAME": '"Galen"',
-    "LEGACY_LAUNCHER_ENTRY_NAMES": '("Personal Jarvis",)',
+    "LEGACY_LAUNCHER_ENTRY_NAMES": '("Dodaios", "Personal Jarvis")',
     "CONFIG_FILE_NAME": '"galen.toml"',
-    "LEGACY_CONFIG_FILE_NAMES": "()",
+    "LEGACY_CONFIG_FILE_NAMES": '("dodaios.toml", "jarvis.toml")',
     "KEYRING_SERVICE_NAME": '"galen"',
-    "LEGACY_KEYRING_SERVICE_NAMES": "()",
+    "LEGACY_KEYRING_SERVICE_NAMES": '("dodaios", "personal-jarvis")',
     "SESSION_COOKIE_NAME": '"galen_session"',
     "MANAGED_INSTALL_MARKER": '".galen-managed-install"',
-    "LEGACY_MANAGED_INSTALL_MARKERS": "()",
+    "LEGACY_MANAGED_INSTALL_MARKERS": '(".dodaios-managed-install", ".jarvis-managed-install")',
     "DEFAULT_INSTALL_DIR_NAME": '".galen"',
-    "LEGACY_DEFAULT_INSTALL_DIR_NAMES": "()",
+    "LEGACY_DEFAULT_INSTALL_DIR_NAMES": '(".dodaios", ".personal-jarvis")',
     # Python imports keep their upstream name, while the user-facing commands
     # use Galen. The old commands remain aliases so upstream automation works.
     "LEGACY_DISTRIBUTION_NAMES": '("personal-jarvis",)',
@@ -95,42 +95,43 @@ brand = {
     "CONTROL_CLI_COMMAND_NAME": '"galenctl"',
     "LEGACY_CLI_COMMAND_NAMES": '("dodaios", "jarvis")',
     "LEGACY_CONTROL_CLI_COMMAND_NAMES": '("dodaiosctl", "jarvisctl")',
-    # Keep the install separate from an existing original Dodaios installation.
+    # Keep existing profiles and user-created output locations reachable so a
+    # branded upgrade changes the application, not the person's data.
     "WINDOWS_USER_DATA_DIR_NAME": '"GalenData"',
-    "LEGACY_WINDOWS_USER_DATA_DIR_NAMES": "()",
+    "LEGACY_WINDOWS_USER_DATA_DIR_NAMES": '("Dodaios", "Jarvis")',
     "FALLBACK_USER_DATA_DIR_NAME": '".galen-data"',
-    "LEGACY_FALLBACK_USER_DATA_DIR_NAMES": "()",
+    "LEGACY_FALLBACK_USER_DATA_DIR_NAMES": '(".dodaios-data", ".jarvis")',
     "DESKTOP_OUTPUT_MIRROR_DIR_NAME": '"Galen-Output"',
-    "LEGACY_DESKTOP_OUTPUT_MIRROR_DIR_NAMES": "()",
+    "LEGACY_DESKTOP_OUTPUT_MIRROR_DIR_NAMES": '("Dodaios-Output", "Jarvis-Output")',
     "DELIVERABLES_DIR_NAME": '"Galen-Outputs"',
-    "LEGACY_DELIVERABLES_DIR_NAMES": "()",
+    "LEGACY_DELIVERABLES_DIR_NAMES": '("Dodaios-Outputs", "Jarvis-Outputs")',
     "OBSIDIAN_VAULT_FOLDER_NAME": '"Galen"',
-    "LEGACY_OBSIDIAN_VAULT_FOLDER_NAMES": "()",
+    "LEGACY_OBSIDIAN_VAULT_FOLDER_NAMES": '("Dodaios", "Jarvis")',
     "WINDOWS_MUTEX_NAME": r'r"Global\Galen_v1"',
-    "LEGACY_WINDOWS_MUTEX_NAMES": "()",
+    "LEGACY_WINDOWS_MUTEX_NAMES": '(r"Global\\Dodaios_v1", r"Global\\PersonalJarvis_v1")',
     "WINDOWS_AUTOSTART_TASK_NAME": '"Galen Autostart"',
-    "LEGACY_WINDOWS_AUTOSTART_TASK_NAMES": "()",
+    "LEGACY_WINDOWS_AUTOSTART_TASK_NAMES": '("Dodaios Autostart", "Personal Jarvis Autostart")',
     "WINDOWS_AUTOSTART_DESCRIPTION": '"Galen (Autostart)"',
-    "LEGACY_WINDOWS_AUTOSTART_DESCRIPTIONS": "()",
+    "LEGACY_WINDOWS_AUTOSTART_DESCRIPTIONS": '("Dodaios (Autostart)", "Personal Jarvis (Autostart)")',
     "WINDOWS_SHORTCUT_FILE_NAME": '"Galen.lnk"',
-    "LEGACY_WINDOWS_SHORTCUT_FILE_NAMES": "()",
+    "LEGACY_WINDOWS_SHORTCUT_FILE_NAMES": '("Dodaios.lnk", "Personal Jarvis.lnk")',
     "WINDOWS_BRANDED_LAUNCHER_FILE_NAME": '"GalenApp.exe"',
-    "LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES": '("PersonalJarvis.exe",)',
+    "LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES": '("DodaiosApp.exe", "PersonalJarvis.exe")',
     "WINDOWS_BRANDED_LAUNCHER_DIR_NAME": '"GalenApp"',
-    "LEGACY_WINDOWS_BRANDED_LAUNCHER_DIR_NAMES": "()",
+    "LEGACY_WINDOWS_BRANDED_LAUNCHER_DIR_NAMES": '("DodaiosApp", "PersonalJarvis")',
     "MACOS_APP_NAME": '"Galen"',
-    "LEGACY_MACOS_APP_NAMES": "()",
+    "LEGACY_MACOS_APP_NAMES": '("Dodaios", "Personal Jarvis")',
     "MACOS_EXECUTABLE_NAME": '"GalenApp"',
-    "LEGACY_MACOS_EXECUTABLE_NAMES": '("PersonalJarvis",)',
+    "LEGACY_MACOS_EXECUTABLE_NAMES": '("DodaiosApp", "PersonalJarvis")',
     "MACOS_BUNDLE_ID": '"com.galen.desktop"',
     "LINUX_APP_NAME": '"Galen"',
-    "LEGACY_LINUX_APP_NAMES": "()",
+    "LEGACY_LINUX_APP_NAMES": '("Dodaios", "Personal Jarvis")',
     "LINUX_DESKTOP_ENTRY_FILE_NAME": '"galen.desktop"',
     "LINUX_WM_CLASS": '"galen"',
-    "LEGACY_LINUX_DESKTOP_ENTRY_FILE_NAMES": "()",
-    "LEGACY_LINUX_WM_CLASSES": "()",
+    "LEGACY_LINUX_DESKTOP_ENTRY_FILE_NAMES": '("dodaios.desktop", "personal-jarvis.desktop")',
+    "LEGACY_LINUX_WM_CLASSES": '("dodaios", "personal-jarvis")',
     "DEFAULT_OFFICIAL_REPO_SLUG": '"Qrayyt/Galen"',
-    "LEGACY_OFFICIAL_REPO_SLUGS": "()",
+    "LEGACY_OFFICIAL_REPO_SLUGS": '("Dodaios/Dodaios", "PersonalJarvis/PersonalJarvis")',
     "UPDATER_USER_AGENT": '"Galen-Updater"',
     "HTTP_USER_AGENT": '"Galen/1.0"',
     # Keep the published plugin entry-point namespace 'dodaios' unchanged.
@@ -154,8 +155,8 @@ def main() -> None:
         data = json.loads(s)
         data.update(
             {
-                "config_file": "galen.toml",
-                "config_files": ["galen.toml"],
+                "config_file": "dodaios.toml",
+                "config_files": ["dodaios.toml", "jarvis.toml", "galen.toml"],
                 "macos_app_dir_name": "Galen.app",
                 "macos_bundle_id": "com.galen.desktop",
             }
@@ -183,7 +184,7 @@ def main() -> None:
         edit(plugin, chain(
             assignments({
                 "_KEYRING_SERVICE": '"galen"',
-                "_LEGACY_KEYRING_SERVICES": "()",
+                "_LEGACY_KEYRING_SERVICES": '("dodaios", "personal-jarvis")',
             }),
         ))
     for plugin in (
@@ -199,6 +200,7 @@ def main() -> None:
         assignments({
             "GUI_EXE_NAME": '"GalenApp"',
             "CLI_EXE_NAME": '"galen"',
+            "LEGACY_GUI_EXE_NAMES": '("DodaiosApp", "PersonalJarvis")',
             "LEGACY_CLI_EXE_NAMES": '("dodaios", "jarvis")',
             "MACOS_APP_NAME": '"Galen.app"',
             "MACOS_BUNDLE_IDENTIFIER": '"ai.galen.desktop"',
@@ -219,12 +221,12 @@ def main() -> None:
     edit("packaging/pyinstaller_rthook_frozen.py", chain(
         assignments({
             "_WINDOWS_USER_DATA_DIR_NAME": '"GalenData"',
-            "_LEGACY_WINDOWS_USER_DATA_DIR_NAMES": "()",
+            "_LEGACY_WINDOWS_USER_DATA_DIR_NAMES": '("Dodaios", "Jarvis")',
             "_FALLBACK_USER_DATA_DIR_NAME": '".galen-data"',
-            "_LEGACY_FALLBACK_USER_DATA_DIR_NAMES": "()",
+            "_LEGACY_FALLBACK_USER_DATA_DIR_NAMES": '(".dodaios-data", ".jarvis")',
             "_CONFIG_FILE_NAME": '"galen.toml"',
-            "_LEGACY_CONFIG_FILE_NAMES": "()",
-            "_GUI_EXE_NAMES": '("GalenApp", "PersonalJarvis")',
+            "_LEGACY_CONFIG_FILE_NAMES": '("dodaios.toml", "jarvis.toml")',
+            "_GUI_EXE_NAMES": '("GalenApp", "DodaiosApp", "PersonalJarvis")',
         }),
         ensure_before(
             '# Where dodaios.spec puts the migration engine inside the bundle.\n',
@@ -265,7 +267,11 @@ def main() -> None:
             '    "Global\\\\PersonalJarvis_v1",\n'
             '    "Global\\\\PersonalJarvis_v1_dev",\n)',
             '_MUTEX_NAMES = (\n    "Global\\\\Galen_v1",\n'
-            '    "Global\\\\Galen_v1_dev",\n)',
+            '    "Global\\\\Galen_v1_dev",\n'
+            '    "Global\\\\Dodaios_v1",\n'
+            '    "Global\\\\Dodaios_v1_dev",\n'
+            '    "Global\\\\PersonalJarvis_v1",\n'
+            '    "Global\\\\PersonalJarvis_v1_dev",\n)',
         ),
         replace('``%LOCALAPPDATA%\\\\Dodaios`` on Windows, ``~/.dodaios-data``',
                 '``%LOCALAPPDATA%\\\\GalenData`` on Windows, ``~/.galen-data``'),
@@ -278,7 +284,7 @@ def main() -> None:
         replace(r'$Artifact = Join-Path $InstallerDir "Dodaios-Setup-x64.exe"',
                 r'$Artifact = Join-Path $InstallerDir "Galen-Setup-x64.exe"'),
         replace('@("DodaiosApp.exe", "PersonalJarvis.exe", "dodaios.exe", "jarvis.exe")',
-                '@("GalenApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")'),
+                '@("GalenApp.exe", "DodaiosApp.exe", "PersonalJarvis.exe", "galen.exe", "dodaios.exe", "jarvis.exe")'),
     ))
 
     def setup_script(s):
@@ -310,9 +316,12 @@ def main() -> None:
         return s
     edit("packaging/windows/Dodaios.iss", setup_script)
 
-    edit("dodaios/__init__.py", replace('__version__ = "5.6.0"', '__version__ = "1.0.0"'))
+    edit(
+        "dodaios/__init__.py",
+        replace('__version__ = "5.6.0"', '__version__ = "1.0.0-preview.2"'),
+    )
     def project_metadata(s: str) -> str:
-        s = s.replace('version = "5.6.0"', 'version = "1.0.0"')
+        s = s.replace('version = "5.6.0"', 'version = "1.0.0-preview.2"')
         galen = 'galen = "dodaios.__main__:main"'
         galenctl = 'galenctl = "dodaios.cli_ctl.__main__:main"'
         if galen not in s or galenctl not in s:
@@ -381,11 +390,17 @@ def main() -> None:
     icon_ico = path("assets/galen-brand/icon.ico")
     for target in (
         "dodaios/ui/web/frontend/public/dodaios-logo.png",
-        "dodaios/ui/web/frontend/public/dodaios-mark-256.png",
         "dodaios/ui/web/frontend/public/dodaios-gigi-256.png",
+        "dodaios/ui/web/frontend/src/assets/dodaios-mark.png",
         "dodaios/assets/icons/dodaios.png",
+        "assets/icons/dodaios-1024.png",
+        "assets/icons/dodaios-gigi-256.png",
     ):
         shutil.copyfile(icon_png, path(target))
+    shutil.copyfile(
+        path("assets/galen-brand/mark-dark.png"),
+        path("dodaios/ui/web/frontend/public/dodaios-mark-256.png"),
+    )
     for target in (
         "assets/icons/dodaios.ico",
         "dodaios/ui/web/frontend/public/dodaios.ico",

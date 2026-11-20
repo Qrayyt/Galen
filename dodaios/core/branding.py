@@ -46,14 +46,14 @@ PRODUCT_SLUG = PERSISTENT_SLUG
 # entry have names of their own (``MACOS_APP_NAME``, ``LINUX_APP_NAME``), each
 # moved with its own migration.
 LAUNCHER_ENTRY_NAME = "Galen"
-LEGACY_LAUNCHER_ENTRY_NAMES = ("Personal Jarvis",)
+LEGACY_LAUNCHER_ENTRY_NAMES = ("Dodaios", "Personal Jarvis")
 
 # The configuration file's name. A file under an earlier name is never
 # renamed: while it exists it stays the configuration, and only an install
 # that has none creates one under the current name
 # (``dodaios.core.config.resolve_config_file``).
 CONFIG_FILE_NAME = "galen.toml"
-LEGACY_CONFIG_FILE_NAMES = ()
+LEGACY_CONFIG_FILE_NAMES = ("dodaios.toml", "jarvis.toml")
 # The credential-store service every key is filed under (Windows Credential
 # Manager, macOS Keychain, Secret Service, the 0600 file fallback). Spelled as
 # a literal of its own, like the commands: it does not follow the display name.
@@ -63,7 +63,7 @@ KEYRING_SERVICE_NAME = "galen"
 # their entries once (``dodaios.core.identity_credentials``). Nothing deletes
 # a legacy entry except an explicit delete of that key: it is the way back for
 # a downgrade.
-LEGACY_KEYRING_SERVICE_NAMES = ()
+LEGACY_KEYRING_SERVICE_NAMES = ("dodaios", "personal-jarvis")
 CONTROL_KEY_PREFIX = "jctl_"
 SESSION_COOKIE_NAME = "galen_session"
 # The file the one-line installer writes into the checkout it manages. Its
@@ -71,14 +71,14 @@ SESSION_COOKIE_NAME = "galen_session"
 # reset the checkout. The installer writes every name, so an updater of any
 # version recognises the checkout; every reader accepts any of them.
 MANAGED_INSTALL_MARKER = ".galen-managed-install"
-LEGACY_MANAGED_INSTALL_MARKERS = ()
+LEGACY_MANAGED_INSTALL_MARKERS = (".dodaios-managed-install", ".jarvis-managed-install")
 MANAGED_INSTALL_MARKERS = (MANAGED_INSTALL_MARKER, *LEGACY_MANAGED_INSTALL_MARKERS)
 # The one-line installer's checkout in the home directory. An install under an
 # earlier name keeps it while it is a real directory; an update run moves it by
 # one rename and leaves a link behind (``install/install.sh``,
 # ``install/install.ps1``, through ``dodaios.core.identity_migration``).
 DEFAULT_INSTALL_DIR_NAME = ".galen"
-LEGACY_DEFAULT_INSTALL_DIR_NAMES = ()
+LEGACY_DEFAULT_INSTALL_DIR_NAMES = (".dodaios", ".personal-jarvis")
 # The Python distribution name (``pip install <name>``) and with it the
 # ``share/<name>`` directory a wheel installs its data files under.
 DISTRIBUTION_NAME = "dodaios"
@@ -120,23 +120,23 @@ FISH_CONF_FILE_NAME = f"{PERSISTENT_SLUG}.fish"
 # name until the primary instance moves it (``dodaios.core.identity_boot``);
 # while a real directory still stands under an earlier name, that one is used.
 WINDOWS_USER_DATA_DIR_NAME = "GalenData"
-LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ()
+LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ("Dodaios", "Jarvis")
 FALLBACK_USER_DATA_DIR_NAME = ".galen-data"
-LEGACY_FALLBACK_USER_DATA_DIR_NAMES = ()
+LEGACY_FALLBACK_USER_DATA_DIR_NAMES = (".dodaios-data", ".jarvis")
 # Folders a person opens themselves. They are found under an earlier name for
 # as long as one exists there and are never moved, so nothing on the Desktop or
 # in Downloads changes its name under the user's hands.
 DESKTOP_OUTPUT_MIRROR_DIR_NAME = "Galen-Output"
-LEGACY_DESKTOP_OUTPUT_MIRROR_DIR_NAMES = ()
+LEGACY_DESKTOP_OUTPUT_MIRROR_DIR_NAMES = ("Dodaios-Output", "Jarvis-Output")
 # Where finished mission deliverables are mirrored (Downloads, Desktop or the
 # home directory; lower-cased on a system without a file explorer).
 DELIVERABLES_DIR_NAME = "Galen-Outputs"
-LEGACY_DELIVERABLES_DIR_NAMES = ()
+LEGACY_DELIVERABLES_DIR_NAMES = ("Dodaios-Outputs", "Jarvis-Outputs")
 # The folder created inside an existing Obsidian vault the user registers.
 # Only a new registration uses it; a vault root already saved in the
 # configuration keeps naming the folder it names.
 OBSIDIAN_VAULT_FOLDER_NAME = "Galen"
-LEGACY_OBSIDIAN_VAULT_FOLDER_NAMES = ()
+LEGACY_OBSIDIAN_VAULT_FOLDER_NAMES = ("Dodaios", "Jarvis")
 
 # --- Marketplace manifest namespace -------------------------------------------
 # The key a plugin package keeps this app's own data under
@@ -152,7 +152,7 @@ LEGACY_MARKETPLACE_EXTENSION_NAMESPACES = ("io.github.personaljarvis",)
 # is a secondary: an old and a new release never run side by side
 # (``dodaios.ui.shell.single_instance``).
 WINDOWS_MUTEX_NAME = r"Global\Galen_v1"
-LEGACY_WINDOWS_MUTEX_NAMES = ()
+LEGACY_WINDOWS_MUTEX_NAMES = (r"Global\Dodaios_v1", r"Global\PersonalJarvis_v1")
 # Kept on purpose: the taskbar groups windows, and resolves pins, by this id.
 WINDOWS_APP_USER_MODEL_ID = f"{PERSISTENT_COMPACT_NAME}.{PERSISTENT_COMPACT_NAME}"
 # Kept on purpose: the key a source install's Installed Apps entry lives under.
@@ -165,24 +165,24 @@ WINDOWS_UNINSTALL_REGISTRY_SUBKEY = (
 # name, removing the earlier one in the same elevated step
 # (``dodaios.autostart.windows``).
 WINDOWS_AUTOSTART_TASK_NAME = "Galen Autostart"
-LEGACY_WINDOWS_AUTOSTART_TASK_NAMES = ()
+LEGACY_WINDOWS_AUTOSTART_TASK_NAMES = ("Dodaios Autostart", "Personal Jarvis Autostart")
 WINDOWS_AUTOSTART_DESCRIPTION = "Galen (Autostart)"
-LEGACY_WINDOWS_AUTOSTART_DESCRIPTIONS = ()
+LEGACY_WINDOWS_AUTOSTART_DESCRIPTIONS = ("Dodaios (Autostart)", "Personal Jarvis (Autostart)")
 # The Start-Menu, Desktop and Startup shortcut. A shortcut under an earlier name
 # is removed only where it points into this installation.
 WINDOWS_SHORTCUT_FILE_NAME = "Galen.lnk"
-LEGACY_WINDOWS_SHORTCUT_FILE_NAMES = ()
+LEGACY_WINDOWS_SHORTCUT_FILE_NAMES = ("Dodaios.lnk", "Personal Jarvis.lnk")
 # The windowed executable: the branded pythonw copy of a source install and the
 # GUI executable of the frozen build (``dodaios.spec``). Not ``Dodaios.exe``: it
 # shares a folder with the ``dodaios`` command, and Windows paths ignore case.
 # Earlier names are still found, and the frozen build still ships one, because
 # taskbar pins, scheduled tasks and shortcuts name that file.
 WINDOWS_BRANDED_LAUNCHER_FILE_NAME = "GalenApp.exe"
-LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES = ("PersonalJarvis.exe",)
+LEGACY_WINDOWS_BRANDED_LAUNCHER_FILE_NAMES = ("DodaiosApp.exe", "PersonalJarvis.exe")
 # ``%LOCALAPPDATA%\<name>\bin``, the per-user home of the branded copy. Not the
 # plain product name: that is the data directory beside it.
 WINDOWS_BRANDED_LAUNCHER_DIR_NAME = "GalenApp"
-LEGACY_WINDOWS_BRANDED_LAUNCHER_DIR_NAMES = ()
+LEGACY_WINDOWS_BRANDED_LAUNCHER_DIR_NAMES = ("DodaiosApp", "PersonalJarvis")
 # Kept on purpose: a process of an earlier release sets and reads it.
 WINDOWS_BRANDED_LAUNCH_ENV_VAR = "JARVIS_BRANDED_LAUNCH"
 
@@ -194,7 +194,7 @@ WINDOWS_BRANDED_LAUNCH_ENV_VAR = "JARVIS_BRANDED_LAUNCH"
 # requirement, never the path. The bundle ids, the login item's label and the
 # signing identity below did NOT move: a new one starts the grants over.
 MACOS_APP_NAME = "Galen"
-LEGACY_MACOS_APP_NAMES = ()
+LEGACY_MACOS_APP_NAMES = ("Dodaios", "Personal Jarvis")
 MACOS_APP_DIR_NAME = f"{MACOS_APP_NAME}.app"
 LEGACY_MACOS_APP_DIR_NAMES = tuple(f"{name}.app" for name in LEGACY_MACOS_APP_NAMES)
 # Every name a bundle of ours may carry in an Applications folder, current first.
@@ -204,13 +204,15 @@ MACOS_APP_DIR_NAMES = (MACOS_APP_DIR_NAME, *LEGACY_MACOS_APP_DIR_NAMES)
 # requirement names its bundle id and certificate, not this file, so the
 # rename keeps every privacy grant.
 MACOS_EXECUTABLE_NAME = "GalenApp"
-LEGACY_MACOS_EXECUTABLE_NAMES = ("PersonalJarvis",)
+LEGACY_MACOS_EXECUTABLE_NAMES = ("DodaiosApp", "PersonalJarvis")
 MACOS_BUNDLE_ID = "com.galen.desktop"
+LEGACY_MACOS_BUNDLE_IDS = ("com.dodaios.desktop", "com.personal-jarvis.desktop")
 # The downloadable .dmg (PyInstaller, ``dodaios.spec``) is a second, equally
 # legitimate installed app: its own bundle id and therefore its own macOS
 # privacy grants. ``dodaios.spec`` cannot import this module, so a parity test
 # (``tests/unit/setup/test_macos_dmg_identity.py``) pins its literal to this.
 MACOS_DMG_BUNDLE_ID = f"ai.{PERSISTENT_COMPACT_NAME.lower()}.desktop"
+LEGACY_MACOS_DMG_BUNDLE_IDS = ("ai.dodaios.desktop", "ai.personaljarvis.desktop")
 MACOS_AUTOSTART_LABEL = f"com.{PERSISTENT_SLUG}.autostart"
 # Common name of the per-user self-signed code-signing certificate the
 # installer creates so the app bundle keeps one TCC identity across rebuilds.
@@ -225,11 +227,11 @@ MACOS_SIGNING_IDENTITY_LABEL = f"{PERSISTENT_PRODUCT_NAME} Local Signing"
 # only where it starts this installation, and an earlier-named autostart entry
 # that starts this installation counts as current (``dodaios.autostart.linux``).
 LINUX_APP_NAME = "Galen"
-LEGACY_LINUX_APP_NAMES = ()
+LEGACY_LINUX_APP_NAMES = ("Dodaios", "Personal Jarvis")
 LINUX_DESKTOP_ENTRY_FILE_NAME = "galen.desktop"
-LEGACY_LINUX_DESKTOP_ENTRY_FILE_NAMES = ()
+LEGACY_LINUX_DESKTOP_ENTRY_FILE_NAMES = ("dodaios.desktop", "personal-jarvis.desktop")
 LINUX_WM_CLASS = "galen"
-LEGACY_LINUX_WM_CLASSES = ()
+LEGACY_LINUX_WM_CLASSES = ("dodaios", "personal-jarvis")
 
 # --- Plugin entry-point groups -------------------------------------------------
 # A plugin registers under ``<namespace>.<slot>`` (``dodaios.tool``,
@@ -242,7 +244,7 @@ LEGACY_PLUGIN_GROUP_NAMESPACES = ("jarvis",)
 DEFAULT_OFFICIAL_REPO_SLUG = "Qrayyt/Galen"
 # Checkouts cloned before the GitHub rename still store this origin. The
 # updater accepts it and rewrites origin to the current slug when it applies.
-LEGACY_OFFICIAL_REPO_SLUGS = ()
+LEGACY_OFFICIAL_REPO_SLUGS = ("Dodaios/Dodaios", "PersonalJarvis/PersonalJarvis")
 OFFICIAL_REPO_SLUG_ENV_VAR = "JARVIS_OFFICIAL_REPO_SLUG"
 
 
@@ -265,6 +267,7 @@ def resolve_official_repo_slug(environ: Mapping[str, str] | None = None) -> str:
 OFFICIAL_REPO_SLUG = resolve_official_repo_slug()
 OFFICIAL_REPO_URL = f"https://github.com/{OFFICIAL_REPO_SLUG}"
 OFFICIAL_REPO_GIT_URL = f"{OFFICIAL_REPO_URL}.git"
+OFFICIAL_RELEASES_API_URL = f"https://api.github.com/repos/{OFFICIAL_REPO_SLUG}/releases"
 OFFICIAL_RELEASES_LATEST_API_URL = (
     f"https://api.github.com/repos/{OFFICIAL_REPO_SLUG}/releases/latest"
 )
@@ -312,6 +315,8 @@ __all__ = [
     "LEGACY_LAUNCHER_ENTRY_NAMES",
     "LEGACY_MACOS_APP_DIR_NAMES",
     "LEGACY_MACOS_APP_NAMES",
+    "LEGACY_MACOS_BUNDLE_IDS",
+    "LEGACY_MACOS_DMG_BUNDLE_IDS",
     "LEGACY_MACOS_EXECUTABLE_NAMES",
     "LEGACY_WINDOWS_AUTOSTART_DESCRIPTIONS",
     "LEGACY_WINDOWS_AUTOSTART_TASK_NAMES",
@@ -356,6 +361,7 @@ __all__ = [
     "LEGACY_MCP_AGENTS_SERVER_NAMES",
     "LEGACY_MCP_TOOLS_SERVER_NAMES",
     "OBSIDIAN_VAULT_FOLDER_NAME",
+    "OFFICIAL_RELEASES_API_URL",
     "OFFICIAL_RELEASES_LATEST_API_URL",
     "OFFICIAL_REPO_GIT_URL",
     "OFFICIAL_REPO_SLUG",

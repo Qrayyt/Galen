@@ -622,7 +622,7 @@ describe("ChatStage (agent chat)", () => {
 
     fireEvent.click(screen.getByTestId("composer-permission"));
     const stances = await screen.findByTestId("composer-permission-panel");
-    expect(stances.textContent).toContain("What Auto-accept edits lets through.");
+    expect(stances.textContent).toContain("Edits run automatically; commands may still ask.");
   });
 
   it("wears one glyph per stance on the unified ladder", async () => {

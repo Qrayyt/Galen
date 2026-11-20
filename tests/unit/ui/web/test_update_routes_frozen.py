@@ -692,6 +692,7 @@ def test_apply_downloads_into_a_fresh_private_folder(
 # --------------------------------------------------------------------------- #
 # A release may carry the installer under more than one accepted name
 # --------------------------------------------------------------------------- #
+GALEN_SETUP_NAME = "Galen-Setup-x64.exe"
 NEW_SETUP_NAME = "Dodaios-Setup-x64.exe"
 
 
@@ -716,7 +717,11 @@ def test_real_asset_names_cover_what_this_machine_would_ask_for() -> None:
     """The route asks the one table; a Windows x64 box accepts both names."""
     from dodaios.core.installer_update import installer_asset_names
 
-    assert installer_asset_names("win32", "AMD64") == (NEW_SETUP_NAME, SETUP_NAME)
+    assert installer_asset_names("win32", "AMD64") == (
+        GALEN_SETUP_NAME,
+        NEW_SETUP_NAME,
+        SETUP_NAME,
+    )
 
 
 def test_status_offers_the_preferred_name_when_a_release_carries_both(
@@ -859,6 +864,21 @@ def test_status_without_a_signed_manifest_offers_nothing(
     body = client.get("/api/update/status").json()
     # apply would refuse it, so status must not offer it.
     assert body["update_available"] is False
+
+
+def test_preview_with_github_digests_is_offered_without_the_offline_signature(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_frozen(monkeypatch)
+    release = _unsigned_release()
+    for asset in release["assets"]:
+        asset["digest"] = "sha256:" + "a" * 64
+    _patch_latest(monkeypatch, release)
+
+    body = client.get("/api/update/status").json()
+
+    assert body["update_available"] is True
+    assert body["asset"]["name"] == SETUP_NAME
 
 
 def test_apply_refuses_a_release_without_a_signed_manifest(

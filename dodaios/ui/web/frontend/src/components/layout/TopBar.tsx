@@ -276,7 +276,13 @@ function ProgressRing({ percent, spinning }: { percent: number; spinning: boolea
  * While the update runs, the icon becomes a progress ring and the panel (if
  * open) shows the percentage, the server's sub-status and a thin bar.
  */
-export function UpdateButton({ placement = "titlebar" }: { placement?: "titlebar" | "sidebar" } = {}) {
+export function UpdateButton({
+  placement = "titlebar",
+  announceOnLaunch = false,
+}: {
+  placement?: "titlebar" | "sidebar";
+  announceOnLaunch?: boolean;
+} = {}) {
   const inSidebar = placement === "sidebar";
   const t = useT();
   const pushToast = useEventStore((s) => s.pushToast);
@@ -289,7 +295,20 @@ export function UpdateButton({ placement = "titlebar" }: { placement?: "titlebar
   const [restarting, setRestarting] = useState(false);
   const resetTimer = useRef<number | null>(null);
   const rollbackNotified = useRef<string | null>(null);
+  const announcedVersion = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  // The installed app asks for an update banner on launch. Reuse the complete
+  // update panel instead of showing a second, weaker toast: it has the release
+  // notes, progress, integrity failures and the explicit Later action. A
+  // version is announced once per process; focusing the window or refreshing
+  // status must not keep reopening a panel the person dismissed.
+  useEffect(() => {
+    const version = status?.update_available ? status.latest : status?.pending_update?.version;
+    if (!announceOnLaunch || !version || announcedVersion.current === version) return;
+    announcedVersion.current = version;
+    setOpen(true);
+  }, [announceOnLaunch, status?.latest, status?.pending_update?.version, status?.update_available]);
 
   // Poll the progress side channel for as long as the apply request is in
   // flight. It stops on its own when the button leaves the busy state, and a

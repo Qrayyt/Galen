@@ -82,6 +82,7 @@ from dodaios.core.branding import (
     LEGACY_OFFICIAL_REPO_SLUGS,
     MANAGED_INSTALL_MARKER,
     MANAGED_INSTALL_MARKERS,
+    OFFICIAL_RELEASES_API_URL,
     OFFICIAL_RELEASES_LATEST_API_URL,
     OFFICIAL_REPO_GIT_URL,
     OFFICIAL_REPO_SLUG,
@@ -125,6 +126,7 @@ router = APIRouter(prefix="/api/update", tags=["update"])
 # ``git reset --hard`` runs, so a dev checkout or a fork can never be self-reset.
 _OFFICIAL_REPO_SLUG = OFFICIAL_REPO_SLUG
 _LEGACY_OFFICIAL_REPO_SLUGS = LEGACY_OFFICIAL_REPO_SLUGS
+_RELEASES_API = OFFICIAL_RELEASES_API_URL
 _RELEASES_LATEST_API = OFFICIAL_RELEASES_LATEST_API_URL
 # Written by install/installer.py into the checkout root. Its presence is one
 # half of "this copy is safe to self-update".
@@ -569,8 +571,58 @@ async def _resolve_managed_repo() -> Path | None:
 # --------------------------------------------------------------------------- #
 # GitHub release check (fail-open)
 # --------------------------------------------------------------------------- #
+async def _github_update_token() -> str | None:
+    """Return the existing GitHub connection for a private release feed.
+
+    The public request is always attempted first. Reading the credential store
+    only after GitHub answers 401/404 keeps the normal public update check fast
+    and avoids asking a desktop keyring for a secret it does not need.
+    """
+
+    def load() -> str | None:
+        try:
+            from dodaios.agentic_ide.github_link import credential
+
+            found = credential()
+            return found.token if found is not None else None
+        except Exception:  # noqa: BLE001 - a missing connection means public-only
+            return None
+
+    return await asyncio.to_thread(load)
+
+
+def _release_from_payload(data: dict[str, Any], auth_token: str | None) -> dict[str, Any] | None:
+    release_tag = str(data.get("tag_name") or "").strip()
+    if data.get("draft") or not _RELEASE_TAG_RE.fullmatch(release_tag):
+        return None
+    raw_assets = data.get("assets")
+    assets = raw_assets if isinstance(raw_assets, list) else []
+    if auth_token:
+        assets = [
+            {**entry, "_galen_auth_token": auth_token} if isinstance(entry, dict) else entry
+            for entry in assets
+        ]
+    return {
+        "version": release_tag.lstrip("vV"),
+        "tag": release_tag,
+        "notes": (data.get("body") or "").strip(),
+        "published_at": data.get("published_at"),
+        "release_url": data.get("html_url"),
+        "prerelease": bool(data.get("prerelease")),
+        "assets": assets,
+    }
+
+
 async def _fetch_latest_release() -> dict[str, Any] | None:
-    """GET the latest GitHub Release. Fail-open: any error returns ``None``.
+    """GET the newest stable or preview GitHub Release.
+
+    ``/releases/latest`` deliberately hides prereleases, which made every
+    Galen Preview invisible to the app. The list endpoint is sorted newest
+    first, but selection still uses parsed versions so an edited publication
+    date cannot make an older tag win. Private repositories retry with the
+    GitHub connection the person already configured in Galen.
+
+    Fail-open: any error returns ``None``.
 
     A successful answer is also remembered in ``_last_good_release`` so the
     apply path can survive a transient API failure (rate limit, blip) that
@@ -595,31 +647,39 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
             follow_redirects=True,
             event_hooks={"response": [_stay_on_github_api]},
         ) as client:
-            resp = await client.get(
-                _RELEASES_LATEST_API,
-                headers={
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": UPDATER_USER_AGENT,
-                },
-            )
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "User-Agent": UPDATER_USER_AGENT,
+            }
+            resp = await client.get(_RELEASES_API, params={"per_page": 30}, headers=headers)
+            auth_token = None
+            if resp.status_code in {401, 404}:
+                auth_token = await _github_update_token()
+                if auth_token:
+                    resp = await client.get(
+                        _RELEASES_API,
+                        params={"per_page": 30},
+                        headers={**headers, "Authorization": f"Bearer {auth_token}"},
+                    )
         if resp.status_code != 200:
-            log.debug("update check: releases/latest HTTP %s", resp.status_code)
+            log.debug("update check: releases API HTTP %s", resp.status_code)
             return None
         data = resp.json()
-        release_tag = str(data.get("tag_name") or "").strip()
-        if not _RELEASE_TAG_RE.fullmatch(release_tag):
+        rows = data if isinstance(data, list) else [data]
+        releases = [
+            release
+            for row in rows
+            if isinstance(row, dict)
+            if (release := _release_from_payload(row, auth_token)) is not None
+        ]
+        if not releases:
             return None
-        raw_assets = data.get("assets")
-        release = {
-            "version": release_tag.lstrip("vV"),
-            "tag": release_tag,
-            "notes": (data.get("body") or "").strip(),
-            "published_at": data.get("published_at"),
-            "release_url": data.get("html_url"),
-            # Only the frozen path reads this; the managed path resolves its
-            # target from the git tag and ignores the attachments entirely.
-            "assets": raw_assets if isinstance(raw_assets, list) else [],
-        }
+        try:
+            from packaging.version import Version
+
+            release = max(releases, key=lambda item: Version(str(item["version"])))
+        except (ImportError, ValueError, TypeError):
+            release = releases[0]
         _last_good_release = release
         return release
     except Exception as exc:  # noqa: BLE001 — fail-open on any network/parse error
@@ -1136,12 +1196,15 @@ async def _frozen_status(current: str) -> dict[str, object]:
         )
         return result
     signed_manifest, signature = _signed_manifest_assets(latest)
-    if signed_manifest is None or signature is None:
-        # apply would refuse it: the checksums are not signed by the release key.
+    if (signed_manifest is None or signature is None) and not (
+        asset.digest and checksums.digest
+    ):
+        # Stable releases use the offline release key. Preview releases may use
+        # GitHub's own immutable SHA-256 metadata for both the checksum document
+        # and installer; without either trust chain, apply refuses too.
         log.info(
-            "[update] release %s carries no signed %s — not offering a frozen update",
+            "[update] release %s carries neither signed nor GitHub-digested update metadata",
             version or "?",
-            UPDATE_MANIFEST_ASSET_NAME,
         )
         return result
 
@@ -1280,17 +1343,19 @@ async def _apply_frozen(
         )
 
     signed_manifest, signature = _signed_manifest_assets(latest)
-    if signed_manifest is None or signature is None:
+    signed: SignedManifestAssets | None = None
+    if signed_manifest is not None and signature is not None:
+        signed = SignedManifestAssets(
+            manifest=signed_manifest, signature=signature, version=release_version
+        )
+    elif not (asset.digest and checksums.digest):
         raise HTTPException(
             status_code=502,
             detail=(
-                f"release {release_tag} has no signed {UPDATE_MANIFEST_ASSET_NAME} — "
-                "refusing to install an update the release key did not sign"
+                f"release {release_tag} has neither signed {UPDATE_MANIFEST_ASSET_NAME} "
+                "nor GitHub SHA-256 metadata — refusing an unverified update"
             ),
         )
-    signed = SignedManifestAssets(
-        manifest=signed_manifest, signature=signature, version=release_version
-    )
 
     blocker = update_blocker()
     if blocker is not None:

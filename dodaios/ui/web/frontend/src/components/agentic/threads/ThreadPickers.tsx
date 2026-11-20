@@ -6,6 +6,7 @@ import { AgentMark } from "@/components/agentic/AgentMark";
 import { ProviderLogo } from "@/components/providers/ProviderLogo";
 import { Combobox, type ComboboxGroup, type ComboboxOption } from "@/components/ui/combobox";
 import { useT } from "@/i18n";
+import { localizePermissionMode } from "@/components/agentchat/permissionModeCopy";
 import { isApiRunner, type CuratedModel, type ModelSpeed } from "@/lib/agentChatApi";
 import { offeredModels, useSavedHiddenModels } from "@/lib/agentProviderPrefs";
 import { effortLadder } from "@/lib/effortLadder";
@@ -231,7 +232,7 @@ export function AccessPicker({ provider, draft, onPick, onPlan, separated = fals
 }) {
   const t = useT();
   const all = provider?.permission_modes ?? [];
-  const modes = all.filter((mode) => mode.id !== "plan");
+  const modes = all.filter((mode) => mode.id !== "plan").map((mode) => localizePermissionMode(mode, t));
   if (modes.length === 0) return null;
   const hasPlan = Boolean(onPlan) && all.some((mode) => mode.id === "plan");
   const planOn = draft.permissionMode === "plan";

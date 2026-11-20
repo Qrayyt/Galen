@@ -296,7 +296,7 @@ def test_apply_leaves_current_origin_untouched(
     async def _fake_git_output(args, *, cwd, timeout_s=15.0):
         calls.append(args)
         if args == ["remote", "get-url", "origin"]:
-            return "https://github.com/Dodaios/Dodaios.git"
+            return "https://github.com/Qrayyt/Galen.git"
         if args == ["rev-parse", "HEAD"]:
             return "a" * 40
         if args == ["rev-parse", "FETCH_HEAD^{commit}"]:
@@ -687,25 +687,26 @@ async def test_release_check_follows_a_renamed_repository(
 ) -> None:
     import httpx
 
-    moved = "https://api.github.com/repositories/1255092568/releases/latest"
+    moved = "https://api.github.com/repositories/1255092568/releases"
+    requested = f"{u._RELEASES_API}?per_page=30"
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == u._RELEASES_LATEST_API:
+        if str(request.url) == requested:
             return httpx.Response(301, headers={"location": moved})
         assert str(request.url) == moved
-        return httpx.Response(200, json={"tag_name": "v9.9.9", "assets": []})
+        return httpx.Response(200, json=[{"tag_name": "v9.9.9", "assets": []}])
 
     seen = _serve_release_api(monkeypatch, _handler)
     release = await u._fetch_latest_release()
     assert release is not None and release["version"] == "9.9.9"
-    assert seen == [u._RELEASES_LATEST_API, moved]
+    assert seen == [requested, moved]
 
 
 @pytest.mark.parametrize(
     "location",
     [
-        "https://example.invalid/repos/Dodaios/Dodaios/releases/latest",
-        "http://api.github.com/repositories/1/releases/latest",
+        "https://example.invalid/repos/Dodaios/Dodaios/releases",
+        "http://api.github.com/repositories/1/releases",
     ],
 )
 async def test_release_check_refuses_a_redirect_off_the_github_api(
@@ -714,14 +715,74 @@ async def test_release_check_refuses_a_redirect_off_the_github_api(
     import httpx
 
     def _handler(request: httpx.Request) -> httpx.Response:
-        if str(request.url) == u._RELEASES_LATEST_API:
+        requested = f"{u._RELEASES_API}?per_page=30"
+        if str(request.url) == requested:
             return httpx.Response(301, headers={"location": location})
-        return httpx.Response(200, json={"tag_name": "v9.9.9", "assets": []})
+        return httpx.Response(200, json=[{"tag_name": "v9.9.9", "assets": []}])
 
     seen = _serve_release_api(monkeypatch, _handler)
     assert await u._fetch_latest_release() is None
-    assert seen == [u._RELEASES_LATEST_API]
+    assert seen == [f"{u._RELEASES_API}?per_page=30"]
     assert u._last_good_release is None
+
+
+async def test_release_check_selects_a_newer_preview_over_the_old_stable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    def _handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {"tag_name": "v1.0.0-preview.2", "prerelease": True, "assets": []},
+                {"tag_name": "v0.8.0", "prerelease": False, "assets": []},
+            ],
+        )
+
+    _serve_release_api(monkeypatch, _handler)
+    release = await u._fetch_latest_release()
+    assert release is not None
+    assert release["version"] == "1.0.0-preview.2"
+    assert release["prerelease"] is True
+
+
+async def test_private_release_check_reuses_the_existing_github_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    seen_auth: list[str | None] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("Authorization")
+        seen_auth.append(auth)
+        if auth is None:
+            return httpx.Response(404)
+        return httpx.Response(
+            200,
+            json=[{
+                "tag_name": "v1.0.0-preview.2",
+                "prerelease": True,
+                "assets": [{
+                    "name": "Galen-Setup-x64.exe",
+                    "browser_download_url": "https://github.com/example/download.exe",
+                    "size": 1,
+                    "digest": "sha256:" + "a" * 64,
+                }],
+            }],
+        )
+
+    async def _token() -> str:
+        return "private"
+
+    monkeypatch.setattr(u, "_github_update_token", _token)
+    _serve_release_api(monkeypatch, _handler)
+    release = await u._fetch_latest_release()
+
+    assert release is not None
+    assert seen_auth == [None, "Bearer private"]
+    assert release["assets"][0]["_galen_auth_token"] == "private"
 
 
 # --------------------------------------------------------------------------- #

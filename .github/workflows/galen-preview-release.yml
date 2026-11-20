@@ -93,14 +93,16 @@ jobs:
           assert constants['PRODUCT_NAME']=='Galen'
           assert constants['WINDOWS_USER_DATA_DIR_NAME']=='GalenData'
           assert constants['DEFAULT_OFFICIAL_REPO_SLUG']=='Qrayyt/Galen'
-          assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0'
+          assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0-preview.2'
           assert pathlib.Path('integrations/openrealtime/source/go.mod').is_file()
           assert pathlib.Path('third_party/galen-opendex/LICENSE').is_file()
           assert pathlib.Path('third_party/galen-kaizumi/LICENSE').is_file()
           assert pathlib.Path('third_party/galen-elissa/LICENSE').is_file()
           assert pathlib.Path('third_party/galen-openrealtime/LICENSE').is_file()
           PY
-          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'galen.toml'"
+          python -c "from dodaios.core.update_contract import DEFAULT_CONTRACT; assert DEFAULT_CONTRACT.config_file == 'dodaios.toml'; assert DEFAULT_CONTRACT.config_files == ('dodaios.toml', 'jarvis.toml', 'galen.toml')"
+          python scripts/galen/make_brand_assets.py --check
+          python scripts/galen/check_russian_locales.py
           python scripts/galen/validate_release.py
       - name: Test changed React sources
         if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true'
@@ -219,15 +221,22 @@ jobs:
           if (-not (Test-Path "dist/Jarvis/GalenRealtime.exe")) { throw "Missing realtime companion" }
           $hash = (Get-FileHash -Algorithm SHA256 "dist/installers/Galen-Setup-x64.exe").Hash.ToLowerInvariant()
           "$hash  Galen-Setup-x64.exe" | Set-Content -Encoding ascii "dist/installers/Galen-Setup-x64.exe.sha256"
+          "$hash  Galen-Setup-x64.exe" | Set-Content -Encoding ascii "dist/installers/installers-SHA256SUMS.txt"
       - name: Verify the reused or rebuilt installer
         shell: pwsh
         run: |
           $installer = "dist/installers/Galen-Setup-x64.exe"
           $checksum = "$installer.sha256"
-          if (-not (Test-Path $installer) -or -not (Test-Path $checksum)) { throw "Missing installer or checksum" }
+          $manifest = "dist/installers/installers-SHA256SUMS.txt"
+          if (-not (Test-Path $manifest) -and (Test-Path $checksum)) {
+            Copy-Item -LiteralPath $checksum -Destination $manifest
+          }
+          if (-not (Test-Path $installer) -or -not (Test-Path $checksum) -or -not (Test-Path $manifest)) { throw "Missing installer or checksum" }
           $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
           $expected = ((Get-Content $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
           if ($actual -ne $expected) { throw "Installer checksum mismatch" }
+          $manifestExpected = ((Get-Content $manifest -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($actual -ne $manifestExpected) { throw "Update manifest checksum mismatch" }
       - name: Save the verified installer for identical runtime inputs
         if: steps.installer-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -235,6 +244,7 @@ jobs:
           path: |
             dist/installers/Galen-Setup-x64.exe
             dist/installers/Galen-Setup-x64.exe.sha256
+            dist/installers/installers-SHA256SUMS.txt
           key: ${{ steps.installer-cache.outputs.cache-primary-key }}
       - uses: actions/upload-artifact@v4
         with:
@@ -242,6 +252,7 @@ jobs:
           path: |
             dist/installers/Galen-Setup-x64.exe
             dist/installers/Galen-Setup-x64.exe.sha256
+            dist/installers/installers-SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 30
 
@@ -264,23 +275,24 @@ jobs:
           TARGET_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tag='v1.0.0-preview.1'
+          tag='v1.0.0-preview.2'
           test -s release-assets/Galen-Setup-x64.exe
           test -s release-assets/Galen-Setup-x64.exe.sha256
+          test -s release-assets/installers-SHA256SUMS.txt
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
             # A rebuilt preview must keep its source tag, notes and installer on
             # the same commit. Merely clobbering the assets leaves GitHub's
             # source archives pointing at the previous candidate.
             gh api --method PATCH "repos/$REPO/git/refs/tags/$tag" \
               -f sha="$TARGET_SHA" -F force=true >/dev/null
-            gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 --clobber --repo "$REPO"
+            gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt --clobber --repo "$REPO"
             gh release edit "$tag" --repo "$REPO" --target "$TARGET_SHA" --prerelease \
-              --title "Galen 1.0 Preview 1 · Galenite" \
-              --notes-file docs/GALEN_1_0_PREVIEW.md
+              --title "Galen 1.0 Preview 2 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW_2.md
           else
-            gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 \
+            gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt \
               --repo "$REPO" --target "$TARGET_SHA" --prerelease \
-              --title "Galen 1.0 Preview 1 · Galenite" \
-              --notes-file docs/GALEN_1_0_PREVIEW.md
+              --title "Galen 1.0 Preview 2 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW_2.md
           fi
           gh release view "$tag" --repo "$REPO" --json url,assets | tee release-result.json

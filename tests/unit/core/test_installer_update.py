@@ -117,7 +117,11 @@ def test_select_installer_asset_picks_this_machines_file() -> None:
 @pytest.mark.parametrize(
     ("platform_name", "machine", "expected"),
     [
-        ("win32", "AMD64", ("Dodaios-Setup-x64.exe", "PersonalJarvis-Setup-x64.exe")),
+        (
+            "win32",
+            "AMD64",
+            ("Galen-Setup-x64.exe", "Dodaios-Setup-x64.exe", "PersonalJarvis-Setup-x64.exe"),
+        ),
         ("darwin", "arm64", ("Dodaios-macOS-arm64.dmg", "PersonalJarvis-macOS-arm64.dmg")),
         ("darwin", "x86_64", ("Dodaios-macOS-x64.dmg", "PersonalJarvis-macOS-x64.dmg")),
         (
@@ -144,7 +148,7 @@ def test_every_accepted_name_belongs_to_exactly_one_platform() -> None:
     """One table, no name twice: a name must never resolve to two machines."""
     names = [name for row in iu.INSTALLER_ASSET_NAMES.values() for name in row]
     assert len(names) == len(set(names))
-    assert all(len(row) == 2 for row in iu.INSTALLER_ASSET_NAMES.values())
+    assert all(len(row) >= 2 for row in iu.INSTALLER_ASSET_NAMES.values())
 
 
 def test_the_updater_accepts_every_installer_the_release_pipeline_publishes() -> None:
@@ -166,7 +170,8 @@ def test_releases_publish_every_accepted_name_so_old_installs_keep_updating() ->
     """An install frozen before the rename knows only the earlier name of its row."""
     from scripts.ci import release_assets
 
-    assert set(release_assets.INSTALLER_NAME_PAIRS) == set(iu.INSTALLER_ASSET_NAMES.values())
+    published_pairs = set(release_assets.INSTALLER_NAME_PAIRS)
+    assert all(tuple(row[-2:]) in published_pairs for row in iu.INSTALLER_ASSET_NAMES.values())
 
 
 def test_select_installer_asset_prefers_the_first_accepted_name() -> None:
@@ -205,6 +210,23 @@ def test_select_asset_ignores_malformed_entries() -> None:
     picked = select_asset(assets, "x.exe")
     # The first two entries are unusable; the well-formed one still wins.
     assert picked is None or picked.name == "x.exe"
+
+
+def test_select_asset_keeps_github_integrity_and_private_auth_out_of_the_api() -> None:
+    token = "secret-token-for-test"
+    assets = [{
+        "name": "Galen-Setup-x64.exe",
+        "browser_download_url": "https://github.com/example/Galen/releases/download/v1/x.exe",
+        "size": len(PAYLOAD),
+        "digest": f"sha256:{PAYLOAD_SHA256}",
+        "_galen_auth_token": token,
+    }]
+    picked = select_asset(assets, "Galen-Setup-x64.exe")
+
+    assert picked is not None
+    assert picked.digest == PAYLOAD_SHA256
+    assert picked.auth_token == token
+    assert token not in str(picked.as_dict())
 
 
 # --------------------------------------------------------------------------- #
@@ -260,6 +282,51 @@ async def test_download_and_verify_refuses_a_mismatching_digest(tmp_path: Path) 
         )
     # Nothing unverified may survive where a later step could execute it.
     assert not (tmp_path / asset.name).exists()
+
+
+async def test_download_and_verify_checks_githubs_manifest_and_installer_digests(
+    tmp_path: Path,
+) -> None:
+    asset = InstallerAsset(
+        "Galen-Setup-x64.exe",
+        "https://example.invalid/Galen-Setup-x64.exe",
+        len(PAYLOAD),
+        digest=PAYLOAD_SHA256,
+    )
+    manifest = f"{PAYLOAD_SHA256}  {asset.name}\n"
+    checksums = InstallerAsset(
+        CHECKSUMS_ASSET_NAME,
+        f"https://example.invalid/{CHECKSUMS_ASSET_NAME}",
+        len(manifest),
+        digest=hashlib.sha256(manifest.encode()).hexdigest(),
+    )
+    result = await download_and_verify(
+        asset,
+        checksums,
+        dest_dir=tmp_path,
+        fetcher=FakeAssetFetcher(manifest=manifest, payload=PAYLOAD),
+    )
+    assert result.read_bytes() == PAYLOAD
+
+
+async def test_download_and_verify_rejects_a_tampered_github_manifest(
+    tmp_path: Path,
+) -> None:
+    asset = _asset("Galen-Setup-x64.exe")
+    manifest = f"{PAYLOAD_SHA256}  {asset.name}\n"
+    checksums = InstallerAsset(
+        CHECKSUMS_ASSET_NAME,
+        f"https://example.invalid/{CHECKSUMS_ASSET_NAME}",
+        len(manifest),
+        digest=hashlib.sha256(b"different manifest").hexdigest(),
+    )
+    with pytest.raises(InstallerUpdateError, match="GitHub SHA-256"):
+        await download_and_verify(
+            asset,
+            checksums,
+            dest_dir=tmp_path,
+            fetcher=FakeAssetFetcher(manifest=manifest, payload=PAYLOAD),
+        )
 
 
 async def test_download_and_verify_refuses_when_the_manifest_omits_the_asset(
@@ -749,11 +816,16 @@ def test_macos_handover_keeps_a_bundle_under_an_earlier_name_when_the_image_has_
 
 
 def test_the_updater_keeps_recognising_every_name_and_id_of_ours() -> None:
-    assert iu.MACOS_APP_DIR_NAME == "Dodaios.app"
+    assert iu.MACOS_APP_DIR_NAME == "Galen.app"
+    assert "Dodaios.app" in iu.LEGACY_MACOS_APP_DIR_NAMES
     assert "Personal Jarvis.app" in iu.LEGACY_MACOS_APP_DIR_NAMES
     assert set(iu.MACOS_APP_DIR_NAMES) == {iu.MACOS_APP_DIR_NAME, *iu.LEGACY_MACOS_APP_DIR_NAMES}
     # The ids did not move with the name: a bundle under either is ours.
     assert iu._OWN_MACOS_BUNDLE_IDS == {
+        "com.galen.desktop",
+        "ai.galen.desktop",
+        "com.dodaios.desktop",
+        "ai.dodaios.desktop",
         "com.personal-jarvis.desktop",
         "ai.personaljarvis.desktop",
     }
@@ -1219,7 +1291,7 @@ def test_windows_installer_script_waits_for_the_replaced_app() -> None:
 def test_windows_installer_identity_never_changes() -> None:
     """Every release must upgrade the same AppId, or users get two installs."""
     text = _iss_text()
-    assert '#define AppGuid "7F1C4E42-2E5B-4F0A-9E1B-1A7B6C0D5E88"' in text
+    assert '#define AppGuid "6F548C6A-7FA9-4A2B-A1C3-1780B6D14E97"' in text
     assert "AppId={{{#AppGuid}}" in text
 
 

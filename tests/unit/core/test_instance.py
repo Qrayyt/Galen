@@ -101,27 +101,42 @@ def test_dev_identity_differs_on_every_colliding_surface() -> None:
     assert v.display_name == f"{PRODUCT_NAME} Dev"
     # OS artifacts keep the persistent name; only the window title follows
     # the display name.
-    assert d.persistent_name == "Personal Jarvis"
-    assert v.persistent_name == "Personal Jarvis Dev"
+    assert d.persistent_name == "Galen"
+    assert v.persistent_name == "Galen Dev"
     # The Windows names follow their own current branding values, and each
     # keeps the name an earlier release registered the same instance under.
-    assert v.windows_launcher_entry_name == "Dodaios Dev"
-    assert v.windows_shortcut_file_name == "Dodaios Dev.lnk"
-    assert v.legacy_windows_shortcut_file_names == ("Personal Jarvis Dev.lnk",)
-    assert v.windows_branded_launcher_file_name == "DodaiosAppDev.exe"
-    assert v.legacy_windows_branded_launcher_file_names == ("PersonalJarvisDev.exe",)
-    assert v.windows_mutex_name == "Global" + chr(92) + "Dodaios_v1_dev"
-    assert v.legacy_windows_mutex_names == ("Global" + chr(92) + "PersonalJarvis_v1_dev",)
+    assert v.windows_launcher_entry_name == "Galen Dev"
+    assert v.windows_shortcut_file_name == "Galen Dev.lnk"
+    assert v.legacy_windows_shortcut_file_names == (
+        "Dodaios Dev.lnk",
+        "Personal Jarvis Dev.lnk",
+    )
+    assert v.windows_branded_launcher_file_name == "GalenAppDev.exe"
+    assert v.legacy_windows_branded_launcher_file_names == (
+        "DodaiosAppDev.exe",
+        "PersonalJarvisDev.exe",
+    )
+    assert v.windows_mutex_name == "Global" + chr(92) + "Galen_v1_dev"
+    assert v.legacy_windows_mutex_names == (
+        "Global" + chr(92) + "Dodaios_v1_dev",
+        "Global" + chr(92) + "PersonalJarvis_v1_dev",
+    )
     # The Linux names moved together (entry, menu name, window class); the
     # entry an earlier release wrote for the same instance is still found.
-    assert d.linux_app_name == "Dodaios"
-    assert v.linux_app_name == "Dodaios Dev"
-    assert d.linux_desktop_entry_file_name == "dodaios.desktop"
-    assert v.linux_desktop_entry_file_name == "dodaios-dev.desktop"
-    assert d.legacy_linux_desktop_entry_file_names == ("personal-jarvis.desktop",)
-    assert v.legacy_linux_desktop_entry_file_names == ("personal-jarvis-dev.desktop",)
-    assert d.linux_wm_class == "dodaios"
-    assert v.linux_wm_class == "dodaios-dev"
+    assert d.linux_app_name == "Galen"
+    assert v.linux_app_name == "Galen Dev"
+    assert d.linux_desktop_entry_file_name == "galen.desktop"
+    assert v.linux_desktop_entry_file_name == "galen-dev.desktop"
+    assert d.legacy_linux_desktop_entry_file_names == (
+        "dodaios.desktop",
+        "personal-jarvis.desktop",
+    )
+    assert v.legacy_linux_desktop_entry_file_names == (
+        "dodaios-dev.desktop",
+        "personal-jarvis-dev.desktop",
+    )
+    assert d.linux_wm_class == "galen"
+    assert v.linux_wm_class == "galen-dev"
     for attr in (
         "display_name",
         "compact_name",

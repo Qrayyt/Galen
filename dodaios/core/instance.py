@@ -68,7 +68,13 @@ INSTANCE_ENV_VAR = "JARVIS_INSTANCE"
 DEFAULT_INSTANCE_NAME = "default"
 DEV_INSTANCE_NAME = "dev"
 #: The dev instance listens this many ports above every configured port.
-DEV_PORT_OFFSET = 100
+#:
+#: Galen's frozen runtime migrates the default desktop from the historical
+#: Dodaios port 47821 to 47921.  A 100-port source-tree offset therefore put
+#: ``--instance dev`` on the *installed* Galen port.  Keep two full 100-port
+#: ranges between the source default and its dev companion so both can run
+#: during release verification without touching the user's app.
+DEV_PORT_OFFSET = 200
 #: Icon file (in ``assets/icons``) each instance shows on taskbar, dock and tray.
 DEFAULT_ICON_FILE_NAME = "dodaios.ico"
 DEV_ICON_FILE_NAME = "dodaios-dev.ico"

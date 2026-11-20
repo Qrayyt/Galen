@@ -54,19 +54,23 @@ from pathlib import Path
 
 # Mirror dodaios.core.branding (tests/unit/core/test_identity_single_source.py).
 _WINDOWS_USER_DATA_DIR_NAME = "GalenData"
-_LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ()
+_LEGACY_WINDOWS_USER_DATA_DIR_NAMES = ("Dodaios", "Jarvis")
 _FALLBACK_USER_DATA_DIR_NAME = ".galen-data"
-_LEGACY_FALLBACK_USER_DATA_DIR_NAMES = ()
+_LEGACY_FALLBACK_USER_DATA_DIR_NAMES = (".dodaios-data", ".jarvis")
 _CONFIG_FILE_NAME = "galen.toml"
-_LEGACY_CONFIG_FILE_NAMES = ()
+_LEGACY_CONFIG_FILE_NAMES = ("dodaios.toml", "jarvis.toml")
 # The executables that are the desktop app itself (dodaios.spec GUI_EXE_NAME and
 # LEGACY_GUI_EXE_NAMES). Only one of them migrates the data directory.
-_GUI_EXE_NAMES = ("GalenApp", "PersonalJarvis")
+_GUI_EXE_NAMES = ("GalenApp", "DodaiosApp", "PersonalJarvis")
 # Single-instance mutexes of a running desktop app, every instance and every
 # name (dodaios.core.identity_boot.primary_mutex_names).
 _MUTEX_NAMES = (
     "Global\\Galen_v1",
     "Global\\Galen_v1_dev",
+    "Global\\Dodaios_v1",
+    "Global\\Dodaios_v1_dev",
+    "Global\\PersonalJarvis_v1",
+    "Global\\PersonalJarvis_v1_dev",
 )
 # Lock files a running primary holds in the data directory
 # (dodaios.core.identity_boot.PRIMARY_LOCK_FILES).
