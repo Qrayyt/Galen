@@ -60,28 +60,20 @@ jobs:
           echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
           echo "runtime_changed=$runtime_changed" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "frontend_tree=$(git rev-parse HEAD:dodaios/ui/web/frontend)" >> "$GITHUB_OUTPUT"
           echo "base=$base frontend_changed=$frontend_changed runtime_changed=$runtime_changed" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore a previously verified frontend bundle
-        if: steps.changes.outputs.runtime_changed == 'true'
-        id: frontend-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            dodaios/ui/web/dist
-            .ci-cache/frontend-verified
-          key: galen-frontend-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
       - name: Restore test evidence for identical frontend inputs
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.changes.outputs.frontend_changed == 'true'
         id: frontend-tests-cache
         uses: actions/cache/restore@v4
         with:
           path: .ci-cache/frontend-tests-verified
-          key: galen-frontend-tests-v1-${{ runner.os }}-${{ hashFiles('dodaios/ui/web/frontend/package.json', 'dodaios/ui/web/frontend/package-lock.json', 'dodaios/ui/web/frontend/vite.config.ts', 'dodaios/ui/web/frontend/tsconfig*.json', 'dodaios/ui/web/frontend/src/**', 'dodaios/ui/web/frontend/public/**') }}
+          key: galen-frontend-tests-v2-${{ runner.os }}-${{ steps.changes.outputs.frontend_tree }}
       - name: Reuse committed evidence for the exact frontend tree
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
         id: committed-frontend-tests
         shell: bash
         run: |
@@ -95,7 +87,7 @@ jobs:
             echo "reused=false" >> "$GITHUB_OUTPUT"
           fi
       - uses: actions/setup-node@v4
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
         with:
           node-version: '22'
           cache: npm
@@ -133,7 +125,7 @@ jobs:
           assert state_label('listening', lang='ru') == 'Слушаю'
           PY
       - name: Test changed React sources
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
         working-directory: dodaios/ui/web/frontend
         env:
           NODE_OPTIONS: --max-old-space-size=6144
@@ -144,39 +136,16 @@ jobs:
           mkdir -p ../../../../.ci-cache
           printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-tests-verified
       - name: Save successful frontend test evidence immediately
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
+        if: steps.changes.outputs.runtime_changed == 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .ci-cache/frontend-tests-verified
           key: ${{ steps.frontend-tests-cache.outputs.cache-primary-key }}
-      - name: Build uncached React bundle
-        if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true'
-        working-directory: dodaios/ui/web/frontend
-        env:
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: |
-          if [[ ! -d node_modules ]]; then npm ci; fi
-          npm run build
-          mkdir -p ../../../../.ci-cache
-          printf '%s\n' "$GITHUB_SHA" > ../../../../.ci-cache/frontend-verified
-      - name: Verify cached or rebuilt frontend
-        if: steps.changes.outputs.runtime_changed == 'true'
-        run: |
-          test -s dodaios/ui/web/dist/index.html
-          test -s .ci-cache/frontend-verified
-      - name: Pass the verified frontend to the Windows job
-        if: steps.changes.outputs.runtime_changed == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: galen-frontend-${{ github.sha }}
-          path: dodaios/ui/web/dist
-          if-no-files-found: error
-          retention-days: 2
   windows:
-    name: Build Windows desktop installer
+    name: Build and publish Windows desktop installer
     needs: preflight
     runs-on: windows-latest
-    timeout-minutes: 110
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Restore an identical verified Windows installer
@@ -186,7 +155,7 @@ jobs:
           path: |
             dist/installers/Galen-Setup-x64.exe
             dist/installers/Galen-Setup-x64.exe.sha256
-          key: galen-installer-v1-${{ runner.os }}-${{ hashFiles('dodaios/**', 'packaging/**', 'assets/**', 'integrations/openrealtime/source/**', 'third_party/**', 'install/update-contract.json', 'dodaios.spec', 'dodaios.toml.example', 'pyproject.toml', 'LICENSE', 'NOTICE', 'scripts/galen/brand.py') }}
+          key: galen-installer-v2-${{ runner.os }}-${{ hashFiles('dodaios/**', 'packaging/**', 'assets/**', 'integrations/openrealtime/source/**', 'third_party/**', 'install/update-contract.json', 'dodaios.spec', 'dodaios.toml.example', 'pyproject.toml', 'LICENSE', 'NOTICE', 'scripts/galen/brand.py', 'scripts/pip_install.py', 'requirements.in', 'requirements.txt', 'uv.lock') }}
       - name: Reuse the published installer when runtime inputs did not change
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'false'
         shell: pwsh
@@ -197,12 +166,37 @@ jobs:
           gh release download v1.0.0-preview.2 --repo $env:GITHUB_REPOSITORY `
             --pattern "Galen-Setup-x64.exe*" --dir dist/installers --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Download the verified frontend only when an installer rebuild is needed
+      - uses: actions/setup-node@v4
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
-        uses: actions/download-artifact@v4
         with:
-          name: galen-frontend-${{ github.sha }}
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
+      - name: Identify exact frontend inputs
+        if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
+        id: frontend-input
+        shell: bash
+        run: echo "tree=$(git rev-parse HEAD:dodaios/ui/web/frontend)" >> "$GITHUB_OUTPUT"
+      - name: Restore previously built Windows frontend
+        if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
+        id: windows-frontend
+        uses: actions/cache@v4
+        with:
           path: dodaios/ui/web/dist
+          key: galen-frontend-v2-${{ runner.os }}-${{ steps.frontend-input.outputs.tree }}
+      - name: Build frontend on the packaging runner
+        if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
+        working-directory: dodaios/ui/web/frontend
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.windows-frontend.outputs.cache-hit }}" != "true" || ! -s ../dist/index.html ]]; then
+            npm ci
+            npm run build
+          fi
+          test -s ../dist/index.html
       - uses: actions/setup-python@v5
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
         with:
@@ -284,27 +278,6 @@ jobs:
             dist/installers/Galen-Setup-x64.exe.sha256
             dist/installers/installers-SHA256SUMS.txt
           key: ${{ steps.installer-cache.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: galen-windows-x64
-          path: |
-            dist/installers/Galen-Setup-x64.exe
-            dist/installers/Galen-Setup-x64.exe.sha256
-            dist/installers/installers-SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 30
-
-  release:
-    name: Publish downloadable preview
-    needs: [preflight, windows]
-    if: success()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: galen-windows-x64
-          path: release-assets
       - name: Publish release only after successful build
         shell: bash
         env:
@@ -314,21 +287,21 @@ jobs:
         run: |
           set -euo pipefail
           tag='v1.0.0-preview.3'
-          test -s release-assets/Galen-Setup-x64.exe
-          test -s release-assets/Galen-Setup-x64.exe.sha256
-          test -s release-assets/installers-SHA256SUMS.txt
+          test -s dist/installers/Galen-Setup-x64.exe
+          test -s dist/installers/Galen-Setup-x64.exe.sha256
+          test -s dist/installers/installers-SHA256SUMS.txt
           if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1; then
             # A rebuilt preview must keep its source tag, notes and installer on
             # the same commit. Merely clobbering the assets leaves GitHub's
             # source archives pointing at the previous candidate.
             gh api --method PATCH "repos/$REPO/git/refs/tags/$tag" \
               -f sha="$TARGET_SHA" -F force=true >/dev/null
-            gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt --clobber --repo "$REPO"
+            gh release upload "$tag" dist/installers/Galen-Setup-x64.exe dist/installers/Galen-Setup-x64.exe.sha256 dist/installers/installers-SHA256SUMS.txt --clobber --repo "$REPO"
             gh release edit "$tag" --repo "$REPO" --target "$TARGET_SHA" --prerelease \
               --title "Galen 1.0 Preview 3 · Galenite" \
               --notes-file docs/GALEN_1_0_PREVIEW_3.md
           else
-            gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt \
+            gh release create "$tag" dist/installers/Galen-Setup-x64.exe dist/installers/Galen-Setup-x64.exe.sha256 dist/installers/installers-SHA256SUMS.txt \
               --repo "$REPO" --target "$TARGET_SHA" --prerelease \
               --title "Galen 1.0 Preview 3 · Galenite" \
               --notes-file docs/GALEN_1_0_PREVIEW_3.md
