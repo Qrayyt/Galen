@@ -52,14 +52,14 @@ export function JarvisReactor({
   return (
     <div
       ref={wrapRef}
-      className={`relative h-[26rem] w-[26rem] text-gray-200 transition-opacity duration-500 ${
+      className={`relative h-[min(26rem,70vw,55vh)] w-[min(26rem,70vw,55vh)] text-foreground transition-opacity duration-500 ${
         dim ? "opacity-30" : ""
       }`}
       aria-hidden="true"
       style={{ willChange: "transform" }}
     >
       {/* Ambient glow behind everything */}
-      <div className="absolute inset-8 rounded-full bg-gray-300/10 blur-3xl" />
+      <div className="absolute inset-8 rounded-full bg-foreground/5 blur-3xl" />
 
       <svg viewBox="0 0 400 400" className="absolute inset-0 h-full w-full">
         {/* Outer fine dashed ring — slow spin */}
@@ -70,7 +70,7 @@ export function JarvisReactor({
         <g className="origin-center animate-dex-spin-rev">
           <circle cx={C} cy={C} r={168} fill="none" stroke="currentColor" strokeWidth={3} strokeDasharray="46 16" opacity={0.55} />
           {/* red accent arc */}
-          <circle cx={C} cy={C} r={178} fill="none" stroke="#ef4444" strokeWidth={3} strokeDasharray="40 360" opacity={0.8} strokeLinecap="round" />
+          <circle cx={C} cy={C} r={178} fill="none" stroke="currentColor" strokeWidth={3} strokeDasharray="40 360" opacity={0.8} strokeLinecap="round" />
         </g>
         {/* Tick ring — slow spin */}
         <g className="origin-center animate-dex-spin-slower">
@@ -90,14 +90,13 @@ export function JarvisReactor({
       <div className="absolute inset-0 flex items-center justify-center">
         <div
           ref={coreRef}
-          className="h-28 w-28 rounded-full"
+          className="h-[27%] w-[27%] rounded-full border border-foreground/20 bg-foreground/10 flex items-center justify-center"
           style={{
             willChange: "transform, opacity",
-            background:
-              "radial-gradient(circle at 50% 45%, #cffafe 0%, #22d3ee 35%, #0891b2 65%, rgba(8,145,178,0) 78%)",
-            boxShadow: "0 0 60px rgba(34,211,238,0.6), inset 0 0 30px rgba(207,250,254,0.5)",
           }}
-        />
+        >
+          <img src="/dodaios-mark-256.png" alt="" className="h-[65%] w-[65%] object-contain invert dark:invert-0" />
+        </div>
       </div>
     </div>
   );

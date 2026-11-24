@@ -1,12 +1,15 @@
-/** Authenticated optional HUD using real Dodaios voice state and OpenDex components. */
+/** Optional Galen HUD, driven by the real voice state. */
 import { useCallback } from "react";
 import { useEventStore } from "@/store/events";
+import { useT } from "@/i18n";
+import { PRODUCT_NAME } from "@/lib/branding";
 import { JarvisReactor } from "./jarvis-reactor";
 import { HudRing } from "./hud-widgets";
 import type { DexStatus } from "./state";
 import "./hud.css";
 
 export function GalenHud() {
+  const t = useT();
   const state = useEventStore((s) => s.voiceState);
   const assistantName = useEventStore((s) => s.assistantName);
   const status: DexStatus =
@@ -15,28 +18,28 @@ export function GalenHud() {
     state === "speaking" ? "speaking" :
     state === "error" ? "error" :
     state === "paused" ? "muted" : "idle";
-  // No synthetic microphone amplitudes: real state drives the mode.
+  // No synthetic microphone amplitudes until actual audio levels are wired.
   const getAmplitude = useCallback(() => 0, []);
   const labels: Record<DexStatus, string> = {
-    idle: "Готов", listening_wake: "Ожидание", active_listening: "Слушаю",
-    follow_up_listening: "Слушаю", thinking: "Думаю", speaking: "Говорю",
-    muted: "Пауза", error: "Ошибка", unsupported: "Недоступно",
+    idle: "voice_state.idle", listening_wake: "voice_state.idle",
+    active_listening: "voice_state.listening", follow_up_listening: "voice_state.listening",
+    thinking: "voice_state.thinking", speaking: "voice_state.speaking",
+    muted: "voice_state.paused", error: "voice_state.error", unsupported: "voice_state.offline",
   };
   return (
-    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-background text-foreground" data-testid="galen-hud">
-      <div className="absolute inset-0 opacity-10 pointer-events-none" style={{backgroundImage:"linear-gradient(#ddd 1px, transparent 1px),linear-gradient(90deg,#ddd 1px, transparent 1px)",backgroundSize:"44px 44px"}}/>
-      <header className="absolute top-6 left-8 right-8 flex items-center justify-between text-sm tracking-widest">
-        <div><span className="font-bold">GALEN</span><span className="ml-3 text-white/40">by GALENITE</span></div>
-        <button onClick={()=>window.location.assign("/")} className="rounded-md border border-white/25 px-4 py-2 hover:bg-white/10">Вернуться в Galen</button>
+    <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-background text-foreground overflow-hidden" data-testid="galen-hud">
+      <header className="absolute top-6 left-6 right-6 flex items-center justify-between gap-4 text-sm">
+        <div className="flex items-center gap-3"><span className="font-semibold tracking-widest">{PRODUCT_NAME.toUpperCase()}</span><span className="text-muted-foreground">by GALENITE</span></div>
+        <button onClick={() => window.location.assign("/")} className="rounded-md border border-border px-4 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">{t("common.back")}</button>
       </header>
-      <div className="relative">
-        <HudRing size={140} className="absolute -left-16 top-5 opacity-30"/>
-        <HudRing size={100} className="absolute -right-10 bottom-12 opacity-25"/>
+      <div className="relative max-w-full">
+        <HudRing size={140} className="absolute -left-16 top-5 opacity-20 pointer-events-none"/>
+        <HudRing size={100} className="absolute -right-10 bottom-12 opacity-20 pointer-events-none"/>
         <JarvisReactor status={status} getAmplitude={getAmplitude}/>
       </div>
-      <h1 className="text-2xl font-semibold tracking-[.25em] uppercase">{assistantName || "Galen"}</h1>
-      <p className="mt-3 text-white/60">{labels[status]}</p>
-      <p className="absolute bottom-7 text-xs text-white/40">Реальный статус голосового контура. Альтернативный HUD — OpenDex / Galenite.</p>
+      <h1 className="text-2xl font-semibold tracking-[.25em] uppercase text-center px-4">{assistantName || PRODUCT_NAME}</h1>
+      <p className="mt-3 text-muted-foreground" role="status" aria-live="polite">{t(labels[status])}</p>
+      <p className="absolute bottom-7 text-xs text-muted-foreground">OpenDex / Galenite</p>
     </div>
   );
 }

@@ -7,3 +7,8 @@
 .animate-dex-spin-slower {animation:galen-dex-spin 42s linear infinite}
 .animate-dex-spin-rev {animation:galen-dex-spin-rev 18s linear infinite}
 .animate-dex-bar {animation:galen-dex-bar 1.2s ease-in-out infinite}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-dex-spin, .animate-dex-spin-slow, .animate-dex-spin-slower,
+  .animate-dex-spin-rev, .animate-dex-bar { animation: none !important; }
+}

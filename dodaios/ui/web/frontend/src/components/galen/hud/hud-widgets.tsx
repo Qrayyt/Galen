@@ -38,7 +38,7 @@ export function HudRing({
       width={size}
       height={size}
       viewBox="0 0 100 100"
-      className={`text-gray-200 ${className}`}
+      className={`text-foreground ${className}`}
     >
       <g className="origin-center animate-dex-spin-slow">
         <circle cx={50} cy={50} r={47} fill="none" stroke="currentColor" strokeWidth={0.5} strokeDasharray="1 3" opacity={0.4} />
@@ -53,7 +53,7 @@ export function HudRing({
       </g>
       {accent && (
         <g className="origin-center animate-dex-spin-rev">
-          <circle cx={50} cy={50} r={42} fill="none" stroke="#ef4444" strokeWidth={1.5} strokeDasharray="22 200" opacity={0.7} strokeLinecap="round" />
+          <circle cx={50} cy={50} r={42} fill="none" stroke="currentColor" strokeWidth={1.5} strokeDasharray="22 200" opacity={0.7} strokeLinecap="round" />
         </g>
       )}
     </svg>
@@ -76,7 +76,7 @@ export function HudGauge({
   const circumference = 2 * Math.PI * 38;
   return (
     <div className={`relative ${className}`} style={{ width: size, height: size }}>
-      <svg width={size} height={size} viewBox="0 0 100 100" className="text-gray-200">
+      <svg width={size} height={size} viewBox="0 0 100 100" className="text-foreground">
         <circle cx={50} cy={50} r={38} fill="none" stroke="currentColor" strokeWidth={2} opacity={0.18} />
         <g className="origin-center animate-dex-spin-slower">
           <circle cx={50} cy={50} r={45} fill="none" stroke="currentColor" strokeWidth={0.6} strokeDasharray="1 4" opacity={0.35} />
@@ -96,7 +96,7 @@ export function HudGauge({
         <circle cx={50} cy={50} r={4} fill="currentColor" opacity={0.7} />
       </svg>
       {label && (
-        <div className="absolute inset-0 flex items-center justify-center font-mono text-[9px] uppercase tracking-widest text-gray-100/70">
+        <div className="absolute inset-0 flex items-center justify-center font-mono text-[9px] uppercase tracking-widest text-muted-foreground">
           {label}
         </div>
       )}
@@ -131,7 +131,7 @@ export function HudWaveform({
       {Array.from({ length: bars }).map((_, i) => (
         <span
           key={i}
-          className="w-[3px] flex-1 origin-bottom rounded-sm bg-cyan-300/60 animate-dex-bar"
+          className="w-[3px] flex-1 origin-bottom rounded-sm bg-foreground/60 animate-dex-bar"
           style={{
             height: "100%",
             animationDelay: `${(i % 12) * 90}ms`,
