@@ -15,14 +15,15 @@ export interface TranscriptTurn {
   content: string;
 }
 
-export const STATUS_LABELS: Record<DexStatus, string> = {
-  idle: "Initialising…",
-  listening_wake: "Standing by…",
-  active_listening: "Listening…",
-  follow_up_listening: "Anything else, sir?",
-  thinking: "Thinking…",
-  speaking: "Speaking…",
-  muted: "Muted",
-  error: "Something went wrong",
-  unsupported: "Voice not supported in this browser",
+/** Localized labels shared with the main voice interface. */
+export const STATUS_LABEL_KEYS: Record<DexStatus, string> = {
+  idle: "voice_state.idle",
+  listening_wake: "voice_state.idle",
+  active_listening: "voice_state.listening",
+  follow_up_listening: "voice_state.listening",
+  thinking: "voice_state.thinking",
+  speaking: "voice_state.speaking",
+  muted: "voice_state.paused",
+  error: "voice_state.error",
+  unsupported: "voice_state.offline",
 };

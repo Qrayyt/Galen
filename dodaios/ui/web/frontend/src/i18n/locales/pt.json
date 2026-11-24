@@ -2415,7 +2415,7 @@
       "share_on_x": "Partilhar no X",
       "status_generating": "A gerar imagem…",
       "status_copied": "Imagem copiada — cola-a (Ctrl/Cmd+V) na tua publicação.",
-      "status_saved": "dodaios-stats.png guardado.",
+      "status_saved": "Imagem salva.",
       "status_copy_unsupported": "Copiar não é suportado aqui — o PNG foi guardado em alternativa.",
       "status_composer": "Imagem copiada — cola-a no editor do X.",
       "status_composer_without_image": "O X foi aberto, mas não foi possível copiar a imagem. Guarda o PNG e anexa-o manualmente.",
@@ -2424,7 +2424,7 @@
       "status_blocked": "Não foi possível abrir o X — a imagem está na área de transferência; abre x.com e cola-a.",
       "status_blocked_without_image": "Não foi possível abrir o X nem copiar a imagem. Guarda o PNG, abre x.com e anexa-o manualmente.",
       "card": {
-        "brand": "DODAIOS",
+        "brand": "GALEN",
         "hero_label": "Palavras faladas",
         "jarvis_suffix": "faladas pelo {name}",
         "talk_line": "{0} h ativo · {1} chats",
@@ -6706,7 +6706,7 @@
   "marketplace": {
     "title": "Marketplace",
     "refresh": "Procurar novas entradas",
-    "open_web": "Abrir o site",
+    "open_web": "Abrir site do Dodaios Marketplace",
     "search_placeholder": "Pesquisar plugins, skills e agentes…",
     "filter_all": "Tudo",
     "filter_plugins": "Plugins",

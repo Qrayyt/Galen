@@ -120,9 +120,6 @@ export const ShareCard = forwardRef<HTMLDivElement, ShareCardProps>(
                 {t("board_view.share.card.brand")}
               </span>
             </div>
-            <span style={{ fontSize: 18, letterSpacing: "0.26em", color: AMBER }}>
-              {"// ALL-TIME"}
-            </span>
           </div>
 
           {/* ── Hero ─────────────────────────────────────────────── */}

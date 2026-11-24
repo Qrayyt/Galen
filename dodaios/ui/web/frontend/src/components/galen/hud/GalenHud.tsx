@@ -5,7 +5,7 @@ import { useT } from "@/i18n";
 import { PRODUCT_NAME } from "@/lib/branding";
 import { JarvisReactor } from "./jarvis-reactor";
 import { HudRing } from "./hud-widgets";
-import type { DexStatus } from "./state";
+import { STATUS_LABEL_KEYS, type DexStatus } from "./state";
 import "./hud.css";
 
 export function GalenHud() {
@@ -20,12 +20,6 @@ export function GalenHud() {
     state === "paused" ? "muted" : "idle";
   // No synthetic microphone amplitudes until actual audio levels are wired.
   const getAmplitude = useCallback(() => 0, []);
-  const labels: Record<DexStatus, string> = {
-    idle: "voice_state.idle", listening_wake: "voice_state.idle",
-    active_listening: "voice_state.listening", follow_up_listening: "voice_state.listening",
-    thinking: "voice_state.thinking", speaking: "voice_state.speaking",
-    muted: "voice_state.paused", error: "voice_state.error", unsupported: "voice_state.offline",
-  };
   return (
     <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-background text-foreground overflow-hidden" data-testid="galen-hud">
       <header className="absolute top-6 left-6 right-6 flex items-center justify-between gap-4 text-sm">
@@ -38,7 +32,7 @@ export function GalenHud() {
         <JarvisReactor status={status} getAmplitude={getAmplitude}/>
       </div>
       <h1 className="text-2xl font-semibold tracking-[.25em] uppercase text-center px-4">{assistantName || PRODUCT_NAME}</h1>
-      <p className="mt-3 text-muted-foreground" role="status" aria-live="polite">{t(labels[status])}</p>
+      <p className="mt-3 text-muted-foreground" role="status" aria-live="polite">{t(STATUS_LABEL_KEYS[status])}</p>
       <p className="absolute bottom-7 text-xs text-muted-foreground">OpenDex / Galenite</p>
     </div>
   );

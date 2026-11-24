@@ -627,7 +627,7 @@
     },
     "sound_effects": {
       "title": "Sound effects",
-      "description": "Play Galen' short tones — the chime when you say the wake word, the hang-up tone, and the boot-ready cue. Off: silent; the spoken voice is never affected.",
+      "description": "Play Galen's short tones — the wake-word chime, the hang-up tone and the boot-ready cue. Off: silent; spoken replies are unaffected.",
       "enabled_toast": "Sound effects on.",
       "disabled_toast": "Sound effects muted."
     }
@@ -2415,7 +2415,7 @@
       "share_on_x": "Share on X",
       "status_generating": "Generating image…",
       "status_copied": "Image copied — paste it (Ctrl/Cmd+V) into your post.",
-      "status_saved": "Saved dodaios-stats.png.",
+      "status_saved": "Image saved.",
       "status_copy_unsupported": "Copy isn't supported here — saved the PNG instead.",
       "status_composer": "Image copied — paste it into the X composer.",
       "status_composer_without_image": "X opened, but the image could not be copied. Save the PNG and attach it manually.",
@@ -2424,7 +2424,7 @@
       "status_blocked": "Couldn't open X — the image is on your clipboard, open x.com and paste it.",
       "status_blocked_without_image": "Couldn't open X or copy the image. Save the PNG, then open x.com and attach it manually.",
       "card": {
-        "brand": "DODAIOS",
+        "brand": "GALEN",
         "hero_label": "Words spoken",
         "jarvis_suffix": "spoken by {name}",
         "talk_line": "{0} h active · {1} chats",
@@ -2521,10 +2521,10 @@
     "backend_disconnect_tooltip": "Disable federation (local-only mode)",
     "backend_disconnect": "Disconnect",
     "backend_status_loading": "Status…",
-    "backend_local_only": "Federation is disabled (local-only mode). Enable in dodaios.toml: [board.federation] enabled = true.",
+    "backend_local_only": "Federation is disabled (local-only mode). Set [board.federation] enabled = true in the configuration file to enable it.",
     "backend_url_label": "Backend URL",
     "backend_url_unset": "(not configured)",
-    "backend_url_hint": "Configurable via dodaios.toml [board.federation] backend_url.",
+    "backend_url_hint": "Configurable in the configuration file: [board.federation] backend_url.",
     "backend_pubkey_label": "My pubkey",
     "backend_pubkey_copy_tooltip": "Copy pubkey to clipboard",
     "backend_pubkey_copied": "copied",
@@ -3479,7 +3479,7 @@
         "no_microphone": "No microphone detected.",
         "mic_quiet": "Mic signal is very quiet.",
         "ready": "Ready: '{phrase}' on engine '{engine}' (language '{language}'). Say it to wake.",
-        "activation_not_persisted": "The setting could not be saved to dodaios.toml. Details are in the Galen log.",
+        "activation_not_persisted": "The setting could not be saved to the configuration file. Details are in the Galen log.",
         "model_ready": "Wake model ready.",
         "model_download_failed": "Could not download the wake model right now; it will retry automatically. The wake word uses the fallback path until then."
       },
@@ -6706,7 +6706,7 @@
   "marketplace": {
     "title": "Marketplace",
     "refresh": "Check for new entries",
-    "open_web": "Open the website",
+    "open_web": "Open Dodaios Marketplace website",
     "search_placeholder": "Search plugins, skills and agents…",
     "filter_all": "All",
     "filter_plugins": "Plugins",

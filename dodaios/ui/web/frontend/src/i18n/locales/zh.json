@@ -2415,7 +2415,7 @@
       "share_on_x": "分享到 X",
       "status_generating": "正在生成图片…",
       "status_copied": "图片已复制，在帖子里粘贴（Ctrl/Cmd+V）即可。",
-      "status_saved": "已保存 dodaios-stats.png。",
+      "status_saved": "图片已保存。",
       "status_copy_unsupported": "此处不支持复制，已改为保存 PNG。",
       "status_composer": "图片已复制，把它粘贴到 X 的编辑框里。",
       "status_composer_without_image": "X 已打开，但图片无法复制。请保存 PNG 后手动添加。",
@@ -2424,7 +2424,7 @@
       "status_blocked": "无法打开 X。图片已在剪贴板中，请打开 x.com 后粘贴。",
       "status_blocked_without_image": "无法打开 X，也无法复制图片。请保存 PNG，再打开 x.com 手动添加。",
       "card": {
-        "brand": "DODAIOS",
+        "brand": "GALEN",
         "hero_label": "说出的词数",
         "jarvis_suffix": "由 {name} 说出",
         "talk_line": "活跃 {0} 小时 · {1} 次对话",
@@ -6706,7 +6706,7 @@
   "marketplace": {
     "title": "市场",
     "refresh": "检查新条目",
-    "open_web": "打开网站",
+    "open_web": "打开 Dodaios Marketplace 网站",
     "search_placeholder": "搜索插件、技能和智能体…",
     "filter_all": "全部",
     "filter_plugins": "插件",

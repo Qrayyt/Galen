@@ -2415,7 +2415,7 @@
       "share_on_x": "Auf X teilen",
       "status_generating": "Bild wird erstellt…",
       "status_copied": "Bild kopiert — mit Strg/Cmd+V in deinen Post einfügen.",
-      "status_saved": "dodaios-stats.png gespeichert.",
+      "status_saved": "Bild gespeichert.",
       "status_copy_unsupported": "Kopieren wird hier nicht unterstützt — PNG stattdessen gespeichert.",
       "status_composer": "Bild kopiert — im X-Editor einfügen.",
       "status_composer_without_image": "X wurde geöffnet, aber das Bild konnte nicht kopiert werden. Speichere das PNG und hänge es manuell an.",
@@ -2424,7 +2424,7 @@
       "status_blocked": "X ließ sich nicht öffnen — das Bild ist in der Zwischenablage, öffne x.com und füge es ein.",
       "status_blocked_without_image": "X ließ sich nicht öffnen und das Bild konnte nicht kopiert werden. Speichere das PNG und hänge es auf x.com manuell an.",
       "card": {
-        "brand": "DODAIOS",
+        "brand": "GALEN",
         "hero_label": "Wörter gesprochen",
         "jarvis_suffix": "von {name} gesprochen",
         "talk_line": "{0} h aktiv · {1} Gespräche",
@@ -6706,7 +6706,7 @@
   "marketplace": {
     "title": "Marketplace",
     "refresh": "Nach neuen Einträgen suchen",
-    "open_web": "Website öffnen",
+    "open_web": "Dodaios Marketplace im Web öffnen",
     "search_placeholder": "Plugins, Skills und Agenten durchsuchen…",
     "filter_all": "Alle",
     "filter_plugins": "Plugins",
