@@ -481,6 +481,12 @@ def notification_language(text: str) -> str:
 def phrase(key: str, lang: str, **fields: object) -> str:
     from dodaios.i18n import catalog
 
+    if key == "test_body":
+        if lang == "ru" or (lang == "en" and _ui_language() == "ru"):
+            return "Так Galen уведомляет вас, пока приложение работает в фоне."
+        return catalog.t(f"notify.{key}", lang, **fields).replace("Dodaios", "Galen")
+    if key == "test_title" and (lang == "ru" or (lang == "en" and _ui_language() == "ru")):
+        return "Уведомления включены"
     return catalog.t(f"notify.{key}", lang, **fields)
 
 

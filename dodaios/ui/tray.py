@@ -25,6 +25,7 @@ from typing import Any
 from dodaios.core.branding import PRODUCT_NAME
 from dodaios.core.instance import current_instance
 from dodaios.platform.probes import display_present
+from dodaios.ui.native_labels import desktop_label, state_label, ui_language
 
 # Tooltip prefix: the product name for the default app, "… Dev" for the dev
 # instance — the tray icon already carries the DEV badge, the hover text says it.
@@ -180,7 +181,7 @@ class JarvisTray:
         self._call_on_main(_apply)
 
     def _tooltip(self) -> str:
-        state = self._state.value
+        state = state_label(self._state.value)
         if self._background_mode:
             state = f"{self._background_mode}; {state}"
         return f"{_TRAY_NAME} — {state}"
@@ -197,31 +198,35 @@ class JarvisTray:
                     self.stop()
             return _handler
 
+        lang = ui_language()
+        def label(en: str, ru: str) -> str:
+            return desktop_label(en, ru, lang=lang)
+
         return Menu(
             # default=True binds the action to a double-click on the tray icon
             # ("double-click tray -> restore window").
-            MenuItem("Open", _emit("open_ui"), default=True),
+            MenuItem(label("Open", "Открыть Galen"), _emit("open_ui"), default=True),
             Menu.SEPARATOR,
-            MenuItem(lambda _: f"Status: {self._state.value}", None, enabled=False),
+            MenuItem(lambda _: f"{label('Status', 'Статус')}: {state_label(self._state.value, lang=lang)}", None, enabled=False),
             MenuItem(
-                lambda _: f"Application: {self._background_mode}", None,
+                lambda _: f"{label('Application', 'Приложение')}: {self._background_mode}", None,
                 enabled=False, visible=lambda _: self._background_mode is not None,
             ),
             Menu.SEPARATOR,
-            MenuItem("Pause", _emit("pause"),
+            MenuItem(label("Pause", "Пауза"), _emit("pause"),
                      checked=lambda _: self._state == JarvisState.PAUSED),
-            MenuItem("Resume", _emit("resume"),
+            MenuItem(label("Resume", "Продолжить"), _emit("resume"),
                      visible=lambda _: self._state == JarvisState.PAUSED),
-            MenuItem("Reload config", _emit("reload_config")),
+            MenuItem(label("Reload config", "Перезагрузить конфигурацию"), _emit("reload_config")),
             Menu.SEPARATOR,
             # Phase 5: Emergency stop -> KillRequested(source="tray"); aborts all
             # running Computer-Use tasks and harness dispatches (ADR-0004).
-            MenuItem("Emergency stop", _emit("kill")),
+            MenuItem(label("Emergency stop", "Аварийная остановка"), _emit("kill")),
             Menu.SEPARATOR,
-            MenuItem("Quit", _emit("quit")),
+            MenuItem(label("Quit", "Выйти"), _emit("quit")),
             # Quit without handing routines and channels to the background
             # service (dodaios/core/background_service.py).
-            MenuItem("Quit and stop background agents", _emit("quit_all")),
+            MenuItem(label("Quit and stop background agents", "Выйти и остановить фоновых агентов"), _emit("quit_all")),
         )
 
     def _run(self) -> None:
@@ -236,7 +241,7 @@ class JarvisTray:
             self._icon = Icon(
                 "jarvis",
                 icon=icon_image,
-                title=f"{_TRAY_NAME} — idle",
+                title=self._tooltip(),
                 menu=self._build_menu(),
             )
             self._icon.run(setup=self._setup_icon)

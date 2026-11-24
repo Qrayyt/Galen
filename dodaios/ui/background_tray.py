@@ -60,18 +60,23 @@ class BackgroundTray:
             import pystray  # type: ignore[import-untyped]
 
             from dodaios.core.branding import PRODUCT_NAME
+            from dodaios.ui.native_labels import desktop_label, ui_language
+
+            lang = ui_language()
+            def label(en: str, ru: str) -> str:
+                return desktop_label(en, ru, lang=lang)
 
             menu = pystray.Menu(
                 pystray.MenuItem(
-                    f"{PRODUCT_NAME}: agents keep running in the background", None, enabled=False
+                    label(f"{PRODUCT_NAME}: agents keep running in the background", f"{PRODUCT_NAME}: агенты работают в фоне"), None, enabled=False
                 ),
-                pystray.MenuItem(f"Open {PRODUCT_NAME}", self._open, default=True),
-                pystray.MenuItem("Stop background agents", self._stop),
+                pystray.MenuItem(label(f"Open {PRODUCT_NAME}", f"Открыть {PRODUCT_NAME}"), self._open, default=True),
+                pystray.MenuItem(label("Stop background agents", "Остановить фоновых агентов"), self._stop),
             )
             self._icon = pystray.Icon(
                 "jarvis-background",
                 icon=_icon_image(),
-                title=f"{PRODUCT_NAME} — agents running in the background",
+                title=label(f"{PRODUCT_NAME} — agents running in the background", f"{PRODUCT_NAME} — агенты работают в фоне"),
                 menu=menu,
             )
         except Exception:  # noqa: BLE001 — a tray is a convenience, never a boot blocker

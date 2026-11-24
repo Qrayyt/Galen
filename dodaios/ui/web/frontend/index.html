@@ -6,7 +6,7 @@
 <!-- `translate="no"` and the google meta below: the app ships its own
      languages. A page translator rewrites text nodes under React, which then
      crashes the whole view with "Failed to execute 'insertBefore' on 'Node'". -->
-<html lang="en" class="dark" translate="no">
+<html lang="ru" class="dark" translate="no">
   <head>
     <meta charset="UTF-8" />
     <meta name="google" content="notranslate" />
@@ -18,7 +18,7 @@
          overwrites it with the user's own assistant name (from the localStorage
          cache) the instant the window opens, so a trademarked placeholder is
          never shown. -->
-    <title>Assistant</title>
+    <title>Galen</title>
     <script>
       // Resolve the theme SYNCHRONOUSLY, before a single pixel is painted.
       //
@@ -258,7 +258,7 @@
                name. -->
           <div class="name"></div>
           <div class="jbs-progress" aria-hidden="true"><i></i></div>
-          <div class="sub" role="status" aria-live="polite">Starting up…</div>
+          <div class="sub" role="status" aria-live="polite">Запуск…</div>
         </div>
       </div>
     </div>
@@ -282,6 +282,11 @@
         } catch (e) {
           /* storage blocked (private mode) — keep the neutral fallback */
         }
+        var uiLang = "ru";
+        try { uiLang = localStorage.getItem("jarvis.ui.language") || "ru"; } catch (e) {}
+        document.documentElement.lang = uiLang;
+        var bootStatus = document.querySelector("#jarvis-boot-splash .sub");
+        if (bootStatus) bootStatus.textContent = uiLang === "ru" ? "Запуск…" : "Starting up…";
         var updating = false;
         var recoveryQuery = new URLSearchParams(location.search);
         var recoveryFromQuery = recoveryQuery.get("jarvis_recovery") === "1";
@@ -308,8 +313,8 @@
           }
         }
         var status = document.querySelector("#jarvis-boot-splash .sub");
-        if (status && updating) status.textContent = "Updating interface…";
-        else if (status && recovering) status.textContent = "Restoring interface…";
+        if (status && updating) status.textContent = uiLang === "ru" ? "Обновление интерфейса…" : "Updating interface…";
+        else if (status && recovering) status.textContent = uiLang === "ru" ? "Восстановление интерфейса…" : "Restoring interface…";
       })();
     </script>
     <script>
@@ -481,7 +486,7 @@
           var sub = document.createElement("div");
           sub.className = "sub";
           sub.setAttribute("role", "status");
-          sub.textContent = "Updating interface…";
+          sub.textContent = document.documentElement.lang === "ru" ? "Обновление интерфейса…" : "Updating interface…";
           group.appendChild(mark);
           group.appendChild(name);
           group.appendChild(progress);
@@ -504,7 +509,16 @@
         }
 
         function texts() {
-          var lang = (navigator.language || "en").slice(0, 2);
+          var lang = document.documentElement.lang || "ru";
+          if (lang === "ru") {
+            return {
+              title: "Не удалось загрузить интерфейс.", // i18n-allow
+              why: "Причина: ", // i18n-allow
+              unknown: "Причина не указана.", // i18n-allow
+              hint: "Попробуйте перезагрузить интерфейс. Ваши данные сохранятся.", // i18n-allow
+              button: "Перезагрузить", // i18n-allow
+            };
+          }
           if (lang === "de") {
             return {
               title: "Die Oberfläche wurde nicht geladen.", // i18n-allow
