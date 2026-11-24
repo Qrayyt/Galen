@@ -74,7 +74,8 @@ export interface UpdateProgress {
 
 // Slow poll: a new release is a rare event, so 6h keeps the button fresh
 // without hammering GitHub. A window focus also triggers a check.
-const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const POLL_INTERVAL_MS = 30 * 60 * 1000;
+const RETRY_INTERVAL_MS = 60 * 1000;
 
 /**
  * Read the live progress of an in-flight update.
@@ -122,12 +123,19 @@ export function useUpdate() {
 
   useEffect(() => {
     // Non-critical: the first status check waits out the boot burst.
-    void bootSettled().then(() => refresh());
-    const id = window.setInterval(() => void refresh(), POLL_INTERVAL_MS);
+    let live = true;
+    let timer: number | undefined;
+    const check = async () => {
+      if (!live) return;
+      const result = await refresh();
+      if (live) timer = window.setTimeout(() => void check(), !result || result.check_failed ? RETRY_INTERVAL_MS : POLL_INTERVAL_MS);
+    };
+    void bootSettled().then(check);
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
     return () => {
-      window.clearInterval(id);
+      live = false;
+      if (timer !== undefined) window.clearTimeout(timer);
       window.removeEventListener("focus", onFocus);
     };
   }, [refresh]);

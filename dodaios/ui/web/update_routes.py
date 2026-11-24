@@ -613,6 +613,52 @@ def _release_from_payload(data: dict[str, Any], auth_token: str | None) -> dict[
     }
 
 
+# Native Galen builds use the public, verified release mirror. The GitHub
+# source repository stays private, and no GitHub account/token is required.
+_PUBLIC_RELEASE_FEED = "https://galen.galenite.org/downloads/latest.json"
+
+
+def _public_release_from_payload(data: Any) -> dict[str, Any] | None:
+    if not isinstance(data, dict):
+        return None
+    tag = data.get("tag_name")
+    if not isinstance(tag, str) or not re.fullmatch(r"v\d+\.\d+\.\d+(?:-preview\.\d+)?", tag):
+        return None
+    release = _release_from_payload(data, None)
+    if release is None:
+        return None
+    expected_names = ("Galen-Setup-x64.exe", CHECKSUMS_ASSET_NAME)
+    assets = release["assets"]
+    selected = [select_asset(assets, name) for name in expected_names]
+    if any(asset is None or not asset.digest or asset.size <= 0 for asset in selected):
+        return None
+    installer, checksum = selected
+    base = f"https://galen.galenite.org/downloads/{tag}-{installer.digest[:16]}/"
+    # Reject arbitrary asset URLs and refuse a partially uploaded release.
+    if any(asset.url != base + asset.name for asset in (installer, checksum)):
+        return None
+    release["assets"] = [
+        entry for entry in assets
+        if isinstance(entry, dict) and entry.get("name") in expected_names
+    ]
+    release["release_url"] = "https://galen.galenite.org/install.html"
+    return release
+
+
+async def _fetch_public_release() -> dict[str, Any] | None:
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+            response = await client.get(_PUBLIC_RELEASE_FEED, headers={"Accept": "application/json"})
+        if response.status_code != 200 or len(response.content) > 512 * 1024:
+            return None
+        return _public_release_from_payload(response.json())
+    except Exception as exc:  # noqa: BLE001 - network errors never block startup
+        log.debug("[update] public release mirror unavailable: %s", exc)
+        return None
+
+
 async def _fetch_latest_release() -> dict[str, Any] | None:
     """GET the newest stable or preview GitHub Release.
 
@@ -629,6 +675,11 @@ async def _fetch_latest_release() -> dict[str, Any] | None:
     happens between the status check and the button click.
     """
     global _last_good_release
+    if is_frozen() and sys.platform == "win32" and OFFICIAL_REPO_SLUG == DEFAULT_OFFICIAL_REPO_SLUG:
+        mirrored = await _fetch_public_release()
+        if mirrored is not None:
+            _last_good_release = mirrored
+            return mirrored
     try:
         import httpx
 

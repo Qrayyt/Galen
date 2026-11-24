@@ -1,9 +1,7 @@
-Galen 1.0 Preview 3 release candidate
+Galen 1.0 Preview 4 release candidate
 Branch: feat/galen-1.0-dodaios
-Version: 1.0.0-preview.3
-License: Apache-2.0 + MIT third-party notices
+Version: 1.0.0-preview.4
 Platform: Windows 11 x64
-Scope: branding, Russian UI, themed HUD, native tray, startup and notifications
+Scope: public verified release delivery, updater and website
 Publishing gate: Python validation + React build + Windows PyInstaller/Inno Setup + SHA256
-
-Candidate revision: 3 (remove artifact quota dependency; package and publish on Windows runner)
+Candidate revision: 1

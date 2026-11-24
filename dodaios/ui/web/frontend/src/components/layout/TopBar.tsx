@@ -405,8 +405,8 @@ export function UpdateButton({
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
-          aria-label={t("topbar.update_up_to_date")}
-          title={t("topbar.update_up_to_date")}
+          aria-label={t(status?.check_failed ? "topbar.update_network_error" : "topbar.update_up_to_date")}
+          title={t(status?.check_failed ? "topbar.update_network_error" : "topbar.update_up_to_date")}
           aria-haspopup="dialog"
           aria-expanded={open}
           data-testid="update-button"
@@ -425,7 +425,7 @@ export function UpdateButton({
             data-testid="update-panel"
             className="absolute bottom-full left-0 z-50 mb-2 w-64 rounded-lg bg-popover p-3 text-left shadow-float"
           >
-            <div className="text-meta font-semibold text-foreground-strong">{t("topbar.update_up_to_date")}</div>
+            <div className="text-meta font-semibold text-foreground-strong">{t(status?.check_failed ? "topbar.update_network_error" : "topbar.update_up_to_date")}</div>
             {status?.current && (
               <div className="mt-0.5 text-micro text-muted-foreground">
                 {fill(t("topbar.update_current_version"), { version: status.current })}
@@ -693,8 +693,8 @@ export function UpdateButton({
           aria-label={title}
           data-testid="update-panel"
           className={clsx(
-            "absolute z-50 w-72 rounded-lg bg-popover p-3 text-left shadow-float",
-            inSidebar ? "bottom-full left-0 mb-2" : "right-0 top-full mt-1.5",
+            "z-50 rounded-xl border border-border bg-popover p-4 text-left shadow-float",
+            announceOnLaunch ? "fixed left-1/2 top-6 w-[min(420px,calc(100vw-32px))] -translate-x-1/2" : inSidebar ? "absolute w-72 bottom-full left-0 mb-2" : "absolute w-72 right-0 top-full mt-1.5",
           )}
         >
           <div className="flex items-baseline justify-between gap-3">
@@ -709,7 +709,7 @@ export function UpdateButton({
           </div>
           {busy ? (
             <>
-              <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-secondary">
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-secondary">
                 <div
                   aria-hidden
                   data-testid="update-progress-fill"
@@ -717,6 +717,7 @@ export function UpdateButton({
                   style={{ width: `${percent}%` }}
                 />
               </div>
+              <div className="mt-2 text-right text-micro tabular-nums text-muted-foreground">{Math.round(percent)}%</div>
               {progress?.detail && !restarting && (
                 <div className="mt-1.5 truncate text-micro tabular-nums text-muted-foreground">
                   {progress.detail}
