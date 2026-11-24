@@ -33,7 +33,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag='v1.0.0-preview.1'
+          tag='v1.0.0-preview.2'
           if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
             base="$tag"
           else
@@ -103,7 +103,7 @@ jobs:
       - name: Validate Python and source provenance
         run: |
           python -m py_compile dodaios/__init__.py dodaios/core/branding.py \
-            dodaios/core/update_contract.py dodaios/ui/relauncher.py \
+            dodaios/core/update_contract.py dodaios/ui/relauncher.py dodaios/ui/tray.py dodaios/ui/background_tray.py dodaios/ui/native_labels.py dodaios/notify/reminders.py \
             packaging/pyinstaller_rthook_frozen.py scripts/galen/validate_release.py \
             dodaios/plugins/tool/galen_kaizumi.py \
             dodaios/plugins/tool/galen_audio_focus.py \
@@ -116,7 +116,7 @@ jobs:
           assert constants['PRODUCT_NAME']=='Galen'
           assert constants['WINDOWS_USER_DATA_DIR_NAME']=='GalenData'
           assert constants['DEFAULT_OFFICIAL_REPO_SLUG']=='Qrayyt/Galen'
-          assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0-preview.2'
+          assert tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']=='1.0.0-preview.3'
           assert pathlib.Path('integrations/openrealtime/source/go.mod').is_file()
           assert pathlib.Path('third_party/galen-opendex/LICENSE').is_file()
           assert pathlib.Path('third_party/galen-kaizumi/LICENSE').is_file()
@@ -127,6 +127,11 @@ jobs:
           python scripts/galen/make_brand_assets.py --check
           python scripts/galen/check_russian_locales.py
           python scripts/galen/validate_release.py
+          python - <<'PY'
+          from dodaios.ui.native_labels import desktop_label, state_label
+          assert desktop_label('Open', 'Открыть', lang='ru') == 'Открыть'
+          assert state_label('listening', lang='ru') == 'Слушаю'
+          PY
       - name: Test changed React sources
         if: steps.changes.outputs.runtime_changed == 'true' && steps.frontend-cache.outputs.cache-hit != 'true' && steps.changes.outputs.frontend_changed == 'true' && steps.frontend-tests-cache.outputs.cache-hit != 'true' && steps.committed-frontend-tests.outputs.reused != 'true'
         working-directory: dodaios/ui/web/frontend
@@ -189,7 +194,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force dist/installers | Out-Null
-          gh release download v1.0.0-preview.1 --repo $env:GITHUB_REPOSITORY `
+          gh release download v1.0.0-preview.2 --repo $env:GITHUB_REPOSITORY `
             --pattern "Galen-Setup-x64.exe*" --dir dist/installers --clobber
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Download the verified frontend only when an installer rebuild is needed
@@ -308,7 +313,7 @@ jobs:
           TARGET_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          tag='v1.0.0-preview.2'
+          tag='v1.0.0-preview.3'
           test -s release-assets/Galen-Setup-x64.exe
           test -s release-assets/Galen-Setup-x64.exe.sha256
           test -s release-assets/installers-SHA256SUMS.txt
@@ -320,12 +325,12 @@ jobs:
               -f sha="$TARGET_SHA" -F force=true >/dev/null
             gh release upload "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt --clobber --repo "$REPO"
             gh release edit "$tag" --repo "$REPO" --target "$TARGET_SHA" --prerelease \
-              --title "Galen 1.0 Preview 2 · Galenite" \
-              --notes-file docs/GALEN_1_0_PREVIEW_2.md
+              --title "Galen 1.0 Preview 3 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW_3.md
           else
             gh release create "$tag" release-assets/Galen-Setup-x64.exe release-assets/Galen-Setup-x64.exe.sha256 release-assets/installers-SHA256SUMS.txt \
               --repo "$REPO" --target "$TARGET_SHA" --prerelease \
-              --title "Galen 1.0 Preview 2 · Galenite" \
-              --notes-file docs/GALEN_1_0_PREVIEW_2.md
+              --title "Galen 1.0 Preview 3 · Galenite" \
+              --notes-file docs/GALEN_1_0_PREVIEW_3.md
           fi
           gh release view "$tag" --repo "$REPO" --json url,assets | tee release-result.json
