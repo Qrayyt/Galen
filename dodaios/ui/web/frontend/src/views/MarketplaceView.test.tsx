@@ -279,7 +279,7 @@ describe("MarketplaceView", () => {
 
     // The German strings resolve from the locale files: the always-loaded
     // one (the search) and the section's own chunk (the opening line).
-    expect(await screen.findByText(/aus der Community/)).toBeTruthy(); // i18n-allow
+    expect(await screen.findByText(/aus dem externen Dodaios Marketplace/)).toBeTruthy(); // i18n-allow
     expect(await screen.findByLabelText(/Plugins, Skills und Agenten durchsuchen/)).toBeTruthy(); // i18n-allow
 
     setUiLanguage("es");
@@ -292,7 +292,7 @@ describe("MarketplaceView", () => {
     await screen.findByText("Sentry");
 
     fireEvent.click(screen.getByRole("button", { name: "More" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: /Open the website/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Open Dodaios Marketplace website/ }));
 
     expect(openExternalUrl).toHaveBeenCalledWith(MARKETPLACE_WEB_URL);
   });

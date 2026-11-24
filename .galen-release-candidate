@@ -6,4 +6,4 @@ Platform: Windows 11 x64
 Scope: branding, Russian UI, themed HUD, native tray, startup and notifications
 Publishing gate: Python validation + React build + Windows PyInstaller/Inno Setup + SHA256
 
-Candidate revision: 1
+Candidate revision: 2 (align Marketplace UI tests with the explicitly attributed third-party catalog)
