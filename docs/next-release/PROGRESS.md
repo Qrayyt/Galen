@@ -15,8 +15,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
-- Current committed SHA before this product checkpoint:
-  `acd2b47a`.
+- Current product-code SHA:
+  `e57a65a4bb3a13efe32b5f7eec74f33be895c484`.
 - Latest code checkpoint: durable private voice archive provenance; legacy Work migration, rich-document route and Responses API regression fixtures.
 
 ## Repository audit
@@ -45,8 +45,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 2 | Unified history sidebar | implemented | Unified sidebar and search; desktop acceptance outstanding |
 | 3 | Chat lifecycle and durable history | implemented | Create, rename, delete, auto-title and durable history; desktop acceptance outstanding |
 | 4 | Chat search | implemented | Chat/Work and archived voice search with focused fixtures; focused CI succeeded on 299daf8; large-history/desktop acceptance pending |
-| 5 | Isolated chat context and global memory | in progress | Classic/realtime call scopes and project-private memory curation guards added; latest dependency-backed and live provider acceptance pending |
-| 6 | Restart restore and lossless migration | in progress | Last mode/session, scoped text drafts and ordinary blank drafts restore; desktop migration acceptance remains |
+| 5 | Isolated chat context and global memory | in progress | Sticky private text/agent/voice provenance and automatic-learning guards implemented; exact candidate regression pending, including the new archived voice test |
+| 6 | Restart restore and lossless migration | implemented | Existing focused persistence/restart suite passed on b37d1076; added Preview 5 Work database/resume fixture; exact-candidate and installed-app migration acceptance pending |
 | 7 | Rename IDE to Work | implemented | Six locales and regression assertions updated; 08b1c6a candidate frontend job passed; desktop accessibility acceptance pending |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
 | 9 | Per-chat mode selection and persistence | implemented | New and idle API-backed existing chats support mode selection; CLI-bound chats cannot safely convert |
@@ -55,12 +55,12 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 12 | Project names, icons, collapsible groups | implemented | Name/icon edit and persistent collapse; desktop acceptance outstanding |
 | 13 | Chat and Work creation in projects | implemented | Scoped Chat/Work creation and voice-first realtime binding; desktop acceptance outstanding |
 | 14 | Move chats between project scopes | implemented | Chat/Work and finished voice archive moves preserve their identities; focused CI succeeded on 6915398; dependency-backed and desktop acceptance pending |
-| 15 | Project instructions, context, and files | in progress | Classic voice context and bounded local rich-document extraction added; latest dependency-backed and desktop acceptance pending |
+| 15 | Project instructions, context, and files | implemented | Scoped context and local rich-document extraction passed dependency-backed checks on b37d1076; new PDF/XLSX explicit-save fixtures and installed-app acceptance pending |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
 | 17 | Native visual component library | implemented | Native cards/tables/charts/diagrams/checklists/progress/calculators/input; focused schema fixtures, runtime acceptance pending |
 | 18 | Structured response schema | implemented | Versioned galen-ui envelope and bounded allow-list parser with fixtures |
 | 19 | Safe renderer and Markdown fallback | implemented | Allow-listed renderer and fallback; scripts disabled in chat HTML previews; runtime safety acceptance outstanding |
-| 20 | Provider/model instructions and examples | in progress | Provider-independent guidance added; representative provider response fixtures pending |
+| 20 | Provider/model instructions and examples | implemented | 18 real-adapter fake-transport scenarios passed on b37d1076; six additional Responses API fixtures pending exact CI; no live model accounts exercised |
 | 21 | Safe interactions and state | implemented | Message-scoped local checklist, choice and calculator state; no tool execution |
 | 22 | Streaming validation and recovery | implemented | Partial streaming fence and completed malformed/truncated fallback; provider streaming acceptance remains |
 | 23 | Metadata-only marketplace catalog | implemented | Metadata-only SQLite catalog service and focused API tests; deployment pending |
@@ -72,7 +72,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 29 | Unified extension manifest | implemented | Strict versioned manifest and archive parser for declarative plugins and skills; fixtures added |
 | 30 | Moderation and safe installation | implemented | Moderation, declared file hash checks, bounded archive and explicit native install consent; real endpoint acceptance remains |
 
-Summary: 0 verified, 25 implemented, 4 in progress, 0 not started, 1 blocked.
+Summary: 0 verified, 28 implemented, 1 in progress, 0 not started, 1 blocked. Implementation coverage: 28/30 (93.3%). Full release acceptance remains pending.
 
 ## Files changed in this checkpoint
 
@@ -494,3 +494,9 @@ starting the scoped project-context injection block.
 
 - Fixed a gap in the previous privacy checkpoint: removing a voice archive from a project (including deleting the project) removed the association, so a later call continued from the archive could enter global automatic learning. Added an additive, idempotent opaque-ID provenance table, backfilled currently linked archives, and captured private continuations at call start. This stores no old project identifier, transcript or recording. Unrelated calls remain eligible for normal learning. Added detach/delete/restart regression coverage. Historical archives detached before this migration cannot be identified retroactively.
 - Exact candidate CI still pending. Task 5 remains in progress until the dependency-backed checks pass; task 28 unchanged. No servers or release markers touched (only the no-publication candidate marker).
+
+## Reconciled implementation status and CI evidence
+
+- Candidate [45659138998](https://github.com/Qrayyt/Galen/actions/runs/45659138998) on `b37d1076` passed 44 focused tests (1 warning) and 190 dependency-backed tests, including the existing migration, restart, project-context and three-provider native UI suites. Frontend tests and build succeeded. Marked tasks 6, 15 and 20 implemented (not verified); additional exact-candidate coverage remains pending.
+- Latest code candidate `e57a65a4`: [focused checks 45662739684](https://github.com/Qrayyt/Galen/actions/runs/45662739684), [Windows candidate 45662739601](https://github.com/Qrayyt/Galen/actions/runs/45662739601), both pending at this checkpoint. The previous Windows run still occupied the concurrency slot; superseded pending run 45662518247 was cancelled by GitHub. Do not count a cancelled or older run as current acceptance.
+- Next: inspect the exact-candidate backend/installer/UI results; resolve any failures; complete task 5 only with evidence; run actual native desktop/provider acceptance before publishing. Task 28 remains blocked and intentionally untouched by user request. No storage cleanup, production deployment, release or live API call. This documentation-only commit does not need a new candidate build.
