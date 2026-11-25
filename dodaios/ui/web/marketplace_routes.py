@@ -2459,3 +2459,86 @@ async def add_custom_connector(body: CustomConnectorBody) -> dict[str, Any]:
             "server_name": probe.server_name,
         },
     }
+
+
+# GLNT reviewed catalog: separate from legacy community installs.
+def _glnt_settings():
+    from dodaios.core.config import DATA_DIR, load_config
+    return load_config().marketplace.glnt_catalog_url, DATA_DIR / "glnt-local.sqlite3"
+
+
+class GlntStageBody(BaseModel):
+    entry_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    consent: bool = False
+
+
+class GlntSubmitBody(BaseModel):
+    repository_url: str = Field(min_length=10, max_length=250)
+
+
+@router.get("/glnt/catalog")
+async def glnt_browse(q: str = "", kind: str = "", offset: int = 0):
+    from dodaios.marketplace.glnt_client import browse, staged
+    if len(q) > 100 or kind not in ("", "skill", "plugin") or not 0 <= offset <= 100000:
+        raise HTTPException(400, "Invalid catalog query")
+    base, db = _glnt_settings()
+    local = await asyncio.to_thread(staged, db)
+    if not base:
+        return {"configured": False, "items": [], "staged": local, "next_offset": None, "stale": False}
+    try:
+        page = await browse(base, db, q, kind, offset)
+    except (ValueError, httpx.HTTPError):
+        raise HTTPException(503, "GLNT catalog unavailable")
+    return {"configured": True, "staged": local, **page}
+
+
+@router.post("/glnt/stage")
+async def glnt_stage(body: GlntStageBody):
+    from dodaios.marketplace.glnt_client import request_json, validate_entry, download_archive, stage_verified
+    if not body.consent:
+        raise HTTPException(400, "Explicit download consent required")
+    base, db = _glnt_settings()
+    try:
+        response = await request_json(base, "/v1/catalog/" + body.entry_id)
+        item = validate_entry(response["item"])
+        if (item["id"], item["commit"], item["manifest_sha256"]) != (
+            body.entry_id, body.commit, body.manifest_sha256
+        ):
+            raise ValueError("Catalog entry changed; review it again")
+        raw = await download_archive(item)
+        return await asyncio.to_thread(stage_verified, db, item, raw)
+    except (ValueError, TypeError, KeyError, httpx.HTTPError) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "GLNT verification failed")
+
+
+@router.delete("/glnt/staged/{kind}/{name}")
+async def glnt_remove(kind: str, name: str):
+    from dodaios.marketplace.glnt_client import remove
+    _, db = _glnt_settings()
+    try:
+        return {"removed": await asyncio.to_thread(remove, db, name, kind)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.post("/glnt/submit")
+async def glnt_submit(body: GlntSubmitBody):
+    from dodaios.marketplace.glnt_client import request_json, catalog_base
+    from dodaios.marketplace.glnt_manifest import github_repo
+    from dodaios.marketplace.publish import PUBLISHER_TOKEN_ID
+    base, _ = _glnt_settings()
+    try:
+        catalog_base(base)
+        repo = github_repo(body.repository_url)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    tokens = await asyncio.to_thread(TokenStore().load, PUBLISHER_TOKEN_ID)
+    if not tokens:
+        raise HTTPException(401, "Sign in with GitHub first")
+    try:
+        result = await request_json(base, "/v1/submissions", body={"repository_url": "https://github.com/" + repo}, token=tokens.access)
+        return {"id": result["item"]["id"], "status": result["item"]["status"]}
+    except (ValueError, KeyError, httpx.HTTPError):
+        raise HTTPException(400, "GLNT submission failed; check repository access and manifest")
