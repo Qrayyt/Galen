@@ -5,14 +5,14 @@
 #   packaging/macos/build.sh
 #
 # Output (per the release contract):
-#   dist/installers/Dodaios-macOS-arm64.dmg   on Apple Silicon
-#   dist/installers/Dodaios-macOS-x64.dmg     on Intel
+#   dist/installers/Galen-macOS-arm64.dmg   on Apple Silicon
+#   dist/installers/Galen-macOS-x64.dmg     on Intel
 #
 # A release also publishes each image as PersonalJarvis-macOS-<arch>.dmg, a
 # byte-identical copy for installs from before the rename
 # (scripts/ci/installer_aliases.py).
 #
-# The disk image contains "Dodaios.app" next to a symlink to
+# The disk image contains "Galen.app" next to a symlink to
 # /Applications, which is the drag-to-install layout every Mac user already
 # knows. The app is a PyInstaller BUNDLE built from dodaios.spec.
 #
@@ -50,8 +50,8 @@ DRY_RUN="${DRY_RUN:-0}"
 PYTHON="${PYTHON:-python3}"
 SKIP_FRONTEND="${SKIP_FRONTEND:-0}"
 
-APP_NAME="Dodaios"
-VOLUME_NAME="Dodaios"
+APP_NAME="Galen"
+VOLUME_NAME="Galen"
 DIST_DIR="${REPO_ROOT}/dist"
 APP_BUNDLE="${DIST_DIR}/${APP_NAME}.app"
 OUT_DIR="${DIST_DIR}/installers"
@@ -60,7 +60,7 @@ ENTITLEMENTS="${SCRIPT_DIR}/entitlements.plist"
 # The copy of ENTITLEMENTS that codesign embeds; see prepare_entitlements().
 NORMALIZED_ENTITLEMENTS="${DIST_DIR}/entitlements.normalized.plist"
 SIGNING_ENTITLEMENTS="${ENTITLEMENTS}"
-ICNS="${REPO_ROOT}/assets/icons/dodaios.icns"
+ICNS="${REPO_ROOT}/assets/galen-brand/icon.icns"
 
 log() { printf '[macos-build] %s\n' "$*"; }
 die() { printf '[macos-build] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -131,7 +131,7 @@ case "${MACHINE}" in
   x86_64) ARCH_TAG="x64" ;;
   *)      die "unsupported macOS architecture: ${MACHINE}" ;;
 esac
-DMG_PATH="${OUT_DIR}/Dodaios-macOS-${ARCH_TAG}.dmg"
+DMG_PATH="${OUT_DIR}/Galen-macOS-${ARCH_TAG}.dmg"
 log "host ${MACHINE} -> building ${ARCH_TAG}"
 
 # A half-configured certificate is a mistake worth hearing about before the
@@ -292,7 +292,7 @@ if [ -f "${ICNS}" ] || [ "${DRY_RUN}" = "1" ]; then
   :
 else
   log "regenerating the app icon (${ICNS} is missing)"
-  run "${PYTHON}" "${SCRIPT_DIR}/make_icns.py"
+  run "${PYTHON}" "${SCRIPT_DIR}/make_galen_dmg_art.py" --icon-only
 fi
 
 log "preparing compiler-free browser dependencies"
@@ -307,7 +307,7 @@ log "running PyInstaller"
 if building; then
   [ -d "${APP_BUNDLE}" ] || die "PyInstaller did not produce '${APP_BUNDLE}'. dodaios.spec must contain a darwin BUNDLE(...) block that names the app '${APP_NAME}'."
   # The console command and its earlier name; dodaios.spec builds both.
-  for cli_name in dodaios jarvis; do
+  for cli_name in galen dodaios jarvis; do
     [ -x "${APP_BUNDLE}/Contents/MacOS/${cli_name}" ] \
       || die "'${APP_BUNDLE}/Contents/MacOS/${cli_name}' is missing. The bundle must ship the console CLI entry so '${cli_name} serve' works from a native install."
   done
@@ -430,7 +430,7 @@ if [ "${SIGNED_FOR_DISTRIBUTION}" = "1" ] && notary_credentials_present; then
   # stapled INTO the bundle. A ticket stapled only to the .dmg disappears the
   # moment the user drags the app out of it, which is the one thing every user
   # does - the app would then need a network round trip on first launch.
-  ZIP_PATH="${DIST_DIR}/Dodaios-macOS-${ARCH_TAG}-notarize.zip"
+  ZIP_PATH="${DIST_DIR}/Galen-macOS-${ARCH_TAG}-notarize.zip"
   run rm -f "${ZIP_PATH}"
   run ditto -c -k --keepParent "${APP_BUNDLE}" "${ZIP_PATH}"
   notarize "${ZIP_PATH}"
@@ -459,6 +459,10 @@ log "building the disk image"
 # versions the app still supports.
 # hdiutil sometimes fails with "Resource busy" on a busy machine (CI runners
 # scan new files while the image is built); create_dmg tries that again.
+# Generate a Finder layout and monochrome branded background using the actual Galen mark.
+if building; then
+  "${PYTHON}" "${SCRIPT_DIR}/make_galen_dmg_art.py" --stage "${STAGE_DIR}"
+fi
 create_dmg "${STAGE_DIR}" "${DMG_PATH}"
 run rm -rf "${STAGE_DIR}"
 
