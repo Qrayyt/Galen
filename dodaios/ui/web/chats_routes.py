@@ -590,6 +590,19 @@ def delete_project(
     delete_chats: bool = Query(default=False),
 ) -> dict[str, Any]:
     store = _require_chat_store(request)
+    if store.get_project(project_id) is None:
+        raise HTTPException(status_code=404, detail="project-not-found")
+    # The two stores share project IDs, not a database transaction. Detach
+    # before deleting metadata so a failure cannot leave chats inaccessible.
+    from .agent_chat_routes import _service_from_state
+
+    agent_chat = _service_from_state(request.app.state)
+    if agent_chat is None and getattr(request.app.state, "agent_chat_factory", None) is not None:
+        raise HTTPException(status_code=503, detail="agent-chat-unavailable")
+    if agent_chat is not None:
+        # Agent sessions are always retained; deleting a project must not
+        # destroy CLI resumes or in-progress work.
+        agent_chat.store.detach_project(project_id)
     if not store.delete_project(project_id, delete_chats=delete_chats):
         raise HTTPException(status_code=404, detail="project-not-found")
     return {"deleted": True, "id": project_id, "chats": "deleted" if delete_chats else "ungrouped"}

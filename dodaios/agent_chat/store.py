@@ -795,6 +795,16 @@ class AgentChatStore:
             )
             self._conn.commit()
 
+    def detach_project(self, project_id: str) -> int:
+        """Ungroup sessions without touching messages, timestamps or vendor resumes."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE agent_chat_sessions SET project_id = NULL WHERE project_id = ?",
+                (project_id,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     def delete_session(self, session_id: str) -> bool:
         with self._lock:
             cur = self._conn.execute(
