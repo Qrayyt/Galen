@@ -268,6 +268,21 @@ None. No server credentials were read or recorded. No deployment, database, cata
 - Safeguards: production build and 87 focused tests pass; legacy route ids and the mature Work tree are
   retained; no release marker, workflow, tag, server, secret, or stored history is changed.
 
+## Risk checkpoint before ordinary-chat multi-session semantics
+
+- Date: 2026-11-25 15:55 MSK (UTC+03:00).
+- Current committed SHA: `b31acae`.
+- Planned action: change a new `jarvis` conversation from reusing the historical singleton lead
+  session to creating a distinct durable session, while retaining the lead pointer as the last
+  active/default conversation for voice, proactive work, and restart restoration.
+- Risk: high; the singleton assumption is referenced by typed chat creation, voice mirroring,
+  background notices, deletion protection, and startup restoration.
+- Safeguards: do not rewrite or delete existing sessions; keep the lead table and compatibility
+  endpoints; make opening a chat update the default pointer; keep an explicit blank/new state for
+  voice; add focused route, restart, deletion, isolation, and voice-call tests before pushing.
+- Rollback boundary: this block changes behavior and tests only. The additive database schema remains
+  compatible with existing installations, and no existing history row is migrated or removed.
+
 ## Next concrete step
 
 Commit and push the unified frontend checkpoint. Then finish Work copy, selected-project creation,
