@@ -176,6 +176,17 @@ jobs:
             dist/installers/Galen-Setup-x64.exe.sha256
             dist/installers/installers-SHA256SUMS.txt
           key: ${{ steps.installer-cache.outputs.cache-primary-key }}
+      - name: Smoke-test the exact installer on an isolated Windows runner
+        shell: pwsh
+        run: pwsh -NoProfile -File scripts/ci/galen-installed-smoke.ps1 -Installer dist/installers/Galen-Setup-x64.exe
+      - name: Upload installation smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Galen-installed-smoke-${{ github.sha }}
+          path: ${{ runner.temp }}/galen-install-smoke
+          if-no-files-found: ignore
+          retention-days: 14
       - name: Upload candidate installer without releasing
         uses: actions/upload-artifact@v4
         with:

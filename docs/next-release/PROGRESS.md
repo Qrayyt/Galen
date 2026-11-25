@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 15:52 MSK (UTC+03:00).
+- Date: 2026-11-25 (latest continuation).
 - Stage: integrated feature implementation and candidate verification; full regression and desktop acceptance pending.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `1535f94`.
-- Latest code checkpoint: scoped voice call context, native UI state, Chat/Work mode switching, GLNT install/update/uninstall, catalog file integrity, and blank-chat draft restoration.
+  `97a9836e`.
+- Latest code checkpoint: voice archive search/association, classic voice isolation, rich document import, isolated GLNT container and Windows installer smoke gate.
 
 ## Repository audit
 
@@ -44,18 +44,18 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 1 | Multi-session ordinary chats | implemented | New ordinary conversations create distinct durable sessions; opening/restoring, deletion, voice-first creation, and event isolation have focused tests; desktop scenario remains before verified |
 | 2 | Unified history sidebar | implemented | Unified sidebar and search; desktop acceptance outstanding |
 | 3 | Chat lifecycle and durable history | implemented | Create, rename, delete, auto-title and durable history; desktop acceptance outstanding |
-| 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
-| 5 | Isolated chat context and global memory | in progress | Project-scoped runtime instructions/snapshots wired into brain/API/CLI; voice and global-memory boundary checks pending |
+| 4 | Chat search | implemented | Chat/Work and archived voice search with focused fixtures; focused CI succeeded on 299daf8; large-history/desktop acceptance pending |
+| 5 | Isolated chat context and global memory | in progress | Classic/realtime call scopes and project-private memory curation guards added; latest dependency-backed and live provider acceptance pending |
 | 6 | Restart restore and lossless migration | in progress | Last mode/session, scoped text drafts and ordinary blank drafts restore; desktop migration acceptance remains |
-| 7 | Rename IDE to Work | in progress | Primary and audited secondary/nested labels updated in six locales; dedicated fixtures added; source CI and desktop accessibility acceptance pending |
+| 7 | Rename IDE to Work | implemented | Six locales and regression assertions updated; 08b1c6a candidate frontend job passed; desktop accessibility acceptance pending |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
 | 9 | Per-chat mode selection and persistence | implemented | New and idle API-backed existing chats support mode selection; CLI-bound chats cannot safely convert |
 | 10 | Unified Chat/Work history | implemented | Unified history remains available in Work; desktop acceptance outstanding |
 | 11 | Project lifecycle | implemented | Create, rename, collapse and non-destructive deletion/ungroup; desktop acceptance outstanding |
 | 12 | Project names, icons, collapsible groups | implemented | Name/icon edit and persistent collapse; desktop acceptance outstanding |
 | 13 | Chat and Work creation in projects | implemented | Scoped Chat/Work creation and voice-first realtime binding; desktop acceptance outstanding |
-| 14 | Move chats between project scopes | in progress | Agent-backed Chat/Work move/ungroup implemented; voice archive rows remain unassignable |
-| 15 | Project instructions, context, and files | in progress | Project instructions and text snapshots for typed/realtime/live paths; classic voice and rich formats remain |
+| 14 | Move chats between project scopes | implemented | Chat/Work and finished voice archive moves preserve their identities; focused CI succeeded on 6915398; dependency-backed and desktop acceptance pending |
+| 15 | Project instructions, context, and files | in progress | Classic voice context and bounded local rich-document extraction added; latest dependency-backed and desktop acceptance pending |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
 | 17 | Native visual component library | implemented | Native cards/tables/charts/diagrams/checklists/progress/calculators/input; focused schema fixtures, runtime acceptance pending |
 | 18 | Structured response schema | implemented | Versioned galen-ui envelope and bounded allow-list parser with fixtures |
@@ -68,11 +68,11 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 25 | GitHub metadata and icons | implemented | Commit-pinned icon metadata and bounded raster normalization; runtime acceptance remains |
 | 26 | Direct GitHub installation | implemented | Direct GitHub download, verification and explicit native registration; real endpoint acceptance remains |
 | 27 | Direct updates and local removal | implemented | Verified update and uninstall, ownership checks, quarantine and recovery; runtime acceptance remains |
-| 28 | Publish by repository link | in progress | GitHub URL submission through catalog API and signed-in desktop panel; real auth/deployment test pending |
+| 28 | Publish by repository link | blocked | Submission API/UI and tests exist; real auth/HTTPS acceptance blocked by insufficient disk on both audited hosts |
 | 29 | Unified extension manifest | implemented | Strict versioned manifest and archive parser for declarative plugins and skills; fixtures added |
 | 30 | Moderation and safe installation | implemented | Moderation, declared file hash checks, bounded archive and explicit native install consent; real endpoint acceptance remains |
 
-Summary: 0 verified, 22 implemented, 8 in progress, 0 not started, 0 blocked.
+Summary: 0 verified, 25 implemented, 4 in progress, 0 not started, 1 blocked.
 
 ## Files changed in this checkpoint
 
@@ -463,3 +463,9 @@ starting the scoped project-context injection block.
 
 - Reused the local hardened document extractor for PDF, DOCX, XLSX, PPTX, OpenDocument, RTF and EPUB. Explicitly selected files are streamed to a bounded local preview route (8 MiB), parsed off the event loop, and never stored as binaries or sent to a model by extraction. The existing validated project-text snapshot limits and Save boundary remain unchanged. Unreadable or oversized documents are rejected, not silently truncated. The editor prevents switching project edits while extraction is pending.
 - Added route tests for local parsing, rejection and no persistence, and a sidebar confirmation fixture. Task 15 remains pending candidate CI and actual desktop acceptance.
+
+## Candidate installation and evidence checkpoint
+
+- Focused runs [45655931490](https://github.com/Qrayyt/Galen/actions/runs/45655931490), [45656114203](https://github.com/Qrayyt/Galen/actions/runs/45656114203), and [45656786788](https://github.com/Qrayyt/Galen/actions/runs/45656786788) succeeded on 08b1c6a, 299daf8, and 6915398 respectively. Candidate [45655931560](https://github.com/Qrayyt/Galen/actions/runs/45655931560) backend and frontend jobs succeeded; Windows packaging was still in progress at inspection. Later source needs its own results.
+- Added an installed-package gate on GitHub-hosted Windows: fresh silent install, installed executable presence and CLI version, same-version reinstall, uninstall, and synthetic profile sentinel preservation. Logs and result are saved independently of the candidate artifact. The test refuses non-hosted runners and pre-existing profiles. It is not an interactive desktop smoke or a previous-version migration test; neither is claimed complete.
+- Remaining: latest candidate checks, provider/runtime and interactive desktop acceptance, safe CLI-bound conversion, legacy migration acceptance, and live GLNT deployment/publisher authorization after storage capacity is resolved. No release published.
