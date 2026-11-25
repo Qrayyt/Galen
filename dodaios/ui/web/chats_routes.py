@@ -520,6 +520,7 @@ def search_voice_archive(
         except Exception:  # noqa: BLE001 - cached title is optional
             title = ""
         row = _voice_session_to_summary(session, title)
+        row.project_id = chat_store.get_voice_project(sid)
         if needle in row.title.casefold():
             rows.append(row)
             continue
@@ -567,13 +568,16 @@ def list_conversations(
         or (project_id == "none" and t.get("project_id") is None)
         or t.get("project_id") == project_id
     ]
-    if session_store is not None and project_id in {None, "none"}:
+    if session_store is not None:
         try:
             sessions = session_store.list_sessions(limit=limit, include_empty=False)
             titles = _voice_titles(request, sessions, chat_store, session_store)
             for s in sessions:
                 title = titles.get((chat_titles.KIND_VOICE, str(s.id)), "")
-                items.append(_voice_session_to_summary(s, title))
+                row = _voice_session_to_summary(s, title)
+                row.project_id = chat_store.get_voice_project(str(s.id))
+                if project_id is None or (project_id == "none" and row.project_id is None) or row.project_id == project_id:
+                    items.append(row)
         except Exception as exc:  # noqa: BLE001 — voice list must never 500 the page
             log.warning("voice session list failed, showing text-only: %s", exc)
 
@@ -740,10 +744,35 @@ async def get_conversation(
         title=_conversation_title(request, kind, cid, chat_store, session_store),
         messages=messages,
         mode=(metadata or {}).get("mode", CHAT_MODE_CHAT),
-        project_id=(metadata or {}).get("project_id"),
+        project_id=chat_store.get_voice_project(cid) if kind == CONVERSATION_KIND_VOICE else (metadata or {}).get("project_id"),
         draft=(metadata or {}).get("draft", ""),
         state=(metadata or {}).get("state", {}),
     )
+
+
+class VoiceProjectBody(BaseModel):
+    project_id: str | None = Field(max_length=200)
+
+
+@router.patch("/voice/{cid}/project")
+def move_voice_conversation(cid: str, body: VoiceProjectBody, request: Request) -> dict[str, Any]:
+    """Move a completed archive without touching its recording or transcript."""
+    from dodaios.ui.web.voice_runtime import voice_engine_status
+    from dodaios.live.runtime import owns_microphone
+
+    session_store = _optional_session_store(request)
+    session = session_store.get_session(cid) if session_store is not None else None
+    if session is None:
+        raise HTTPException(404, "conversation-not-found")
+    voice = voice_engine_status(request)
+    if getattr(session, "ended_ms", None) is None or voice.get("session_active") or voice.get("transitioning") or owns_microphone():
+        raise HTTPException(409, "End the voice call before moving an archive")
+    store = _require_chat_store(request)
+    try:
+        store.set_voice_project(cid, body.project_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"id": cid, "project_id": store.get_voice_project(cid)}
 
 
 @router.patch("/text/{cid}", response_model=ConversationDetail)
@@ -791,6 +820,12 @@ async def resume_conversation(
     if brain is not None and hasattr(brain, "seed_history"):
         pairs = _seed_pairs(messages)
         brain.seed_history(pairs)
+        # A proven archive binding supplies both its fresh history and project.
+        # Unbound explicit resume seeds remain project-free.
+        svc = getattr(request.app.state, "agent_chat", None)
+        drop = getattr(brain, "drop_voice_history_seed", None)
+        if kind == CONVERSATION_KIND_VOICE and svc is not None and getattr(svc, "voice_session_continued", None) == cid and callable(drop):
+            drop()
         seeded = len(pairs)
 
     return ResumeResponse(

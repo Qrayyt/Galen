@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UnifiedChatSidebar } from "./UnifiedChatSidebar";
 
 const mock = vi.hoisted(() => ({
-  fetchSessions: vi.fn(), fetchProjects: vi.fn(), search: vi.fn(), searchVoice: vi.fn(),
+  fetchSessions: vi.fn(), fetchProjects: vi.fn(), search: vi.fn(), searchVoice: vi.fn(), moveVoice: vi.fn(), invalidateConversations: vi.fn(),
   patchProject: vi.fn(), deleteProject: vi.fn(), createProject: vi.fn(),
   patchSession: vi.fn(), deleteSession: vi.fn(),
   newChat: vi.fn(), newThread: vi.fn(), setLayout: vi.fn(), setSection: vi.fn(),
@@ -19,7 +19,7 @@ vi.mock("@/components/home/chatRows", () => ({
   chatRowLabel: (row: { title: string }) => ({ text: row.title, untitled: false }),
 }));
 vi.mock("@/lib/chatsApi", () => ({
-  fetchChatProjects: mock.fetchProjects, createChatProject: mock.createProject, searchVoiceArchive: mock.searchVoice,
+  fetchChatProjects: mock.fetchProjects, createChatProject: mock.createProject, searchVoiceArchive: mock.searchVoice, moveVoiceConversation: mock.moveVoice, invalidateConversations: mock.invalidateConversations,
   patchChatProject: mock.patchProject, deleteChatProject: mock.deleteProject,
 }));
 vi.mock("@/lib/agentChatApi", () => ({
@@ -50,6 +50,7 @@ beforeEach(() => {
   mock.fetchSessions.mockResolvedValue([session]);
   mock.search.mockResolvedValue([]);
   mock.searchVoice.mockResolvedValue([]);
+  mock.moveVoice.mockResolvedValue(undefined);
   mock.patchProject.mockResolvedValue(project);
   mock.deleteProject.mockResolvedValue(undefined);
 });
@@ -89,6 +90,18 @@ describe("unified history and project controls", () => {
     expect(mock.searchVoice).toHaveBeenCalledWith("matching", expect.any(AbortSignal), 100);
     expect(mock.openChat).toHaveBeenCalledWith(expect.objectContaining({ kind: "voice", id: "archived" }));
     expect(mock.openWork).not.toHaveBeenCalled();
+  });
+
+  it("moves an archive into a project with explicit confirmation", async () => {
+    mock.searchVoice.mockResolvedValue([{ kind: "voice", id: "archived", title: "Voice call", preview: "matching", updated_ms: 2, created_ms: 1, message_count: 4 }]);
+    render(<UnifiedChatSidebar />);
+    fireEvent.change(screen.getByPlaceholderText("all_chats.search_placeholder"), { target: { value: "matching" } });
+    const row = (await screen.findByRole("button", { name: /Voice call/ })).closest("li")!;
+    fireEvent.change(within(row).getByRole("combobox", { name: "ide_threads.projects" }), { target: { value: "p1" } });
+    expect(mock.moveVoice).not.toHaveBeenCalled();
+    fireEvent.click(within(row).getByRole("button", { name: "common.apply" }));
+    await waitFor(() => expect(mock.moveVoice).toHaveBeenCalledWith("archived", "p1"));
+    expect(within(await screen.findByRole("region", { name: "Galen" })).getByRole("button", { name: /Voice call/ })).toBeTruthy();
   });
 
   it("edits an icon and asks for deliberate confirmation before removing project metadata", async () => {

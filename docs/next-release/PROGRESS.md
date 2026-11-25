@@ -442,3 +442,8 @@ starting the scoped project-context injection block.
 ## Voice archive search implementation
 
 - Added a local paginated voice search route over normalized archived transcripts and cached titles, including realtime captions; no new title generation, external model requests, or project changes. Sidebar now searches Chat, Work and voice archives with one abortable query and opens archived results using their original voice identity. Added backend and frontend focused fixtures. Task 4 pending CI and large-history performance acceptance.
+
+## Voice archive project association checkpoint
+
+- Risk: a voice archive association must not rewrite recordings, discard transcripts, or apply a different project's instructions to a running call. Safeguards: separate additive link table in chats.db with cascading unlink on project removal; only finished archives can move and active voice calls block movement. Runtime resolves an archive's project from its durable association per newly captured call, and discards stale explicit seeds upon rebinding. The sidebar exposes a confirmed move for archives, preserving voice identity; search and history include project metadata.
+- Added route and scoped archive seed fixtures. Task 14 remains pending CI; classic pipeline and direct explicit-seed path still need acceptance. No release/server changes.

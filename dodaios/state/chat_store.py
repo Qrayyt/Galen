@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS chat_projects (
     created_at_ns       INTEGER NOT NULL,
     updated_at_ns       INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS voice_project_links (
+    voice_session_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES chat_projects(project_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_voice_project_links_project ON voice_project_links(project_id);
 CREATE TABLE IF NOT EXISTS chat_app_state (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
@@ -527,6 +532,24 @@ class ChatStore:
                 values,
             )
         return self.get_thread(thread_id) if cur.rowcount else None
+
+    def get_voice_project(self, voice_session_id: str) -> str | None:
+        conn = self._ensure_conn()
+        with self._lock:
+            row = conn.execute("SELECT project_id FROM voice_project_links WHERE voice_session_id = ?", (voice_session_id,)).fetchone()
+        return str(row["project_id"]) if row is not None else None
+
+    def set_voice_project(self, voice_session_id: str, project_id: str | None) -> None:
+        """Associate metadata only; never modify or delete archived voice recordings."""
+        conn = self._ensure_conn()
+        with self._lock:
+            if project_id is None:
+                conn.execute("DELETE FROM voice_project_links WHERE voice_session_id = ?", (voice_session_id,))
+                return
+            if conn.execute("SELECT 1 FROM chat_projects WHERE project_id = ?", (project_id,)).fetchone() is None:
+                raise ValueError("project-not-found")
+            conn.execute("INSERT INTO voice_project_links (voice_session_id, project_id) VALUES (?, ?) "
+                         "ON CONFLICT(voice_session_id) DO UPDATE SET project_id = excluded.project_id", (voice_session_id, project_id))
 
     # ------- Projects --------------------------------------------------
     def list_projects(self) -> list[dict[str, Any]]:

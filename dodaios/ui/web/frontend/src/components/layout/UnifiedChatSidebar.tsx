@@ -19,6 +19,8 @@ import {
   deleteChatProject,
   fetchChatProjects,
   searchVoiceArchive,
+  moveVoiceConversation,
+  invalidateConversations,
   patchChatProject,
   type ChatProject,
 } from "@/lib/chatsApi";
@@ -76,6 +78,7 @@ export function UnifiedChatSidebar() {
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [query, setQuery] = useState("");
+  const [voiceProjectOverrides, setVoiceProjectOverrides] = useState<Record<string, string>>({});
   const [hits, setHits] = useState<{ query: string; rows: Array<ChatSearchHit & { mode: "chat" | "work" }>; voice: ConversationSummary[]; failed: boolean } | null>(null);
   const [newMode, setNewMode] = useState<"chat" | "work">(activeSection === "agentic-ide" ? "work" : "chat");
   const [creatingProject, setCreatingProject] = useState(false);
@@ -136,10 +139,10 @@ export function UnifiedChatSidebar() {
   );
 
   const rows = useMemo<UnifiedRow[]>(() => {
-    const known = new Map(chatRows.filter((row) => row.kind === "voice" || sessionsById.get(row.id)?.surface !== "agent").map((row) => [row.id, row]));
+    const known = new Map(chatRows.filter((row) => row.kind === "voice" || sessionsById.get(row.id)?.surface !== "agent").map((row) => [`${row.kind}:${row.id}`, row]));
     for (const session of sessions) {
-      if (session.surface !== "jarvis" || known.has(session.session_id)) continue;
-      known.set(session.session_id, { kind: "agent", id: session.session_id, title: session.title, preview: session.preview,
+      if (session.surface !== "jarvis" || known.has(`agent:${session.session_id}`)) continue;
+      known.set(`agent:${session.session_id}`, { kind: "agent", id: session.session_id, title: session.title, preview: session.preview,
         updatedMs: session.updated_ms, messageCount: session.message_count, provider: session.provider, raw: null });
     }
     const chats = [...known.values()].map((row) => {
@@ -151,7 +154,7 @@ export function UnifiedChatSidebar() {
         title: label.text,
         preview: row.preview,
         updatedMs: row.updatedMs,
-        projectId: session?.project_id ?? "",
+        projectId: row.kind === "voice" ? voiceProjectOverrides[row.id] ?? row.raw?.project_id ?? "" : session?.project_id ?? "",
         chat: row,
         session,
       };
@@ -168,7 +171,7 @@ export function UnifiedChatSidebar() {
         session,
       }));
     return [...chats, ...work].sort((a, b) => b.updatedMs - a.updatedMs);
-  }, [chatRows, sessions, sessionsById, t]);
+  }, [chatRows, sessions, sessionsById, t, voiceProjectOverrides]);
 
   const rowKey = (row: UnifiedRow) => `${row.chat?.kind === "voice" ? "voice" : row.mode}:${row.id}`;
   const visible = useMemo(() => {
@@ -188,10 +191,10 @@ export function UnifiedChatSidebar() {
     for (const hit of hits?.query === needle ? hits.voice : []) {
       const chat: ChatRow = { kind: "voice", id: hit.id, title: hit.title, preview: hit.preview, updatedMs: hit.updated_ms, messageCount: hit.message_count, provider: "", raw: hit };
       const existing = byKey.get(`voice:${hit.id}`);
-      results.set(`voice:${hit.id}`, { id: hit.id, mode: "chat", title: existing?.title ?? chatRowLabel(chat, t).text, preview: hit.preview, updatedMs: hit.updated_ms, projectId: "", chat, session: null });
+      results.set(`voice:${hit.id}`, { id: hit.id, mode: "chat", title: existing?.title ?? chatRowLabel(chat, t).text, preview: hit.preview, updatedMs: hit.updated_ms, projectId: voiceProjectOverrides[hit.id] ?? hit.project_id ?? "", chat, session: null });
     }
     return [...results.values()].sort((a, b) => b.updatedMs - a.updatedMs);
-  }, [needle, rows, hits, t]);
+  }, [needle, rows, hits, t, voiceProjectOverrides]);
 
   const ungrouped = visible.filter((row) => !row.projectId || !projects.some((project) => project.project_id === row.projectId));
   const start = (projectId?: string) => {
@@ -253,15 +256,22 @@ export function UnifiedChatSidebar() {
     setBusy(true);
     try {
       await deleteChatProject(project.project_id);
+      invalidateConversations();
+      setVoiceProjectOverrides(previous => Object.fromEntries(Object.entries(previous).map(([id, pid]) => [id, pid === project.project_id ? "" : pid])));
       setConfirmProject(null);
       await refresh();
     } catch { pushToast("error", t("common.delete_failed")); } finally { setBusy(false); }
   };
 
   const moveRow = async (row: UnifiedRow, projectId: string) => {
-    if (!row.session) return;
+    if (!row.session && row.chat?.kind !== "voice") return;
     try {
-      await patchAgentChatSession(row.id, { project_id: projectId });
+      if (row.chat?.kind === "voice") {
+        await moveVoiceConversation(row.id, projectId || null);
+        setVoiceProjectOverrides(previous => ({ ...previous, [row.id]: projectId }));
+      } else {
+        await patchAgentChatSession(row.id, { project_id: projectId });
+      }
       await refresh();
     } catch { pushToast("error", t("common.save_failed")); }
   };
@@ -475,7 +485,7 @@ function HistoryRow({ row, projects, active, onOpen, onMove, onDelete, t }: {
         </span>
       </button>
       <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-secondary p-0.5 group-hover:flex group-focus-within:flex">
-        {row.session && (
+        {(row.session || row.chat?.kind === "voice") && (
           <select value={row.projectId} onChange={(event) => { if (event.target.value !== row.projectId) setPending({ kind: "move", projectId: event.target.value }); }} aria-label={t("ide_threads.projects")}
             className="h-6 max-w-20 rounded border border-border bg-background px-1 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <option value="">—</option>

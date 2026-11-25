@@ -410,3 +410,23 @@ async def test_voice_archive_search_matches_later_reply_and_preserves_kind() -> 
         assert page["next_offset"] is None
         assert (await client.get("/api/chats/voice-search", params={"q": "unmatched"})).json()["rows"] == []
         assert (await client.get("/api/chats/voice-search", params={"q": "sunny", "offset": 100})).json()["rows"] == []
+
+
+async def test_voice_archive_project_move_search_and_safe_delete() -> None:
+    app, store = await _make_app(with_session=True)
+    a = store.create_project(name="A")["id"]
+    b = store.create_project(name="B")["id"]
+    async with _client(app) as client:
+        endpoint = "/api/chats/voice/v1/project"
+        assert (await client.patch(endpoint, json={"project_id": "missing"})).status_code == 404
+        assert (await client.patch(endpoint, json={"project_id": a})).status_code == 200
+        assert (await client.get("/api/chats/voice/v1")).json()["project_id"] == a
+        assert (await client.get("/api/chats/voice-search", params={"q": "sunny"})).json()["rows"][0]["project_id"] == a
+        assert (await client.get("/api/chats", params={"project_id": a})).json()[0]["id"] == "v1"
+        assert (await client.patch(endpoint, json={"project_id": b})).status_code == 200
+        assert (await client.get("/api/chats", params={"project_id": a})).json() == []
+        assert (await client.delete("/api/chats/projects/" + b)).status_code == 200
+        detail = (await client.get("/api/chats/voice/v1")).json()
+        assert detail["project_id"] is None
+        assert [m["text"] for m in detail["messages"]] == ["how is the weather", "Sunny."]
+        assert (await client.patch("/api/chats/voice/missing/project", json={"project_id": a})).status_code == 404

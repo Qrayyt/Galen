@@ -403,3 +403,28 @@ def test_voice_project_seed_and_first_turn_remain_in_original_project(tmp_path: 
         assert len(svc.store.list_events(created[0].session_id)) == 4
 
     asyncio.run(scenario())
+
+
+def test_archived_voice_context_uses_current_project_link(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        svc = _service(tmp_path)
+        projects = {"a": {"id": "a", "instructions": "private-a"}, "b": {"id": "b", "instructions": "private-b"}}
+        links = {"archive": "a"}
+        svc.project_lookup = projects.get
+        svc.voice_archive_project_lookup = links.get
+        svc.bind_voice_chat(None, voice_session="archive", voice_history=lambda: [("user", "archived history")])
+        try:
+            history, brief = svc.voice_context_seed("archive-call-a")
+            assert history == [("user", "archived history")]
+            assert "private-a" in brief and "private-b" not in brief
+            links["archive"] = "b"
+            _, brief = svc.voice_context_seed("archive-call-b")
+            assert "private-b" in brief and "private-a" not in brief
+            del projects["b"]
+            assert svc.voice_context_seed("archive-call-c")[1] == ""
+            svc.bind_voice_chat(None)
+            assert svc.voice_context_seed("fresh-call") == ([], "")
+        finally:
+            svc.bind_voice_chat(None)
+
+    asyncio.run(scenario())

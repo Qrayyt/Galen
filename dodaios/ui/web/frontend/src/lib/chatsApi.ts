@@ -126,6 +126,16 @@ export async function searchVoiceArchive(query: string, signal: AbortSignal, lim
   return rows.sort((a, b) => b.updated_ms - a.updated_ms).slice(0, limit);
 }
 
+export async function moveVoiceConversation(id: string, projectId: string | null): Promise<void> {
+  const res = await fetch(`/api/chats/voice/${encodeURIComponent(id)}/project`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ project_id: projectId }),
+  });
+  if (!res.ok) throw new ChatsApiError("voice-project-move-failed", res.status);
+  invalidateConversations();
+}
+
 export async function patchTextConversation(
   id: string,
   input: { title?: string; mode?: "chat" | "work"; project_id?: string | null; draft?: string; state?: Record<string, unknown> },

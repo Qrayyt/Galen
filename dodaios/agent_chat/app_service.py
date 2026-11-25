@@ -32,7 +32,12 @@ def bind_project_lookup(svc: AgentChatService, state: Any) -> AgentChatService:
         store = getattr(state, "chat_store", None)
         return store.get_project(project_id) if store is not None else None
 
+    def archive_project(voice_session_id: str) -> str | None:
+        store = getattr(state, "chat_store", None)
+        return store.get_voice_project(voice_session_id) if store is not None and hasattr(store, "get_voice_project") else None
+
     svc.project_lookup = lookup
+    svc.voice_archive_project_lookup = archive_project
     return svc
 
 

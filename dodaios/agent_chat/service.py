@@ -627,6 +627,7 @@ class AgentChatService:
     ) -> None:
         self.store = store
         self.project_lookup: Callable[[str], dict[str, Any] | None] | None = None
+        self.voice_archive_project_lookup: Callable[[str], str | None] | None = None
         self._assistant_name = assistant_name or (lambda: DEFAULT_ASSISTANT_NAME)
         self._default_cwd = default_cwd or (lambda: str(Path.home()))
         # The app bus, resolved late (the server builds this service before
@@ -2784,10 +2785,11 @@ class AgentChatService:
             remember = getattr(self.store, "set_lead_session_id", None)
             if callable(remember):
                 remember(session_id)
-        if not archived or session_id:
-            drop = getattr(brain, "drop_voice_history_seed", None)
-            if callable(drop):
-                drop()
+        # Every new binding has an authoritative history source, including an
+        # archive. Do not retain a possibly unrelated explicit voice seed.
+        drop = getattr(brain, "drop_voice_history_seed", None)
+        if callable(drop):
+            drop()
         attach = getattr(brain, "set_voice_history_source", None)
         if callable(attach):
             attach(self.voice_chat_history)
@@ -2814,6 +2816,9 @@ class AgentChatService:
             session_id = session.session_id if session else None
         if session is not None:
             project_id = getattr(session, "project_id", None)
+        if archived:
+            lookup = getattr(self, "voice_archive_project_lookup", None)
+            project_id = lookup(archived) if callable(lookup) else None
         scope = {"session_id": session_id, "project_id": project_id, "archived": bool(archived), "binding": binding}
         if call_id:
             scopes = self._voice_call_scopes
@@ -2821,7 +2826,8 @@ class AgentChatService:
                 scopes.pop(next(iter(scopes)))
             scopes[call_id] = scope
         if archived:
-            return (archive() if archive is not None else []), ""
+            brief = project_brief(SimpleNamespace(project_id=project_id, surface="jarvis"), self.project_lookup)
+            return (archive() if archive is not None else []), brief
         if session_id and (session is None or session.surface != "jarvis"):
             return [], ""
         history = []
