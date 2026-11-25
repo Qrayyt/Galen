@@ -241,6 +241,13 @@ export function Sidebar({
             needs the person (`NavRail`). The assistant's
             own panel stands to the right of the conversation. */}
         {onConversationSection && !railed ? <UnifiedChatSidebar />
+          : onIdeSection && threadLayout && !railed ? <>
+            <UnifiedChatSidebar />
+            <details className="shrink-0 border-t border-border px-2 py-1">
+              <summary className="cursor-pointer px-1 py-2 text-xs font-medium text-muted-foreground">{t("ide_threads.connect_a_project")}</summary>
+              <div className="max-h-64 overflow-y-auto"><LazyIdeProjectTree /></div>
+            </details>
+          </>
           : !onIdeSection ? <NavRail searchOn={searchBarOn} />
           : railed ? <nav aria-label={t("sidebar.ide_navigation")} className="px-2 pt-2">
           <div className="flex flex-col items-center gap-1">
