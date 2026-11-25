@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 
 type Item = { id: string; name: string; title: string; description: string; type: string;
   version: string; min_galen: string; category: string; author: string; repository_url: string;
-  commit: string; manifest_sha256: string; permissions: string[]; local_status?: string };
+  commit: string; manifest_sha256: string; permissions: string[]; local_status?: string; installed_version?: string | null };
 type Page = { configured: boolean; items: Item[]; staged: Item[]; stale: boolean; next_offset: number | null };
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -101,8 +101,11 @@ export function GlntCatalogPanel({ onClose, onSignIn, signedIn }: {
     <h2 className="font-semibold">Локальные проверенные пакеты</h2>
     {page?.staged.length === 0 && <p className="text-sm text-muted-foreground">Пока пусто.</p>}
     {page?.staged.map(item => <div key={item.type + item.name} className="flex items-center justify-between gap-3 rounded-lg border border-border p-3">
-      <div><p className="text-sm font-medium">{item.title} · {item.version}</p><p className="text-xs text-muted-foreground">Скачан и проверен · не активирован</p></div>
-      <Button variant="outline" disabled={busy} onClick={() => void run(() => call("staged/" + item.type + "/" + item.name, {method:"DELETE"}), "Локальный пакет удалён.")}>Удалить</Button>
+      <div><p className="text-sm font-medium">{item.title} · {item.version}</p><p className="text-xs text-muted-foreground">{item.installed_version ? "Установлена версия " + item.installed_version : "Скачан и проверен · не установлен"}</p></div>
+      <div className="flex flex-wrap gap-2"><Button disabled={busy || !page.configured || page.stale || item.installed_version === item.version} onClick={() => {
+        if (!window.confirm("Установить " + item.title + " " + item.version + "? Разрешения: " + (item.permissions.join(", ") || "нет") + ". Плагин останется отключённым, навык — черновиком.")) return;
+        void run(() => call("install", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:item.name,kind:item.type,commit:item.commit,consent:true})}), "Установлено. Включение доступно отдельно в Плагинах или Навыках.");
+      }}>{item.installed_version ? "Обновить" : "Установить"}</Button><Button variant="outline" disabled={busy} onClick={() => void run(() => call("staged/" + item.type + "/" + item.name, {method:"DELETE"}), "Локальный пакет удалён.")}>Удалить архив</Button></div>
     </div>)}
     {page?.configured && <div className="space-y-2 rounded-lg border border-border p-4">
       <h2 className="font-semibold">Предложить расширение</h2>

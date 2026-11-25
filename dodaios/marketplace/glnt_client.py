@@ -165,3 +165,21 @@ def remove(db: Path, name: str, kind: str):
         raise ValueError("Invalid package identity")
     with database(db) as con:
         return bool(con.execute("DELETE FROM staged WHERE name=? AND kind=?", (name, kind)).rowcount)
+
+
+def read_staged(db: Path, name: str, kind: str, commit: str):
+    if not SLUG.fullmatch(name) or kind not in ("plugin", "skill") or not SHA.fullmatch(commit):
+        raise ValueError("Invalid package identity")
+    with database(db) as con:
+        row = con.execute("SELECT metadata,archive FROM staged WHERE name=? AND kind=?", (name, kind)).fetchone()
+    if row is None:
+        raise ValueError("Download the package first")
+    item, raw = json.loads(row[0]), row[1]
+    if item["commit"] != commit or hashlib.sha256(raw).hexdigest() != item["archive_sha256"]:
+        raise ValueError("Local package changed; review and download again")
+    manifest, files = read_package(raw, item["manifest_sha256"])
+    if (manifest.name, manifest.kind, manifest.version, manifest.min_galen, set(manifest.permissions)) != (
+        name, kind, item["version"], item["min_galen"], set(item["permissions"])
+    ) or Version(__version__) < Version(manifest.min_galen):
+        raise ValueError("Incompatible or mismatched package")
+    return validate_entry(item), manifest, files

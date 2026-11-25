@@ -2129,7 +2129,7 @@ async def community_uninstall(plugin_id: str) -> dict[str, Any]:
     spec = load_catalog().by_id(plugin_id)
     if spec is None:
         raise HTTPException(status_code=404, detail=f"plugin {plugin_id!r} not in catalog")
-    if spec.source not in ("community", LOCAL_PLUGIN_SOURCE):
+    if spec.source not in ("community", LOCAL_PLUGIN_SOURCE, "glnt"):
         raise HTTPException(
             status_code=409,
             detail=f"{plugin_id!r} is a built-in plugin — disconnect it instead of uninstalling",
@@ -2485,6 +2485,10 @@ async def glnt_browse(q: str = "", kind: str = "", offset: int = 0):
         raise HTTPException(400, "Invalid catalog query")
     base, db = _glnt_settings()
     local = await asyncio.to_thread(staged, db)
+    from dodaios.marketplace.glnt_install import installed_status
+    from dodaios.core.paths import user_skills_dir
+    for item in local:
+        item['installed_version'] = installed_status(item, user_skills_dir())
     if not base:
         return {"configured": False, "items": [], "staged": local, "next_offset": None, "stale": False}
     try:
@@ -2542,3 +2546,46 @@ async def glnt_submit(body: GlntSubmitBody):
         return {"id": result["item"]["id"], "status": result["item"]["status"]}
     except (ValueError, KeyError, httpx.HTTPError):
         raise HTTPException(400, "GLNT submission failed; check repository access and manifest")
+
+
+class GlntInstallBody(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+    kind: str = Field(pattern=r"^(plugin|skill)$")
+    commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+    consent: bool = False
+
+
+@router.post("/glnt/install", openapi_extra={"x-jarvis-dangerous": True})
+async def glnt_install(body: GlntInstallBody, request: Request):
+    from dodaios.marketplace.glnt_client import read_staged, request_json, validate_entry
+    from dodaios.marketplace.glnt_install import register_plugin, register_skill
+    from dodaios.core.paths import user_skills_dir
+    from dodaios.ui.web.skills_routes import _require_registry
+    if not body.consent:
+        raise HTTPException(400, "Explicit installation consent required")
+    base, db = _glnt_settings()
+    try:
+        item, manifest, files = await asyncio.to_thread(read_staged, db, body.name, body.kind, body.commit)
+        approved = validate_entry((await request_json(base, "/v1/catalog/" + item["id"]))["item"])
+        if approved != item:
+            raise ValueError("Approval or package metadata changed")
+        if body.kind == "plugin":
+            result = register_plugin(item, manifest, files)
+            _refresh_plugin_in_live_registry(body.name)
+        else:
+            registry = _require_registry(request)
+            # Existing registry names outside the managed directory cannot be overwritten.
+            try:
+                existing = registry.get(body.name)
+            except KeyError:
+                existing = None
+            if existing is not None and existing.root.resolve() != (user_skills_dir() / body.name).resolve():
+                raise ValueError("Skill name is already registered")
+            result = await asyncio.to_thread(register_skill, item, manifest, files, user_skills_dir())
+            try:
+                await registry.reload()
+            except Exception:
+                result["warning"] = "Skill installed as draft; restart to reload registry"
+        return result
+    except (ValueError, KeyError, TypeError, OSError, httpx.HTTPError) as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "GLNT installation failed")
