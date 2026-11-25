@@ -2257,6 +2257,7 @@ class RealtimeVoiceSession:
         self._delegate_turns: dict[str, _DelegateTurnState] = {}
         self._delegate_history: list[BrainMessage] = []
         self._resume_history_loaded = False
+        self._project_context = ""
         self._announcement_context_signatures: list[tuple[str, str, str]] = []
         self._delegate_required_for_turn = False
         self._delegate_reply_awaits_answer = False
@@ -3134,8 +3135,12 @@ class RealtimeVoiceSession:
                 self._transport_offer_sdp = offer_sdp
             if self._session is None:
                 if not self._resume_history_loaded:
+                    take_context = getattr(self._brain, "take_voice_context_seed", None)
                     take_seed = getattr(self._brain, "take_voice_history_seed", None)
-                    if callable(take_seed):
+                    if callable(take_context):
+                        seed, self._project_context = await asyncio.to_thread(take_context, self.session_id)
+                        self._delegate_history = [message for message in seed if message.role in {"user", "assistant"}]
+                    elif callable(take_seed):
                         # Seed BEFORE the provider handshake, not just the text
                         # brain. The same history grounds later tool delegation
                         # and transport reconnects on every voice surface.
@@ -3415,7 +3420,7 @@ class RealtimeVoiceSession:
                         getattr(provider, "prefers_compact_instructions", False)
                     ),
                     history_lost=self._suppress_history_seed,
-                ),
+                ) + ("\n\n" + self._project_context if self._project_context else ""),
                 language=self._language,
                 input_language=self._input_language,
                 language_is_pinned=self._language_is_pinned,
@@ -5046,7 +5051,7 @@ class RealtimeVoiceSession:
                                     self, "_compact_instructions", False
                                 ),
                                 history_lost=self._suppress_history_seed,
-                            ),
+                            ) + ("\n\n" + self._project_context if self._project_context else ""),
                             "language": new_language,
                             # For append-only transports: ONLY the turn-scoped
                             # mode line, never the standing role. The role is
@@ -6913,7 +6918,7 @@ class RealtimeVoiceSession:
                     skills_directive=self._skills_directive(),
                     compact=getattr(self, "_compact_instructions", False),
                     history_lost=self._suppress_history_seed,
-                ),
+                ) + ("\n\n" + self._project_context if self._project_context else ""),
                 language=self._language,
             )
             if self._executed_tool_names:
@@ -12568,6 +12573,7 @@ class RealtimeVoiceSession:
                 "publish_response": False,
                 "use_history": False,
                 "history_override": tuple(self._delegate_history),
+                "voice_project_context": self._project_context,
                 # This session already resolved the turn's output language
                 # (self._language drives our own model reply and the recorded
                 # jarvis_lang). Hand that decision to the delegate so a

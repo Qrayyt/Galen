@@ -397,3 +397,7 @@ starting the scoped project-context injection block.
 
 - Skill staging and previous versions now live outside the recursively scanned skills directory; nested skill entry points are refused, updates recheck ownership and local file hashes before publishing. Previous versions are retained in `.glnt-recovery` for manual recovery.
 - GLNT uninstall requires explicit consent, verifies source ownership, delegates plugin revocation to the existing native manager, and quarantines skill directories intact outside the scanner (including local edits). UI retains the archive receipt while an extension is installed. Added focused quarantine and endpoint fixtures. Live registry acceptance remains pending.
+
+## Voice call project scope
+
+- Captures history and project briefing together at realtime/live call startup; per-call instructions survive reconnects and are passed to delegated brain turns via a task-local parameter. Explicit resume seeds without proven project association receive no project briefing. A first-turn mirror uses its captured binding, not a different chat selected mid-call; a moved or deleted captured conversation is not redirected to an unrelated chat. Classic pipeline and complete voice integration regression remain outstanding.

@@ -64,11 +64,12 @@ class VoiceChatMirror:
             svc = self._get_service()
             if svc is None:
                 return
-            if getattr(svc, "voice_session_continued", None):
+            call_id = str(getattr(event, "session_id", "") or "")
+            scope = getattr(svc, "voice_call_scope", lambda _id: None)(call_id)
+            if (scope is not None and scope["archived"]) or (scope is None and getattr(svc, "voice_session_continued", None)):
                 # An archived voice chat is on stage: the recorder files this
                 # turn into that row, and a typed copy would be a second chat.
                 return
-            call_id = str(getattr(event, "session_id", "") or "")
             session = self._target_session(svc, call_id, event)
             if session is None:
                 return
@@ -96,6 +97,29 @@ class VoiceChatMirror:
         lead's one conversation (``agent_chat/lead.py``), created on first use.
         """
         try:
+            scope = getattr(svc, "voice_call_scope", lambda _id: None)(call_id)
+            pinned = getattr(svc, "voice_call_chat", lambda _id: None)(call_id)
+            if scope is not None:
+                if scope["archived"]:
+                    return None
+                chat_id = pinned or scope["session_id"]
+                if chat_id:
+                    session = svc.store.get_session(chat_id)
+                    # A moved or deleted project must not receive the old call's context.
+                    return session if session is not None and session.surface == SURFACE and getattr(session, "project_id", None) == scope["project_id"] else None
+                project_id = scope["project_id"]
+                if project_id and (not svc.project_lookup or not svc.project_lookup(project_id)):
+                    return None
+                from dodaios.agent_chat.lead import start_session
+                current = svc.voice_scope_is_current(scope)
+                hint = str(getattr(event, "provider", "") or "")
+                session = start_session(svc, provider_hint=hint, project_id=project_id, remember_selection=current)
+                if session is not None and current:
+                    svc.bind_voice_chat(session.session_id)
+                return session
+            if pinned:
+                session = svc.store.get_session(pinned)
+                return session if session is not None and session.surface == SURFACE else None
             for chat_id in (
                 getattr(svc, "voice_call_chat", lambda _c: None)(call_id),
                 getattr(svc, "voice_chat_id", None),

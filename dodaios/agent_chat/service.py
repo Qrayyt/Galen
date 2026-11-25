@@ -723,6 +723,8 @@ class AgentChatService:
         self._voice_chat_id: str | None = None
         self._voice_chat_fresh = False
         self._voice_project_id: str | None = None
+        self._voice_seed_binding: tuple[Any, ...] | None = None
+        self._voice_call_scopes: dict[str, dict[str, Any]] = {}
         self._voice_call_chats: dict[str, str] = {}
         # The archived voice chat's history while one is continued (bind_voice_chat).
         self._voice_archive_history: Callable[[], list[Any]] | None = None
@@ -2748,6 +2750,10 @@ class AgentChatService:
         from dodaios.sessions.continuation import continue_voice_session
 
         brain = runner_brain.brain_manager()
+        if session_id:
+            session = self.store.get_session(session_id)
+            if session is None or session.surface != "jarvis":
+                raise NoSuchSession(session_id)
         archived = (voice_session or "").strip() or None
         if project_id and not session_id and not archived:
             project = self.project_lookup(project_id) if self.project_lookup else None
@@ -2784,7 +2790,51 @@ class AgentChatService:
         attach = getattr(brain, "set_voice_history_source", None)
         if callable(attach):
             attach(self.voice_chat_history)
+        self._voice_seed_binding = (self._voice_chat_id, self._voice_chat_fresh, self._voice_project_id,
+                                    archived if session_id is None else None, self._voice_archive_history)
+        attach_context = getattr(brain, "set_voice_context_source", None)
+        if callable(attach_context):
+            attach_context(self.voice_context_seed)
         return self._voice_chat_id
+
+    def voice_context_seed(self, call_id: str) -> tuple[list[Any], str]:
+        """Capture one call's history and project together, before opening its provider."""
+        from types import SimpleNamespace
+        from dodaios.agent_chat import lead
+        from dodaios.agent_chat.project_context import project_brief
+
+        binding = getattr(self, "_voice_seed_binding", None)
+        if binding is None:
+            return self.voice_chat_history(), ""
+        session_id, fresh, project_id, archived, archive = binding
+        session = self.store.get_session(session_id) if session_id else None
+        if not session_id and not fresh and not archived:
+            session = lead.lead_session(self, create=False)
+            session_id = session.session_id if session else None
+        if session is not None:
+            project_id = getattr(session, "project_id", None)
+        scope = {"session_id": session_id, "project_id": project_id, "archived": bool(archived), "binding": binding}
+        if call_id:
+            scopes = self._voice_call_scopes
+            if len(scopes) >= 200:
+                scopes.pop(next(iter(scopes)))
+            scopes[call_id] = scope
+        if archived:
+            return (archive() if archive is not None else []), ""
+        if session_id and (session is None or session.surface != "jarvis"):
+            return [], ""
+        history = []
+        if session is not None:
+            events = self.store.list_events(session.session_id)
+            history = lead.voice_history(session.session_id, events) if lead.is_lead(self, session.session_id) else brain_history_from_events(events)
+        brief = project_brief(session or SimpleNamespace(project_id=project_id, surface="jarvis"), self.project_lookup)
+        return history, brief
+
+    def voice_call_scope(self, call_id: str) -> dict[str, Any] | None:
+        return getattr(self, "_voice_call_scopes", {}).get(call_id)
+
+    def voice_scope_is_current(self, scope: dict[str, Any]) -> bool:
+        return scope.get("binding") is getattr(self, "_voice_seed_binding", None)
 
     def voice_chat_history(self) -> list[Any]:
         """The bound chat's turns as call context — empty when none is bound."""
@@ -2797,7 +2847,9 @@ class AgentChatService:
         if self._voice_chat_fresh:
             return []
         session_id = self._voice_chat_id
-        if not session_id or self.store.get_session(session_id) is None:
+        if session_id and self.store.get_session(session_id) is None:
+            return []
+        if not session_id:
             # Nothing chosen on screen: the call continues the lead's conversation.
             current = lead.lead_session(self)
             session_id = current.session_id if current is not None else None

@@ -268,6 +268,7 @@ class LiveVoiceSession:
         self._timeline_offset = 0
         self._had_unconfirmed_wire = False
         self._initial_seed: list[dict] = []
+        self._project_context = ""
         # An agent report handed to this call: "sent" until the model starts
         # answering it, "started" while it does, then "done" or "failed". The
         # speech pipeline reads the outcome at the next pause, so a report the
@@ -900,6 +901,8 @@ class LiveVoiceSession:
             # that read froze the app window for ~10 s at every call start
             # (live 2026-11-10). Off the loop it costs nothing visible.
             self._initial_seed = await asyncio.to_thread(self._take_initial_context)
+            if self._project_context:
+                config["instructions"] += "\n\n" + self._project_context
             if self._initial_seed:
                 config["input"] = seed_messages(self._initial_seed, [])
 
@@ -1200,12 +1203,17 @@ class LiveVoiceSession:
         from dodaios.core.runtime_refs import get_brain_manager
 
         brain = self._brain or get_brain_manager()
+        take_context = getattr(brain, "take_voice_context_seed", None)
         take = getattr(brain, "take_voice_history_seed", None)
-        if not callable(take):
+        if callable(take_context):
+            history, self._project_context = take_context(self.session_id)
+        elif callable(take):
+            history = take()
+        else:
             return []
         return [
             {"role": message.role, "delta": str(message.content)}
-            for message in take()
+            for message in history
             if message.role in {"user", "assistant"} and message.content
         ]
 

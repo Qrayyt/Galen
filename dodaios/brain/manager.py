@@ -176,6 +176,9 @@ _TURN_OVERRIDE: ContextVar[TurnOverride | None] = ContextVar(
 )
 
 
+_VOICE_PROJECT_CONTEXT: ContextVar[str] = ContextVar("dodaios.brain.voice_project_context", default="")
+
+
 class _SkillTurnState:
     """Task-local mutable state for one manager skill-routing turn."""
 
@@ -4255,6 +4258,9 @@ class BrainManager:
         # briefing for THIS turn only; empty on every other turn.
         if _turn_override is not None and _turn_override.system_extra:
             parts.append(_turn_override.system_extra)
+
+        if _VOICE_PROJECT_CONTEXT.get():
+            parts.append(_VOICE_PROJECT_CONTEXT.get())
 
         # The standing contract: honesty, research-versus-action routing and
         # self-control facts. The assistant's name is in the identity block.
@@ -10466,6 +10472,7 @@ class BrainManager:
         consume_pending_voice_attachments: bool = False,
         turn_override: TurnOverride | None = None,
         language_text: str | None = None,
+        voice_project_context: str = "",
     ) -> str:
         """Generate a turn, optionally leaving its public response event to the caller.
 
@@ -10487,6 +10494,7 @@ class BrainManager:
             tuple(history_override) if history_override is not None else None
         )
         override_token = _TURN_OVERRIDE.set(turn_override)
+        voice_project_token = _VOICE_PROJECT_CONTEXT.set(voice_project_context)
         # Armed ("" = no language yet); _update_turn_language fills it in.
         language_token = TURN_LANGUAGE.set("")
         from dodaios.core.image_references import active_scope
@@ -10536,6 +10544,7 @@ class BrainManager:
             _BRAIN_TURN_STATE.reset(brain_state_token)
             _SKILL_TURN_STATE.reset(skill_token)
             _TURN_OVERRIDE.reset(override_token)
+            _VOICE_PROJECT_CONTEXT.reset(voice_project_token)
             TURN_LANGUAGE.reset(language_token)
             active_scope.reset(image_scope_token)
             _TURN_HISTORY_OVERRIDE.reset(history_token)
@@ -12905,6 +12914,21 @@ class BrainManager:
     def drop_voice_history_seed(self) -> None:
         """Forget an explicit seed nobody consumed, so the source answers instead."""
         self.__dict__.pop("_voice_history_seed", None)
+
+    def set_voice_context_source(self, source: Callable | None) -> None:
+        self._voice_context_source = source
+
+    def take_voice_context_seed(self, call_id: str) -> tuple[tuple[BrainMessage, ...], str]:
+        # Explicit resume data has no proven project association.
+        source = getattr(self, "_voice_context_source", None)
+        if "_voice_history_seed" in self.__dict__ or not callable(source):
+            return self.take_voice_history_seed(), ""
+        try:
+            history, project = source(call_id)
+            return tuple(self._seedable(history)), project
+        except Exception:
+            log.warning("Voice context unavailable; starting without history or project")
+            return (), ""
 
     def take_voice_history_seed(self) -> tuple[BrainMessage, ...]:
         """Consume an explicit resume once, retaining the text brain's history.
