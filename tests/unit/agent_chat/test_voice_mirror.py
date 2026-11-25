@@ -428,3 +428,43 @@ def test_archived_voice_context_uses_current_project_link(tmp_path: Path) -> Non
             svc.bind_voice_chat(None)
 
     asyncio.run(scenario())
+
+
+def test_archived_voice_privacy_survives_detach_project_deletion_and_restart(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+    from dodaios.agent_chat.app_service import bind_project_lookup
+    from dodaios.agent_chat.project_context import private_voice_call
+    from dodaios.core.bus import EventBus
+    from dodaios.state.chat_store import ChatStore
+
+    async def scenario() -> None:
+        path = tmp_path / "voice-privacy.db"
+        store = ChatStore(bus=EventBus(), db_path=path)
+        project = store.create_project(name="Private")
+        pid = project["id"]
+        store.set_voice_project("archive-detached", pid)
+        store.set_voice_project("archive-deleted", pid)
+        store.set_voice_project("archive-detached", None)
+        store.delete_project(pid)
+        store.close()
+
+        store = ChatStore(bus=EventBus(), db_path=path)
+        svc = bind_project_lookup(_service(tmp_path), SimpleNamespace(chat_store=store))
+        try:
+            for archive in ("archive-detached", "archive-deleted"):
+                assert store.get_voice_project(archive) is None
+                assert store.is_private_voice_history(archive)
+                svc.bind_voice_chat(None, voice_session=archive, voice_history=lambda: [("user", "private")])
+                call_id = "new-" + archive
+                assert svc.voice_context_seed(call_id) == ([("user", "private")], "")
+                assert private_voice_call(call_id)
+                assert store.is_private_voice_history(call_id)
+            svc.bind_voice_chat(None, voice_session="unrelated", voice_history=lambda: [])
+            svc.voice_context_seed("unrelated-voice-privacy-fixture")
+            assert not private_voice_call("unrelated-voice-privacy-fixture")
+            assert not store.is_private_voice_history("unrelated-voice-privacy-fixture")
+        finally:
+            svc.bind_voice_chat(None)
+            store.close()
+
+    asyncio.run(scenario())

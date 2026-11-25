@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS voice_project_links (
     project_id TEXT NOT NULL REFERENCES chat_projects(project_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_voice_project_links_project ON voice_project_links(project_id);
+-- Retain only the opaque id, not project contents or the old project id.
+CREATE TABLE IF NOT EXISTS private_voice_histories (
+    voice_session_id TEXT PRIMARY KEY
+);
+CREATE TRIGGER IF NOT EXISTS voice_project_private_insert AFTER INSERT ON voice_project_links
+BEGIN
+    INSERT OR IGNORE INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id);
+END;
+CREATE TRIGGER IF NOT EXISTS voice_project_private_update AFTER UPDATE ON voice_project_links
+BEGIN
+    INSERT OR IGNORE INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id);
+END;
 CREATE TABLE IF NOT EXISTS chat_app_state (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
@@ -144,6 +156,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in have:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("INSERT OR IGNORE INTO private_voice_histories (voice_session_id) SELECT voice_session_id FROM voice_project_links")
     conn.execute("UPDATE chat_threads SET private_project_history = 1 WHERE COALESCE(project_id, '') <> '' AND private_project_history = 0")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS chat_threads_private_insert AFTER INSERT ON chat_threads
         WHEN COALESCE(NEW.project_id, '') <> '' BEGIN
@@ -546,6 +559,22 @@ class ChatStore:
         with self._lock:
             row = conn.execute("SELECT project_id FROM voice_project_links WHERE voice_session_id = ?", (voice_session_id,)).fetchone()
         return str(row["project_id"]) if row is not None else None
+
+    def is_private_voice_history(self, voice_session_id: str) -> bool:
+        conn = self._ensure_conn()
+        with self._lock:
+            return conn.execute(
+                "SELECT 1 FROM private_voice_histories WHERE voice_session_id = ?",
+                (voice_session_id,),
+            ).fetchone() is not None
+
+    def mark_private_voice_history(self, voice_session_id: str) -> None:
+        if not voice_session_id:
+            return
+        conn = self._ensure_conn()
+        with self._lock:
+            conn.execute("INSERT OR IGNORE INTO private_voice_histories VALUES (?)",
+                         (voice_session_id,))
 
     def set_voice_project(self, voice_session_id: str, project_id: str | None) -> None:
         """Associate metadata only; never modify or delete archived voice recordings."""

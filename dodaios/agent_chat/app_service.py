@@ -36,8 +36,20 @@ def bind_project_lookup(svc: AgentChatService, state: Any) -> AgentChatService:
         store = getattr(state, "chat_store", None)
         return store.get_voice_project(voice_session_id) if store is not None and hasattr(store, "get_voice_project") else None
 
+    def archive_is_private(voice_session_id: str) -> bool:
+        store = getattr(state, "chat_store", None)
+        return bool(store is not None and hasattr(store, "is_private_voice_history")
+                    and store.is_private_voice_history(voice_session_id))
+
+    def remember_private_voice(voice_session_id: str) -> None:
+        store = getattr(state, "chat_store", None)
+        if store is not None and hasattr(store, "mark_private_voice_history"):
+            store.mark_private_voice_history(voice_session_id)
+
     svc.project_lookup = lookup
     svc.voice_archive_project_lookup = archive_project
+    svc.voice_archive_private_lookup = archive_is_private
+    svc.remember_private_voice_history = remember_private_voice
     return svc
 
 

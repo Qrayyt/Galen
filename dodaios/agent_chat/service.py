@@ -628,6 +628,8 @@ class AgentChatService:
         self.store = store
         self.project_lookup: Callable[[str], dict[str, Any] | None] | None = None
         self.voice_archive_project_lookup: Callable[[str], str | None] | None = None
+        self.voice_archive_private_lookup: Callable[[str], bool] | None = None
+        self.remember_private_voice_history: Callable[[str], None] | None = None
         self._assistant_name = assistant_name or (lambda: DEFAULT_ASSISTANT_NAME)
         self._default_cwd = default_cwd or (lambda: str(Path.home()))
         # The app bus, resolved late (the server builds this service before
@@ -2819,8 +2821,12 @@ class AgentChatService:
         if archived:
             lookup = getattr(self, "voice_archive_project_lookup", None)
             project_id = lookup(archived) if callable(lookup) else None
-        if project_id or private_project_history(session):
+        archive_private = bool(archived and self.voice_archive_private_lookup
+                               and self.voice_archive_private_lookup(archived))
+        if project_id or private_project_history(session) or archive_private:
             mark_private_voice_call(call_id)
+            if call_id and self.remember_private_voice_history:
+                self.remember_private_voice_history(call_id)
         scope = {"session_id": session_id, "project_id": project_id, "archived": bool(archived), "binding": binding}
         if call_id:
             scopes = self._voice_call_scopes

@@ -16,8 +16,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `8b88b53f`.
-- Latest code checkpoint: private project learning safeguards; added legacy Work migration, rich-document route and Responses API regression fixtures.
+  `acd2b47a`.
+- Latest code checkpoint: durable private voice archive provenance; legacy Work migration, rich-document route and Responses API regression fixtures.
 
 ## Repository audit
 
@@ -489,3 +489,8 @@ starting the scoped project-context injection block.
 - Reconciled the previous handoff (`b37d1076`) with actual branch head `8b88b53f`. Focused CI [45659358541](https://github.com/Qrayyt/Galen/actions/runs/45659358541) succeeded (backend, frontend build, isolated catalog container). Candidate [45659138998](https://github.com/Qrayyt/Galen/actions/runs/45659138998) at `b37d1076` passed dependency-backed backend and frontend jobs; Windows packaging was in progress. Older candidate [45655931560](https://github.com/Qrayyt/Galen/actions/runs/45655931560) completed all three jobs successfully; it is not evidence for the latest SHA.
 - Added a real Preview 5 SQLite schema fixture for legacy Work resume/identity/events, idempotence, existing migration marker and database integrity; added PDF/XLSX route tests for local preview, type mismatch, explicit save and isolated deletion; added six OpenAI Responses API event-parity fixtures including truncated and whole-answer output. These tests are awaiting exact-commit CI. No task marked verified or implemented solely on the basis of unexecuted tests.
 - Candidate marker updated to exercise the complete regression and installed UI gates for the new commit. No publication, server changes or storage cleanup. Task 28 remains blocked by host storage capacity; do not attempt deployment until the user confirms space is available.
+
+## Durable archived voice privacy
+
+- Fixed a gap in the previous privacy checkpoint: removing a voice archive from a project (including deleting the project) removed the association, so a later call continued from the archive could enter global automatic learning. Added an additive, idempotent opaque-ID provenance table, backfilled currently linked archives, and captured private continuations at call start. This stores no old project identifier, transcript or recording. Unrelated calls remain eligible for normal learning. Added detach/delete/restart regression coverage. Historical archives detached before this migration cannot be identified retroactively.
+- Exact candidate CI still pending. Task 5 remains in progress until the dependency-backed checks pass; task 28 unchanged. No servers or release markers touched (only the no-publication candidate marker).
