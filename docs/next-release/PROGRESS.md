@@ -16,8 +16,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current product-code SHA:
-  `e57a65a4bb3a13efe32b5f7eec74f33be895c484`.
-- Latest code checkpoint: durable private voice archive provenance; legacy Work migration, rich-document route and Responses API regression fixtures.
+  `302c6485c4d02173198a7b41154dc402e2b54c79` (subsequent catalog-default commit follows).
+- Latest code checkpoint: voice UPSERT fix, metadata-only installer delivery, deployed GLNT catalog, live default URL.
 
 ## Repository audit
 
@@ -45,7 +45,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 2 | Unified history sidebar | implemented | Unified sidebar and search; desktop acceptance outstanding |
 | 3 | Chat lifecycle and durable history | implemented | Create, rename, delete, auto-title and durable history; desktop acceptance outstanding |
 | 4 | Chat search | implemented | Chat/Work and archived voice search with focused fixtures; focused CI succeeded on 299daf8; large-history/desktop acceptance pending |
-| 5 | Isolated chat context and global memory | in progress | Sticky private text/agent/voice provenance and automatic-learning guards implemented; exact candidate regression pending, including the new archived voice test |
+| 5 | Isolated chat context and global memory | implemented | 255/255 expanded regression tests passed on 5ea6f878, including the archived voice move and privacy fixtures; native desktop/provider acceptance remains |
 | 6 | Restart restore and lossless migration | implemented | Existing focused persistence/restart suite passed on b37d1076; added Preview 5 Work database/resume fixture; exact-candidate and installed-app migration acceptance pending |
 | 7 | Rename IDE to Work | implemented | Six locales and regression assertions updated; 08b1c6a candidate frontend job passed; desktop accessibility acceptance pending |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
@@ -63,16 +63,16 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 20 | Provider/model instructions and examples | implemented | 18 real-adapter fake-transport scenarios passed on b37d1076; six additional Responses API fixtures pending exact CI; no live model accounts exercised |
 | 21 | Safe interactions and state | implemented | Message-scoped local checklist, choice and calculator state; no tool execution |
 | 22 | Streaming validation and recovery | implemented | Partial streaming fence and completed malformed/truncated fallback; provider streaming acceptance remains |
-| 23 | Metadata-only marketplace catalog | implemented | Metadata-only SQLite catalog service and focused API tests; deployment pending |
-| 24 | Catalog API and Galen client | implemented | Versioned API, paged client, offline cache and panel; deployment and end-to-end acceptance remain |
+| 23 | Metadata-only marketplace catalog | implemented | Production loopback container deployed, HTTPS catalog returns API v1, isolated smoke passed |
+| 24 | Catalog API and Galen client | implemented | Live HTTPS API confirmed and default URL enabled; installed-client acceptance remains |
 | 25 | GitHub metadata and icons | implemented | Commit-pinned icon metadata and bounded raster normalization; runtime acceptance remains |
 | 26 | Direct GitHub installation | implemented | Direct GitHub download, verification and explicit native registration; real endpoint acceptance remains |
 | 27 | Direct updates and local removal | implemented | Verified update and uninstall, ownership checks, quarantine and recovery; runtime acceptance remains |
-| 28 | Publish by repository link | blocked | Submission API/UI and tests exist; real auth/HTTPS acceptance blocked by insufficient disk on both audited hosts |
+| 28 | Publish by repository link | in progress | Production HTTPS catalog deployed and unauthenticated submissions rejected; live signed-in publisher / moderation / install lifecycle still needs acceptance |
 | 29 | Unified extension manifest | implemented | Strict versioned manifest and archive parser for declarative plugins and skills; fixtures added |
 | 30 | Moderation and safe installation | implemented | Moderation, declared file hash checks, bounded archive and explicit native install consent; real endpoint acceptance remains |
 
-Summary: 0 verified, 28 implemented, 1 in progress, 0 not started, 1 blocked. Implementation coverage: 28/30 (93.3%). Full release acceptance remains pending.
+Summary: 0 verified, 29 implemented, 1 in progress, 0 not started, 0 blocked. Implementation coverage: 29/30 (96.7%). Full release acceptance remains pending.
 
 ## Files changed in this checkpoint
 
@@ -508,3 +508,10 @@ starting the scoped project-context injection block.
 ## Installer storage reduction
 
 - User authorized removing the site's local installer copies after redirect migration. Unauthenticated public GitHub API and current Windows download both returned HTTP 200. Keep legacy manifest and checksum URL contract, publish only verified small metadata and per-platform SHA-256 files, and redirect installer requests directly to GitHub Releases. Server migration and storage validation pending.
+
+## Production deployment and passing privacy regression
+
+- On Moscow, replaced binary mirroring with verified release metadata/checksums and nginx redirects. All four legacy installer paths resolved anonymously to GitHub CDN with expected byte lengths before deleting precisely four local EXE/DMG files. All three current manifests and checksum assets validated. Windows mirror timer now runs metadata-only script; redundant macOS mirror timer disabled. Free space rose from 482 MiB to 2.5 GiB. No GitHub release, other project, or server log removed. Nginx configuration backup preserved at /var/backups/galen-nginx-before-github-redirect.conf.
+- Candidate [45673099374](https://github.com/Qrayyt/Galen/actions/runs/45673099374) on `5ea6f878` passed 46 focused tests and 255 expanded tests, including previous failing voice project move. Focused checks [45673099417](https://github.com/Qrayyt/Galen/actions/runs/45673099417) succeeded. Marked task 5 implemented; exact final installer and UI results remain pending.
+- Built isolated `galen-glnt-catalog:302c6485` from the exact source SHA on Moscow; scratch smoke passed. Production container runs healthy on 127.0.0.1:8768, read-only filesystem, non-root, limited memory/logs, dedicated data and private moderator credential. Public HTTPS /glnt/v1/catalog returned 200 API v1; moderation, openapi and unknown routes 404; anonymous submission 401; Galen home and feed unchanged. Immediate post-reload 404 resolved on repeat after workers reloaded. Disk 2.3 GiB free (84% used). Existing nginx vhost backup retained at /var/backups/galen-nginx-before-glnt.conf. Amsterdam unchanged.
+- Enable the live trusted desktop catalog URL, preserve explicit empty opt-out. Storage blocker removed. Live authenticated publisher acceptance still requires an actual user signed-in GitHub token and a user-owned fixture; no token or public test package fabricated. No release published. Run fresh candidate on final source.

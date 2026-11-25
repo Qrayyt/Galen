@@ -4145,8 +4145,8 @@ class MarketplaceConfig(BaseModel):
     """
 
     public_callback_base_url: str = ""
-    # Separate reviewed GLNT catalog; empty until the service is deployed.
-    glnt_catalog_url: str = ""
+    # Reviewed public GLNT catalog; explicitly empty disables the remote catalog.
+    glnt_catalog_url: str = "https://galen.galenite.org/glnt"
     # Where the community marketplace index lives. The default is the public
     # registry's GitHub Pages deployment; forks and air-gapped mirrors point
     # this at their own compiled index. Empty string disables the community
