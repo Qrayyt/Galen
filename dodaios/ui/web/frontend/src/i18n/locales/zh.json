@@ -842,7 +842,7 @@
     "computer_yours": "你的电脑",
     "computer_home": "{assistant} 在这里运行",
     "recent_activity": "最近动态",
-    "recent_activity_empty": "暂无内容。{assistant} 在 Agentic IDE 中派发任务的对话会显示在这里。",
+    "recent_activity_empty": "暂无内容。{assistant} 在 Work 中派发任务的对话会显示在这里。",
     "activity_untitled": "新对话",
     "activity_running": "工作中",
     "activity_waiting": "需要你的批准",
@@ -2258,12 +2258,12 @@
       "app_zoom_reset": "将应用缩放重置为 100 %",
       "open_overlay": "打开此列表",
       "quick_switch": "快速切换到任意板块",
-      "ide_menu": "Agentic IDE 按键菜单（按两次会把按键发送给窗格）"
+      "ide_menu": "Work 按键菜单（按两次会把按键发送给窗格）"
     }
   },
   "quick_switch": {
     "title": "前往",
-    "placeholder": "去哪里？Agentic IDE、设置、技能…",
+    "placeholder": "去哪里？Work、设置、技能…",
     "no_results": "没有匹配项。",
     "group_sections": "板块",
     "group_settings": "设置",
@@ -3604,7 +3604,7 @@
       "problem_os_reserved": "Windows 键归系统所有（Windows + 加号会打开放大镜）。请选择带 Ctrl 或 Alt 的组合。",
       "problem_duplicate": "另一个缩放步骤已经在使用完全相同的组合。",
       "problem_quick_switch": "快速切换器已经在使用完全相同的组合。",
-      "note_terminal": "在 Agentic IDE 中，Ctrl + 加号和 Ctrl + 减号改为调整终端文字大小。",
+      "note_terminal": "在 Work 中，Ctrl + 加号和 Ctrl + 减号改为调整终端文字大小。",
       "note_browser": "在浏览器标签页中，使用的是浏览器自身的缩放；这些按键只缩放 Galen 桌面窗口。",
       "note_unsupported": "此窗口在当前系统上无法缩放。这些按键不会被占用。"
     },
@@ -6811,7 +6811,7 @@
     "stat_gap_none": "所有 Token 都已定价",
     "trend_title": "随时间变化",
     "trend_subtitle": "{from} → {to}",
-    "chart_include_ide": "包含 Agentic IDE",
+    "chart_include_ide": "包含 Work",
     "metric_label": "指标",
     "metric_cost": "费用",
     "metric_tokens": "Token",
@@ -10498,7 +10498,7 @@
   },
   "ide_hotkeys": {
     "menu": {
-      "aria": "IDE 快捷键",
+      "aria": "Work 快捷键",
       "all_keys": "所有按键",
       "cancel": "取消",
       "exit": "退出"
@@ -10698,7 +10698,7 @@
       "close": "关闭线程（移入归档）"
     },
     "agent_link": {
-      "open": "在 Agentic IDE 中打开 {thread}（{agent}）",
+      "open": "在 Work 中打开 {thread}（{agent}）",
       "agent": "编程智能体"
     },
     "code": {

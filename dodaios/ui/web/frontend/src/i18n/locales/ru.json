@@ -842,7 +842,7 @@
     "computer_yours": "Ваш компьютер",
     "computer_home": "{assistant} работает здесь",
     "recent_activity": "Недавняя активность",
-    "recent_activity_empty": "Пока ничего нет. Здесь появятся чаты Agentic IDE, которым {assistant} передаст задачу.",
+    "recent_activity_empty": "Пока ничего нет. Здесь появятся чаты Work, которым {assistant} передаст задачу.",
     "activity_untitled": "Новый чат",
     "activity_running": "Работает",
     "activity_waiting": "Требуется ваше одобрение",
@@ -2258,12 +2258,12 @@
       "app_zoom_reset": "Сбросьте масштаб приложения до 100 %",
       "open_overlay": "Откройте этот список",
       "quick_switch": "Быстрое переключение на любой раздел",
-      "ide_menu": "Меню агентных клавиш IDE (нажмите дважды, чтобы отправить в панель)"
+      "ide_menu": "Меню клавиш Work (нажмите дважды, чтобы отправить в панель)"
     }
   },
   "quick_switch": {
     "title": "Перейти к",
-    "placeholder": "Куда? Агентный IDE, настройки, навыки ...",
+    "placeholder": "Куда? Work, настройки, навыки ...",
     "no_results": "Ничего не совпадает.",
     "group_sections": "Разделы",
     "group_settings": "Настройки",
@@ -3604,7 +3604,7 @@
       "problem_os_reserved": "Клавиша Windows принадлежит системе (Windows + Plus открывает увеличитель). Выберите аккорд с помощью Ctrl или Alt.",
       "problem_duplicate": "Другой шаг увеличения уже использует именно эту комбинацию.",
       "problem_quick_switch": "Быстрый переключатель уже использует именно эту комбинацию.",
-      "note_terminal": "В Agentic IDE вместо этого Ctrl + Плюс и Ctrl + Minus изменяют размер текста терминала.",
+      "note_terminal": "В Work вместо этого Ctrl + Плюс и Ctrl + Минус изменяют размер текста терминала.",
       "note_browser": "На вкладке браузера применяется собственный масштаб вашего браузера — эти клавиши увеличивают только окно рабочего стола Galen.",
       "note_unsupported": "Это окно не может масштабировать эту систему. Ключи остаются в покое."
     },
@@ -6811,7 +6811,7 @@
     "stat_gap_none": "Каждый токен имеет цену",
     "trend_title": "Со временем",
     "trend_subtitle": "{from} → {to}",
-    "chart_include_ide": "Включить агентный IDE",
+    "chart_include_ide": "Включить Work",
     "metric_label": "Метрика",
     "metric_cost": "Стоимость",
     "metric_tokens": "Токены",
@@ -10498,7 +10498,7 @@
   },
   "ide_hotkeys": {
     "menu": {
-      "aria": "Ярлыки IDE",
+      "aria": "Горячие клавиши Work",
       "all_keys": "Все клавиши",
       "cancel": "отмена",
       "exit": "Выход"
@@ -10698,7 +10698,7 @@
       "close": "Закрыть поток (перемещает в архив)"
     },
     "agent_link": {
-      "open": "Открыть {thread} ({agent}) в Agentic IDE",
+      "open": "Открыть {thread} ({agent}) в Work",
       "agent": "агент кодирования"
     },
     "code": {

@@ -842,7 +842,7 @@
     "computer_yours": "Your computer",
     "computer_home": "{assistant} runs here",
     "recent_activity": "Recent activity",
-    "recent_activity_empty": "Nothing yet. Chats in the Agentic IDE that {assistant} hands a task to show up here.",
+    "recent_activity_empty": "Nothing yet. Chats in Work that {assistant} hands a task to show up here.",
     "activity_untitled": "New chat",
     "activity_running": "Working",
     "activity_waiting": "Needs your approval",
@@ -2258,12 +2258,12 @@
       "app_zoom_reset": "Reset the app zoom to 100 %",
       "open_overlay": "Open this list",
       "quick_switch": "Quick switch to any section",
-      "ide_menu": "Agentic IDE key menu (press twice to send it to the pane)"
+      "ide_menu": "Work key menu (press twice to send it to the pane)"
     }
   },
   "quick_switch": {
     "title": "Go to",
-    "placeholder": "Where to? Agentic IDE, Settings, Skills …",
+    "placeholder": "Where to? Work, Settings, Skills …",
     "no_results": "Nothing matches.",
     "group_sections": "Sections",
     "group_settings": "Settings",
@@ -3604,7 +3604,7 @@
       "problem_os_reserved": "The Windows key belongs to the system (Windows + Plus opens the magnifier). Pick a chord with Ctrl or Alt.",
       "problem_duplicate": "Another zoom step already uses exactly this combination.",
       "problem_quick_switch": "The quick switcher already uses exactly this combination.",
-      "note_terminal": "In the Agentic IDE, Ctrl + Plus and Ctrl + Minus change the terminal text size instead.",
+      "note_terminal": "In Work, Ctrl + Plus and Ctrl + Minus change the terminal text size instead.",
       "note_browser": "In a browser tab, your browser's own zoom applies — these keys only zoom the Galen desktop window.",
       "note_unsupported": "This window cannot zoom on this system. The keys are left alone."
     },
@@ -6811,7 +6811,7 @@
     "stat_gap_none": "Every token is priced",
     "trend_title": "Over time",
     "trend_subtitle": "{from} → {to}",
-    "chart_include_ide": "Include Agentic IDE",
+    "chart_include_ide": "Include Work",
     "metric_label": "Metric",
     "metric_cost": "Cost",
     "metric_tokens": "Tokens",
@@ -10498,7 +10498,7 @@
   },
   "ide_hotkeys": {
     "menu": {
-      "aria": "IDE shortcuts",
+      "aria": "Work shortcuts",
       "all_keys": "All keys",
       "cancel": "cancel",
       "exit": "exit"
@@ -10698,7 +10698,7 @@
       "close": "Close thread (moves it to the archive)"
     },
     "agent_link": {
-      "open": "Open {thread} ({agent}) in the Agentic IDE",
+      "open": "Open {thread} ({agent}) in Work",
       "agent": "coding agent"
     },
     "code": {

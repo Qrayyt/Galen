@@ -76,7 +76,7 @@
       "labels": {
         "chat": "Chat",
         "voice": "Chat de voz",
-        "ide": "Agentic IDE",
+        "ide": "Work",
         "plugins": "Plugins",
         "wake": "Palabra de activación",
         "done": "Todo listo"
@@ -84,7 +84,7 @@
       "stops": {
         "chat": "¡Hola, soy {pet}! Te enseño la app. Este es tu chat con {name}. Escribe aquí lo que quieras: una pregunta, una tarea, un archivo para revisar. Nunca eliges tú una herramienta o un modelo; {name} decide lo que hace falta.",
         "voice": "¿Prefieres hablar? Este es el chat de voz. Haz clic en la barra, di tu palabra de activación o pulsa tu atajo de llamada y habla. La onda muestra quién está hablando.",
-        "ide": "La Agentic IDE ejecuta agentes de programación como Claude Code y Codex en terminales reales, sobre tus propios proyectos. Escríbeles directamente o deja que {name} los dirija por voz.",
+        "ide": "Work ejecuta agentes de programación como Claude Code y Codex en terminales reales, sobre tus propios proyectos. Escríbeles directamente o deja que {name} los dirija por voz.",
         "plugins": "Los plugins conectan {name} con las apps que usas: correo, calendario, notas, hogar inteligente y más. Cada uno se convierte en una herramienta nueva, y todo lo que envía o cambia algo te pregunta antes.",
         "wake": "Tu palabra de activación está aquí, en Ajustes. Di «Hey {name}» y {name} te escucha. Cambia la palabra, elige su idioma o pruébala cuando quieras.",
         "done": "¡Ese fue el recorrido! Habla con {name} cuando quieras y, si alguna vez te atascas, pregúntale. En Ajustes → App puedes repetir esta guía."

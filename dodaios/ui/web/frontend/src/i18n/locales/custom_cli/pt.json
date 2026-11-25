@@ -22,7 +22,7 @@
     "at_reference_hint": "A maioria das CLIs de programação modernas lê @caminho como um ficheiro a abrir. Desativa isto e os caminhos são colados entre aspas.",
     "threads_title": "Executar em threads (opcional)",
     "headless_command": "Comando headless",
-    "headless_command_hint": "Permite que esta CLI apareça também como fornecedor nos threads do IDE agêntico. Usa {prompt} onde vai a mensagem; se o omitires, a mensagem é enviada por stdin. A resposta é o que o comando imprime.",
+    "headless_command_hint": "Permite que esta CLI apareça também como fornecedor nos threads do Work. Usa {prompt} onde vai a mensagem; se o omitires, a mensagem é enviada por stdin. A resposta é o que o comando imprime.",
     "headless_resume": "Comando de retoma",
     "headless_resume_hint": "Usado nos turnos seguintes. {session} é substituído pelo id da conversa. Deixa vazio para começar de novo em cada turno.",
     "pick_logo": "Escolher um logótipo",

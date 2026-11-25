@@ -842,7 +842,7 @@
     "computer_yours": "Tu ordenador",
     "computer_home": "{assistant} se ejecuta aquí",
     "recent_activity": "Actividad reciente",
-    "recent_activity_empty": "Nada todavía. Aquí aparecen los chats del Agentic IDE a los que {assistant} envía una tarea.",
+    "recent_activity_empty": "Nada todavía. Aquí aparecen los chats de Work a los que {assistant} envía una tarea.",
     "activity_untitled": "Chat nuevo",
     "activity_running": "Trabajando",
     "activity_waiting": "Necesita tu aprobación",
@@ -2258,12 +2258,12 @@
       "app_zoom_reset": "Restablecer el zoom de la aplicación al 100 %",
       "open_overlay": "Abrir esta lista",
       "quick_switch": "Saltar rápido a cualquier sección",
-      "ide_menu": "Menú de teclas del IDE agéntico (pulsa dos veces para enviarlo al panel)"
+      "ide_menu": "Menú de teclas de Work (pulsa dos veces para enviarlo al panel)"
     }
   },
   "quick_switch": {
     "title": "Ir a",
-    "placeholder": "¿Adónde? Agentic IDE, Ajustes, Skills …",
+    "placeholder": "¿Adónde? Work, Ajustes, Skills …",
     "no_results": "No hay coincidencias.",
     "group_sections": "Secciones",
     "group_settings": "Ajustes",
@@ -3604,7 +3604,7 @@
       "problem_os_reserved": "La tecla Windows pertenece al sistema (Windows + Más abre la lupa). Elige una combinación con Ctrl o Alt.",
       "problem_duplicate": "Otro paso de zoom ya usa exactamente esta combinación.",
       "problem_quick_switch": "El cambio rápido ya usa exactamente esta combinación.",
-      "note_terminal": "En el Agentic IDE, Ctrl + Más y Ctrl + Menos cambian en su lugar el tamaño del texto de los terminales.",
+      "note_terminal": "En Work, Ctrl + Más y Ctrl + Menos cambian en su lugar el tamaño del texto de los terminales.",
       "note_browser": "En una pestaña del navegador se aplica el zoom del propio navegador; estas teclas solo hacen zoom en la ventana de escritorio de Galen.",
       "note_unsupported": "Esta ventana no puede hacer zoom en este sistema. Las teclas quedan libres."
     },
@@ -6811,7 +6811,7 @@
     "stat_gap_none": "Todos los tokens tienen precio",
     "trend_title": "Evolución",
     "trend_subtitle": "{from} → {to}",
-    "chart_include_ide": "Incluir Agentic IDE",
+    "chart_include_ide": "Incluir Work",
     "metric_label": "Métrica",
     "metric_cost": "Coste",
     "metric_tokens": "Tokens",
@@ -10498,7 +10498,7 @@
   },
   "ide_hotkeys": {
     "menu": {
-      "aria": "Atajos del IDE",
+      "aria": "Atajos de Work",
       "all_keys": "Todas las teclas",
       "cancel": "cancelar",
       "exit": "salir"
@@ -10698,7 +10698,7 @@
       "close": "Cerrar hilo (pasa al archivo)"
     },
     "agent_link": {
-      "open": "Abrir {thread} ({agent}) en el Agentic IDE",
+      "open": "Abrir {thread} ({agent}) en Work",
       "agent": "agente de código"
     },
     "code": {

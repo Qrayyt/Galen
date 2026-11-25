@@ -842,7 +842,7 @@
     "computer_yours": "Dein Computer",
     "computer_home": "{assistant} läuft hier",
     "recent_activity": "Letzte Aktivität",
-    "recent_activity_empty": "Noch nichts. Chats in der Agentic IDE, denen {assistant} eine Aufgabe schickt, erscheinen hier.",
+    "recent_activity_empty": "Noch nichts. Chats in Work, denen {assistant} eine Aufgabe schickt, erscheinen hier.",
     "activity_untitled": "Neuer Chat",
     "activity_running": "Arbeitet",
     "activity_waiting": "Braucht deine Freigabe",
@@ -2258,12 +2258,12 @@
       "app_zoom_reset": "App-Zoom auf 100 % zurücksetzen",
       "open_overlay": "Diese Liste öffnen",
       "quick_switch": "Schnell zu jedem Bereich springen",
-      "ide_menu": "Tastenmenü der Agentic IDE (zweimal drücken: an das Fenster senden)"
+      "ide_menu": "Tastenmenü von Work (zweimal drücken: an das Fenster senden)"
     }
   },
   "quick_switch": {
     "title": "Gehe zu",
-    "placeholder": "Wohin? Agentic IDE, Einstellungen, Skills …",
+    "placeholder": "Wohin? Work, Einstellungen, Skills …",
     "no_results": "Nichts gefunden.",
     "group_sections": "Bereiche",
     "group_settings": "Einstellungen",
@@ -3604,7 +3604,7 @@
       "problem_os_reserved": "Die Windows-Taste gehört dem System (Windows + Plus öffnet die Bildschirmlupe). Wähle eine Kombination mit Strg oder Alt.",
       "problem_duplicate": "Ein anderer Zoom-Schritt nutzt genau diese Kombination schon.",
       "problem_quick_switch": "Die Schnellsuche nutzt genau diese Kombination schon.",
-      "note_terminal": "Im Agentic IDE ändern Strg + Plus und Strg + Minus stattdessen die Schriftgröße der Terminals.",
+      "note_terminal": "In Work ändern Strg + Plus und Strg + Minus stattdessen die Schriftgröße der Terminals.",
       "note_browser": "In einem Browser-Tab gilt der Zoom des Browsers — diese Tasten zoomen nur das Galen-Desktopfenster.",
       "note_unsupported": "Dieses Fenster kann auf diesem System nicht zoomen. Die Tasten bleiben frei."
     },
@@ -6811,7 +6811,7 @@
     "stat_gap_none": "Jeder Token ist bepreist",
     "trend_title": "Zeitlicher Verlauf",
     "trend_subtitle": "{from} → {to}",
-    "chart_include_ide": "Agentic IDE einbeziehen",
+    "chart_include_ide": "Work einbeziehen",
     "metric_label": "Kennzahl",
     "metric_cost": "Kosten",
     "metric_tokens": "Tokens",
@@ -10498,7 +10498,7 @@
   },
   "ide_hotkeys": {
     "menu": {
-      "aria": "IDE-Tastenkürzel",
+      "aria": "Work-Tastenkürzel",
       "all_keys": "Alle Tasten",
       "cancel": "abbrechen",
       "exit": "beenden"
@@ -10698,7 +10698,7 @@
       "close": "Thread schließen (kommt ins Archiv)"
     },
     "agent_link": {
-      "open": "{thread} ({agent}) in der Agentic IDE öffnen",
+      "open": "{thread} ({agent}) in Work öffnen",
       "agent": "Coding-Agent"
     },
     "code": {

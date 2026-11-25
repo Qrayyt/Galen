@@ -47,7 +47,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
 | 5 | Isolated chat context and global memory | in progress | Project-scoped runtime instructions/snapshots wired into brain/API/CLI; voice and global-memory boundary checks pending |
 | 6 | Restart restore and lossless migration | in progress | Last mode/session, scoped text drafts and ordinary blank drafts restore; desktop migration acceptance remains |
-| 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
+| 7 | Rename IDE to Work | in progress | Primary and audited secondary/nested labels updated in six locales; dedicated fixtures added; source CI and desktop accessibility acceptance pending |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
 | 9 | Per-chat mode selection and persistence | implemented | New and idle API-backed existing chats support mode selection; CLI-bound chats cannot safely convert |
 | 10 | Unified Chat/Work history | implemented | Unified history remains available in Work; desktop acceptance outstanding |
@@ -424,3 +424,8 @@ starting the scoped project-context injection block.
 - Audited branch head `13645a24`; focused checks [45632070471](https://github.com/Qrayyt/Galen/actions/runs/45632070471) succeeded. Windows candidate [45632070591](https://github.com/Qrayyt/Galen/actions/runs/45632070591) backend passed; frontend had 6,440 passing and four failing tests (604 files); Windows packaging was skipped.
 - Corrected the marketplace back-button test to scope its query to the entry page rather than the separate GLNT catalog button; aligned caption and quick-switch assertions with the Work navigation, retaining legacy search aliases; isolated durable composer draft storage between independent test fixtures without changing application persistence.
 - Candidate marker will be advanced to this repair and the exact new source will require CI evidence. No tests skipped and no acceptance status promoted; no release or server change.
+
+## Work secondary labels checkpoint
+
+- Updated mode-specific user-facing labels in six primary dictionaries and the audited nested custom CLI, computers, onboarding, self-build and society dictionaries. Kept compatibility keys and provider handles unchanged. Added a six-locale fixture for secondary labels.
+- Task 7 remains in progress pending CI and accessibility acceptance. The candidate marker is advanced; the source of the resulting workflow is the actual pushed SHA. No release or server changes.
