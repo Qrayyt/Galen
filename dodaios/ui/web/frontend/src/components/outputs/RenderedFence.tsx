@@ -189,7 +189,7 @@ export function InlineHtmlFrame({
   );
 }
 
-export function RenderedFence({ language, code }: { language: FenceLanguage; code: string }) {
+export function RenderedFence({ language, code, allowScripts = true }: { language: FenceLanguage; code: string; allowScripts?: boolean }) {
   const t = useT();
   const [mode, setMode] = useState<"rendered" | "source">("rendered");
   const [copied, setCopied] = useState(false);
@@ -229,7 +229,7 @@ export function RenderedFence({ language, code }: { language: FenceLanguage; cod
       <div className="flex items-center justify-between gap-2 border-b border-border/40 bg-muted/20 px-3 py-1">
         <span className="text-micro uppercase tracking-wider text-muted-foreground">{language}</span>
         <div className="flex items-center gap-1.5">
-          {language === "html" && !scripts && mode === "rendered" ? (
+          {allowScripts && language === "html" && !scripts && mode === "rendered" ? (
             <button
               type="button"
               onClick={() => setScripts(true)}
@@ -266,7 +266,7 @@ export function RenderedFence({ language, code }: { language: FenceLanguage; cod
           <img src={svgDataUrl(code)} alt="SVG" className="max-w-full" data-testid="inline-svg" />
         </div>
       ) : (
-        <InlineHtmlFrame html={code} title="HTML" scripts={scripts} />
+        <InlineHtmlFrame html={code} title="HTML" scripts={allowScripts && scripts} />
       )}
     </div>
   );

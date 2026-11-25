@@ -7,6 +7,7 @@ import { openExternalUrl } from "@/lib/openExternal";
 import { openLocalPath } from "@/lib/openLocalPath";
 import { readFence, visualFenceLanguage } from "@/lib/visualFence";
 import { CHART_FENCE, endsInOpenFence, parseChartSpec } from "@/lib/chartSpec";
+import { GALEN_UI_FENCE, parseNativeUi } from "@/lib/galenUiSpec";
 import { chatLinkAction, chatUrlTransform, localPathFromChatHref, pageRefFromChatHref, threadRefFromChatHref } from "./chatLinks";
 import { PageLink } from "./PageCard";
 import { WebLink } from "./WebLink";
@@ -23,6 +24,7 @@ export type { MediaKind } from "./MediaPreview";
 const RenderedFence = lazy(() => import("@/components/outputs/RenderedFence").then(module => ({ default: module.RenderedFence })));
 // The chart library is large and most answers carry no chart, so it loads with the first one.
 const ChartFence = lazy(() => import("@/components/outputs/ChartFence").then(module => ({ default: module.ChartFence })));
+const NativeUiFence = lazy(() => import("@/components/outputs/NativeUiFence").then(module => ({ default: module.NativeUiFence })));
 const ChartFencePending = lazy(() => import("@/components/outputs/ChartFence").then(module => ({ default: module.ChartFencePending })));
 
 function assetKey(raw: string): string {
@@ -74,6 +76,16 @@ export function normalizeMediaMarkup(text: string): string {
 const ImageKeysContext = createContext<ReadonlySet<string>>(new Set());
 /** Whether the text ends inside a fence, i.e. its last block is still being written. */
 const OpenFenceContext = createContext(false);
+const MarkdownBodyContext = createContext("");
+
+function NativeBlock({ code, end }: { code: string; end?: number }) {
+  const body = useContext(MarkdownBodyContext);
+  const pending = endsInOpenFence(body) && (end === undefined || body.slice(end).trim() === "");
+  const spec = useMemo(() => parseNativeUi(code), [code]);
+  if (pending) return <div role="status" className="my-3 rounded-lg border border-border p-3 text-xs text-muted-foreground">{translate("common.loading")}</div>;
+  if (spec) return <Suspense fallback={<p>{spec.fallback}</p>}><NativeUiFence spec={spec}/></Suspense>;
+  return <CodeBlock language="json" code={code} dense/>;
+}
 
 /**
  * A fenced `chart` block as the chart it describes. While the block is still
@@ -155,13 +167,14 @@ const MARKDOWN_COMPONENTS: Components = {
   pre: ({ children, node: _node, ...props }) => {
     const fence = readFence(children);
     if (fence) {
+      if (fence.language === GALEN_UI_FENCE) return <NativeBlock code={fence.code} end={_node?.position?.end.offset}/>;
       if (fence.language === CHART_FENCE) return <ChartBlock code={fence.code} />;
       if (fence.language === "json" || fence.language === "") {
         const result = parseToolResult(fence.code);
         if (result) return <ToolResultCard result={result} code={fence.code} />;
       }
       const language = visualFenceLanguage(fence.language, fence.code);
-      if (language) return <Suspense fallback={<pre>{children}</pre>}><RenderedFence language={language} code={fence.code} /></Suspense>;
+      if (language) return <Suspense fallback={<pre>{children}</pre>}><RenderedFence language={language} code={fence.code} allowScripts={false} /></Suspense>;
       // Any other fenced code: its language on top, a copy button, highlighting.
       return <CodeBlock language={fence.language} code={fence.code} dense />;
     }
@@ -176,7 +189,7 @@ export function ChatMarkdown({ text, className }: { text: string; className?: st
   return <div className={cn("min-w-0 [overflow-wrap:anywhere]", className)}>
     <ImageKeysContext.Provider value={imageKeys}>
       <OpenFenceContext.Provider value={writing}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={url => url.startsWith("data:") ? safeMediaUrl(url) ?? "" : chatUrlTransform(url)} components={MARKDOWN_COMPONENTS}>{body}</ReactMarkdown>
+        <MarkdownBodyContext.Provider value={body}><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={url => url.startsWith("data:") ? safeMediaUrl(url) ?? "" : chatUrlTransform(url)} components={MARKDOWN_COMPONENTS}>{body}</ReactMarkdown></MarkdownBodyContext.Provider>
       </OpenFenceContext.Provider>
     </ImageKeysContext.Provider>
   </div>;

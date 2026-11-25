@@ -113,6 +113,22 @@ def without_charts(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", _CHART_BLOCK_RE.sub("", text)).strip()
 
 
+NATIVE_UI_GUIDANCE = (
+    "For written Galen Chat/Work answers, use ordinary Markdown by default. "
+    "When a native interactive or structured block genuinely helps, emit a complete "
+    "fenced `galen-ui` JSON object with version 1, fallback (plain readable summary), "
+    "and blocks (1–12). Example: "
+    '{"version":1,"fallback":"2 of 5 complete","blocks":[{"type":"progress","label":"Tasks","value":2,"max":5}]}. '
+    "Allowed blocks: card(title,text), table(columns,rows of strings), progress(label,value,max), "
+    "checklist(title,items of strings), diagram(steps of strings), "
+    "calculator(label,operation=add/subtract/multiply/divide,a,b), input(label,options), "
+    "chart(spec using the chart format). No other keys, scripts, HTML, URLs, callbacks, or tools. "
+    "Controls are local-only and may copy values; they do not run commands or submit to a service. "
+    "Keep essential facts in ordinary Markdown before the block. If a block is not valid, "
+    "give a readable Markdown answer instead. Never invent numbers to fill a chart."
+)
+
+
 TASK_EXECUTION_GUIDANCE = (
     "A clear request authorizes the work within your current permissions: do all of it "
     "now and decide optional details yourself. Call something done only when a tool "

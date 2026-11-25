@@ -401,6 +401,10 @@ async def run_api_turn(handle: TurnHandle, user_text: str) -> None:
     system = handle.plain_system or system_prompt(
         cwd=cwd, assistant_name=handle.assistant_name, plan=permission_mode == "plan"
     )
+    if session.surface in {"jarvis", "agent"}:
+        from dodaios.core.response_style import NATIVE_UI_GUIDANCE
+
+        system += "\n\n" + NATIVE_UI_GUIDANCE
     if handle.project_context:
         system += "\n\n" + handle.project_context
     if handle.output_language:

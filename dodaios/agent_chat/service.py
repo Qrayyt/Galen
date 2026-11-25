@@ -2509,10 +2509,13 @@ class AgentChatService:
                         )
                     if lead_pre is not None and not active_handle.continuation:
                         run_prompt = lead_pre.apply(run_prompt)
+                    from dodaios.core.response_style import NATIVE_UI_GUIDANCE
+
                     vendor = await run_cli_turn(
                         active_handle,
                         run_prompt
                         + selection_briefing(selected)
+                        + (f"\n\n{NATIVE_UI_GUIDANCE}" if session.surface in {"jarvis", "agent"} else "")
                         + (f"\n\n{background}" if background else "")
                         + (f"\n\n{active_handle.project_context}" if active_handle.project_context else ""),
                         runner,

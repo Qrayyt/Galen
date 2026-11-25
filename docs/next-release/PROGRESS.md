@@ -352,3 +352,9 @@ starting the scoped project-context injection block.
 - `c813de1`: additive project text snapshots, explicit size/name validation, runtime-only project briefing passed to brain/API/CLI runners; no automatic filesystem reads from legacy references. Instructions and snapshots are not inserted into stored user messages. Focused isolation and limit tests added.
 - Following frontend commit exposes project instructions and explicit local text-file snapshots. Deleting a snapshot removes it from future prompt construction; no original file is touched. Existing CLI provider history and prior answers may retain previously supplied content; movement does not erase vendor history. Voice context, rich document formats, UI integration tests and full acceptance remain pending.
 - No tests executed yet; no release or server changes. Next: draft restore and safe native UI contract. 
+
+## Restart and native UI checkpoint
+
+- `cb0678d`: explicit restoration of the last selected ordinary session, without reusing the singleton on New Chat; session-scoped local text drafts and Work draft text survive WebView restart. Blank ordinary drafts and selected mode restoration still need end-to-end checks. Added focused tests; no runtime test execution yet.
+- Native UI v1: reused existing chart renderer and added bounded native cards, tables, progress, checklist, sequential diagram, calculator and input. Strict flat JSON schema, safe fallback, pending streaming state, and provider-independent guidance. Disabled opt-in script execution in chat HTML previews only. Added schema tests and contract docs. Native controls do not execute tools; persistent component state, streaming provider fixtures and desktop acceptance remain pending.
+- Next: native UI interaction tests, marketplace audit and implementation, release verification. No release or server changes.
