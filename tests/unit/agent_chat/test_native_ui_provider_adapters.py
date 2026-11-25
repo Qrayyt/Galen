@@ -99,3 +99,36 @@ async def test_native_ui_text_is_not_mistaken_for_tool_calls(adapter, chunk_size
     assert NATIVE_UI_GUIDANCE in str(captured[0])
     if not truncated:
         assert json.loads(assembled.split("\n```galen-ui\n", 1)[1].rsplit("\n```", 1)[0]) == PAYLOAD
+
+
+async def responses_stream(req, fragments, captured):
+    # Responses API has a distinct event protocol from Chat Completions.
+    async def create(**kwargs):
+        captured.append(kwargs)
+        return events([
+            NS(type="response.output_text.delta", delta=chunk) for chunk in fragments
+        ] + [
+            NS(type="response.output_item.done", item=NS(type="message")),
+            NS(type="response.completed", response=NS(usage=None)),
+        ])
+    client = NS(responses=NS(create=create))
+    kwargs = {"model": "native-ui-fixture", "messages": [
+        {"role": "system", "content": req.system},
+        {"role": "user", "content": "Show release steps."},
+    ], "stream": True}
+    return [delta async for delta in _openai_base._stream_via_responses(client, kwargs, {})]
+
+
+@pytest.mark.parametrize("chunk_size", [1, 17, 4096])
+@pytest.mark.parametrize("truncated", [False, True])
+async def test_native_ui_responses_api_event_parity(chunk_size, truncated):
+    req = BrainRequest(messages=(BrainMessage(role="user", content="Show release steps."),),
+                       system=NATIVE_UI_GUIDANCE)
+    source = ANSWER[:-5] if truncated else ANSWER
+    captured = []
+    deltas = await responses_stream(req, [source[i:i + chunk_size]
+                                          for i in range(0, len(source), chunk_size)], captured)
+    assert "".join(delta.content for delta in deltas if delta.content) == source
+    assert not any(delta.tool_call for delta in deltas)
+    assert len(captured) == 1
+    assert NATIVE_UI_GUIDANCE in str(captured[0])

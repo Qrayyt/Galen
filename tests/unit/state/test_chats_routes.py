@@ -468,3 +468,65 @@ async def test_project_rich_document_preview_is_local_and_not_persisted() -> Non
         )
         assert too_large.status_code == 413
     assert store.list_projects() == []
+
+
+async def test_project_workbook_and_pdf_preview_and_explicit_save() -> None:
+    from io import BytesIO
+    from zipfile import ZipFile
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+    workbook = BytesIO()
+    with ZipFile(workbook, "w") as archive:
+        archive.writestr("xl/sharedStrings.xml", '<sst><si><t>Private revenue</t></si></sst>')
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet><sheetData><row><c t="s"><v>0</v></c>'
+            '<c><v>42</v></c></row></sheetData></worksheet>',
+        )
+    pdf = BytesIO()
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=300, height=300)
+    page[NameObject("/Resources")] = DictionaryObject({
+        NameObject("/Font"): DictionaryObject({
+            NameObject("/F1"): DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }),
+        }),
+    })
+    stream = DecodedStreamObject()
+    stream.set_data(b"BT /F1 12 Tf 20 200 Td (Private PDF note) Tj ET")
+    page[NameObject("/Contents")] = stream
+    writer.write(pdf)
+    app, store = await _make_app()
+    async with _client(app) as client:
+        docs = {}
+        for name, data, expected in [
+            ("budget.xlsx", workbook.getvalue(), "Private revenue | 42"),
+            ("notes.pdf", pdf.getvalue(), "Private PDF note"),
+        ]:
+            result = await client.post(
+                "/api/chats/projects/document-preview", params={"filename": name},
+                content=data, headers={"Content-Type": "application/octet-stream"},
+            )
+            assert result.status_code == 200, result.text
+            docs[name] = result.json()["text"]
+            assert expected in docs[name]
+        assert store.list_projects() == []
+        mismatch = await client.post(
+            "/api/chats/projects/document-preview", params={"filename": "fake.pdf"},
+            content=workbook.getvalue(), headers={"Content-Type": "application/octet-stream"},
+        )
+        assert mismatch.status_code == 422
+        a = (await client.post("/api/chats/projects", json={
+            "name": "Private", "context_documents": docs,
+        })).json()
+        b = (await client.post("/api/chats/projects", json={"name": "Other"})).json()
+        assert a["context_documents"] == docs
+        assert b["context_documents"] == {}
+        cleared = await client.patch("/api/chats/projects/" + a["id"],
+                                     json={"context_documents": {}})
+        assert cleared.status_code == 200 and cleared.json()["context_documents"] == {}
+        assert store.get_project(b["id"])["context_documents"] == {}

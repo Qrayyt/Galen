@@ -16,8 +16,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `97a9836e`.
-- Latest code checkpoint: voice archive search/association, classic voice isolation, rich document import, isolated GLNT container and Windows installer smoke gate.
+  `8b88b53f`.
+- Latest code checkpoint: private project learning safeguards; added legacy Work migration, rich-document route and Responses API regression fixtures.
 
 ## Repository audit
 
@@ -483,3 +483,9 @@ starting the scoped project-context injection block.
 
 - Added sticky SQLite privacy flags for project-associated text and agent histories, retained after ungrouping. Automatic typed learning, self-building, proactive cues, archive backfill and global episode recording exclude these histories. Captured scoped voice calls are excluded from voice-event learning by call ID. Local history/checkpoints and explicit memory actions remain available.
 - Added restart/detach and learning-loop regression tests and included the learning suite in candidate CI. Existing memories are not purged; previously ungrouped histories with no recorded association cannot be inferred retrospectively. Full candidate acceptance remains pending.
+
+## Continuation audit and additional acceptance coverage
+
+- Reconciled the previous handoff (`b37d1076`) with actual branch head `8b88b53f`. Focused CI [45659358541](https://github.com/Qrayyt/Galen/actions/runs/45659358541) succeeded (backend, frontend build, isolated catalog container). Candidate [45659138998](https://github.com/Qrayyt/Galen/actions/runs/45659138998) at `b37d1076` passed dependency-backed backend and frontend jobs; Windows packaging was in progress. Older candidate [45655931560](https://github.com/Qrayyt/Galen/actions/runs/45655931560) completed all three jobs successfully; it is not evidence for the latest SHA.
+- Added a real Preview 5 SQLite schema fixture for legacy Work resume/identity/events, idempotence, existing migration marker and database integrity; added PDF/XLSX route tests for local preview, type mismatch, explicit save and isolated deletion; added six OpenAI Responses API event-parity fixtures including truncated and whole-answer output. These tests are awaiting exact-commit CI. No task marked verified or implemented solely on the basis of unexecuted tests.
+- Candidate marker updated to exercise the complete regression and installed UI gates for the new commit. No publication, server changes or storage cleanup. Task 28 remains blocked by host storage capacity; do not attempt deployment until the user confirms space is available.
