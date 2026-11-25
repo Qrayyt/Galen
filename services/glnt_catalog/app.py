@@ -18,7 +18,7 @@ from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from dodaios.marketplace.glnt_manifest import (
-    MANIFEST, MAX_FILE, MAX_FILES, SHA, data_path, github_repo, parse_manifest,
+    MANIFEST, MAX_FILE, MAX_FILES, MAX_EXPANDED, SHA, data_path, github_repo, parse_manifest,
 )
 
 app = FastAPI(title="GLNT Marketplace", version="1.0.0")
@@ -106,15 +106,36 @@ async def inspect_repository(repository_url: str, token: str) -> tuple[dict[str,
         tree = await github_json(client, f"/repos/{canonical}/git/trees/{tree_sha}?recursive=1")
         if tree.get("truncated") or len(tree.get("tree", [])) > MAX_FILES * 3:
             raise HTTPException(400, "Repository too large to validate")
-        found = set()
+        found = {}
+        expanded_size = 0
         for node in tree["tree"]:
             if node["type"] == "tree":
                 continue
-            if node["type"] != "blob" or node.get("mode") != "100644" or node.get("size", MAX_FILE + 1) > MAX_FILE:
+            size = node.get("size")
+            blob_sha = node.get("sha", "")
+            if (node["type"] != "blob" or node.get("mode") != "100644"
+                    or type(size) is not int or not 0 <= size <= MAX_FILE
+                    or not isinstance(blob_sha, str) or not SHA.fullmatch(blob_sha)):
                 raise HTTPException(400, "Executable, link or oversized repository file")
-            found.add(data_path(node["path"]))
-        if found != set(manifest.files) | {MANIFEST}:
+            path = data_path(node["path"])
+            if path in found:
+                raise HTTPException(400, "Duplicate repository file")
+            found[path] = (blob_sha, size)
+            expanded_size += size
+            if expanded_size > MAX_EXPANDED or len(found) > MAX_FILES + 1:
+                raise HTTPException(400, "Repository expansion limit")
+        if set(found) != set(manifest.files) | {MANIFEST}:
             raise HTTPException(400, "Undeclared or missing repository files")
+        # Verify each declared SHA-256 against the immutable Git blob before
+        # admitting the submission. Payload bytes are discarded after hashing.
+        for path, digest in manifest.files.items():
+            blob_sha, size = found[path]
+            blob = await github_json(client, f"/repos/{canonical}/git/blobs/{blob_sha}", 1024 * 1024)
+            if blob.get("encoding") != "base64" or blob.get("size") != size:
+                raise HTTPException(400, "Invalid repository blob")
+            body = base64.b64decode(blob["content"].replace("\n", ""), validate=True)
+            if len(body) != size or hashlib.sha256(body).hexdigest() != digest:
+                raise HTTPException(400, "Declared file integrity mismatch")
         metadata = {
             "name": manifest.name, "title": manifest.title, "description": manifest.description,
             "type": manifest.kind, "version": manifest.version, "min_galen": manifest.min_galen,

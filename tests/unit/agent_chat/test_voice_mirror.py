@@ -369,3 +369,37 @@ def test_the_mirror_passes_the_calls_tools_on(tmp_path: Path) -> None:
         assert names == ["open_app"]
 
     asyncio.run(scenario())
+
+
+def test_voice_project_seed_and_first_turn_remain_in_original_project(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        svc = _service(tmp_path)
+        projects = {
+            "a": {"id": "a", "instructions": "private-a", "context_documents": {}},
+            "b": {"id": "b", "instructions": "private-b", "context_documents": {}},
+        }
+        svc.project_lookup = projects.get
+        a = svc.create_session(provider="openai", surface="jarvis", project_id="a")
+        b = svc.create_session(provider="openai", surface="jarvis", project_id="b")
+        await svc.import_voice_turn(a.session_id, "a history", "a reply")
+        svc.bind_voice_chat(a.session_id)
+        history, brief = svc.voice_context_seed("call-a")
+        assert "private-a" in brief and "private-b" not in brief
+        assert any("a history" in str(m.content) for m in history)
+        svc.bind_voice_chat(b.session_id)
+        mirror = VoiceChatMirror(lambda: svc)
+        await mirror._on_turn(_turn("call-a", "t-a", "voice from a", "answer from a"))
+        assert len(svc.store.list_events(a.session_id)) == 8
+        assert svc.store.list_events(b.session_id) == []
+        svc.bind_voice_chat(None, project_id="b")
+        history, brief = svc.voice_context_seed("call-b")
+        assert history == []
+        assert "private-b" in brief and "private-a" not in brief
+        svc.bind_voice_chat(a.session_id)
+        await mirror._on_turn(_turn("call-b", "t-b", "fresh voice", "fresh reply"))
+        assert svc.voice_chat_id == a.session_id
+        created = [s for s in svc.store.list_sessions(limit=10, surface="jarvis") if s.session_id not in {a.session_id, b.session_id}]
+        assert len(created) == 1 and created[0].project_id == "b"
+        assert len(svc.store.list_events(created[0].session_id)) == 4
+
+    asyncio.run(scenario())

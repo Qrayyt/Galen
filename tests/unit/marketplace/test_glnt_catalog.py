@@ -36,3 +36,46 @@ def test_pending_is_hidden_until_moderation(client):
     assert listing["items"][0]["status"] == "approved"
     assert "files" not in listing["items"][0]
     assert client.get("/v1/catalog?kind=plugin").json()["total"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("valid", [True, False])
+async def test_submission_checks_pinned_blob_integrity(monkeypatch, valid):
+    import base64
+    import hashlib
+    import json
+    from fastapi import HTTPException
+
+    body = b"# Sample skill"
+    manifest = json.dumps({
+        "schema": 1, "name": "sample-skill", "title": "Sample",
+        "description": "Example", "type": "skill", "version": "1.0.0",
+        "min_galen": "1.0.0", "category": "general", "permissions": [],
+        "entry": "SKILL.md", "files": {"SKILL.md": hashlib.sha256(body if valid else b"wrong").hexdigest()},
+    }).encode()
+    commit, tree, blob = "a" * 40, "b" * 40, "c" * 40
+    responses = {
+        "/user": {"id": 2},
+        "/repos/owner/repo": {"id": 1, "owner": {"id": 2, "login": "owner"}, "full_name": "owner/repo", "default_branch": "main"},
+        "/repos/owner/repo/commits/main": {"sha": commit, "commit": {"tree": {"sha": tree}}},
+        f"/repos/owner/repo/contents/galen-extension.json?ref={commit}": {
+            "encoding": "base64", "size": len(manifest), "content": base64.b64encode(manifest).decode()},
+        f"/repos/owner/repo/git/trees/{tree}?recursive=1": {"tree": [
+            {"type": "blob", "mode": "100644", "path": "galen-extension.json", "sha": "d" * 40, "size": len(manifest)},
+            {"type": "blob", "mode": "100644", "path": "SKILL.md", "sha": blob, "size": len(body)},
+        ]},
+        f"/repos/owner/repo/git/blobs/{blob}": {"encoding": "base64", "size": len(body), "content": base64.b64encode(body).decode()},
+    }
+
+    async def request(client, path, max_bytes=2 * 1024 * 1024):
+        return responses[path]
+
+    monkeypatch.setattr(module, "github_json", request)
+    if valid:
+        metadata, *_ = await module.inspect_repository("https://github.com/owner/repo", "github-token")
+        assert metadata["commit"] == commit
+        assert metadata["manifest_sha256"] == hashlib.sha256(manifest).hexdigest()
+        assert "files" not in metadata
+    else:
+        with pytest.raises(HTTPException, match="integrity mismatch"):
+            await module.inspect_repository("https://github.com/owner/repo", "github-token")

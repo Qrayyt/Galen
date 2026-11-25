@@ -74,6 +74,9 @@ async def download_icon(item: dict) -> bytes:
     async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
+            mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if mime not in {"image/png", "image/jpeg", "image/webp", "application/octet-stream"}:
+                raise ValueError("Unsupported icon content type")
             async for chunk in response.aiter_bytes():
                 raw.extend(chunk)
                 if len(raw) > 512 * 1024:

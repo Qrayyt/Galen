@@ -2784,6 +2784,7 @@ class AgentChatService:
             remember = getattr(self.store, "set_lead_session_id", None)
             if callable(remember):
                 remember(session_id)
+        if not archived or session_id:
             drop = getattr(brain, "drop_voice_history_seed", None)
             if callable(drop):
                 drop()

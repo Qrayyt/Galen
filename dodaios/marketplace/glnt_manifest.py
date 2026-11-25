@@ -110,6 +110,8 @@ def parse_manifest(raw: bytes) -> Manifest:
     folded = set()
     for path, digest in files.items():
         data_path(path)
+        if kind == "skill" and path != "SKILL.md" and PurePosixPath(path).name.casefold() == "skill.md":
+            raise ValueError("nested skill entry point")
         if path == MANIFEST or path.casefold() in folded or not isinstance(digest, str) or not DIGEST.fullmatch(digest):
             raise ValueError("invalid file integrity declaration")
         folded.add(path.casefold())
