@@ -595,6 +595,8 @@ export interface CreateSessionInput {
   computer_id?: string;
   /** Continue an existing Claude Code / Codex session (a uuid). */
   vendor_session?: string;
+  /** Unified Galen project metadata; it does not change the working folder. */
+  project_id?: string;
 }
 
 export async function createAgentChatSession(input: CreateSessionInput): Promise<AgentChatSession> {

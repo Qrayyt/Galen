@@ -181,20 +181,24 @@ def test_one_call_stays_in_one_chat_when_another_is_opened(tmp_path: Path) -> No
     asyncio.run(scenario())
 
 
-def test_an_unbound_call_continues_the_lead_conversation(tmp_path: Path) -> None:
+def test_a_call_on_a_blank_page_starts_one_new_conversation(tmp_path: Path) -> None:
     async def scenario() -> None:
         svc = _service(tmp_path)
         old = _open_session(svc)
         svc.bind_voice_chat(None)
-        # No blank page any more: the call binds the lead's one conversation.
-        assert svc.voice_chat_id == old.session_id
-        assert not svc.voice_chat_fresh
+        assert svc.voice_chat_id is None
+        assert svc.voice_chat_fresh
         bus = EventBus()
         VoiceChatMirror(lambda: svc).attach(bus)
         await bus.publish(_turn("call-1", "t1", "first call", "first answer"))
+        created_id = svc.voice_chat_id
+        assert created_id and created_id != old.session_id
+        assert not svc.voice_chat_fresh
         await bus.publish(_turn("call-2", "t2", "second call", "second answer"))
-        assert len(svc.store.list_events(old.session_id)) == 8
-        assert len(svc.store.list_sessions(limit=10, surface="jarvis")) == 1
+        assert svc.store.list_events(old.session_id) == []
+        assert len(svc.store.list_events(created_id)) == 8
+        assert len(svc.store.list_sessions(limit=10, surface="jarvis")) == 2
+        assert svc.store.lead_session_id() == created_id
 
     asyncio.run(scenario())
 

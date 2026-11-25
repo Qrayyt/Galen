@@ -105,9 +105,14 @@ class VoiceChatMirror:
                 session = svc.store.get_session(chat_id)
                 if session is not None and session.surface == SURFACE:
                     return session
-            from dodaios.agent_chat.lead import lead_session
+            from dodaios.agent_chat.lead import lead_session, start_session
 
             hint = str(getattr(event, "provider", "") or "") if event is not None else ""
+            if getattr(svc, "voice_chat_fresh", False):
+                session = start_session(svc, provider_hint=hint)
+                if session is not None:
+                    svc.bind_voice_chat(session.session_id)
+                return session
             return lead_session(svc, provider_hint=hint)
         except Exception as exc:  # noqa: BLE001
             log.warning("voice chat mirror could not find the conversation: %s", exc)

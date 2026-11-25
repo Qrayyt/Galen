@@ -1214,6 +1214,7 @@ class AgentChatService:
         computer_id: str = "",
         speed: str = "",
         build_mode: str = "",
+        project_id: str | None = None,
     ) -> AgentChatSession:
         row = provider_row(provider)
         if row is None and not supports_api_runner(provider):
@@ -1250,6 +1251,7 @@ class AgentChatService:
             computer_id=computer_id,
             speed=normalize_speed(speed),
             build_mode=build,
+            project_id=project_id,
         )
 
     def _keep_conversation(self, session_id: str, vendor: str) -> None:
@@ -2739,12 +2741,10 @@ class AgentChatService:
             self._voice_chat_fresh = False
         else:
             if session_id is None:
-                # No "blank page" any more: a call without a chosen chat
-                # continues the lead's one conversation.
-                from dodaios.agent_chat.lead import lead_session
-
-                lead = lead_session(self)
-                session_id = lead.session_id if lead is not None else None
+                # A blank page is a real new-chat state. Its first typed or
+                # voice turn creates a distinct durable Jarvis session.
+                self._voice_chat_id = None
+                self._voice_chat_fresh = True
         if session_id is None:
             self._voice_chat_id = None
         else:
@@ -2753,6 +2753,9 @@ class AgentChatService:
                 raise NoSuchSession(session_id)
             self._voice_chat_id = session_id
             self._voice_chat_fresh = False
+            remember = getattr(self.store, "set_lead_session_id", None)
+            if callable(remember):
+                remember(session_id)
             drop = getattr(brain, "drop_voice_history_seed", None)
             if callable(drop):
                 drop()

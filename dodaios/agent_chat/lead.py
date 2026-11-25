@@ -1,11 +1,10 @@
-"""The lead's one endless conversation.
+"""The lead's current/default conversation.
 
-Dodaios (the lead) talks to its person in ONE conversation that never ends:
-typed turns, voice calls, agent reports and notices all land in the same
-``jarvis``-surface session. That session is chosen once and remembered in
-the store (``jarvis_lead_session``). On an install that already has Jarvis
-chats, the newest one is adopted so the conversation continues where the
-person left off; older chats stay readable as the archive.
+Galen supports multiple isolated ``jarvis`` conversations. The store's
+``jarvis_lead_session`` pointer names the one most recently created or opened;
+voice calls, proactive reports, and startup restoration use that default when
+the person has not explicitly selected another chat. Existing installations
+adopt their newest chat on first use without rewriting any history.
 
 Everything that used to pick "the newest Jarvis chat" asks
 :func:`lead_session` instead, so a report never lands in a chat nobody looks
@@ -150,6 +149,29 @@ def lead_session(svc: Any, *, create: bool = True, provider_hint: str = "") -> A
         if callable(remember):
             remember(session.session_id)
             log.info("lead thread: conversation is %s", session.session_id)
+        return session
+
+
+def start_session(
+    svc: Any, *, seat: dict[str, Any] | None = None, provider_hint: str = ""
+) -> Any | None:
+    """Create and remember a distinct lead conversation.
+
+    This is the multi-session counterpart to :func:`lead_session`: it never
+    adopts or mutates an older conversation. The saved chat selection supplies
+    the seat for voice-first chats; an explicit ``seat`` supplies the typed
+    composer's current choice.
+    """
+    with _lock:
+        wanted = dict(seat or _new_chat_seat(svc) or _default_seat(provider_hint) or {})
+        if not wanted.get("provider"):
+            log.warning("lead thread: no chat provider is available for a new conversation")
+            return None
+        session = svc.create_session(surface=SURFACE, **wanted)
+        remember = getattr(svc.store, "set_lead_session_id", None)
+        if callable(remember):
+            remember(session.session_id)
+        log.info("lead thread: new conversation is %s", session.session_id)
         return session
 
 
@@ -637,6 +659,7 @@ __all__ = [
     "lead_seat",
     "lead_session",
     "lead_session_id",
+    "start_session",
     "post_learned",
     "post_memory_health",
     "search_conversation",

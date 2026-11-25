@@ -1,4 +1,4 @@
-"""The lead keeps one endless conversation (dodaios/agent_chat/lead.py)."""
+"""The lead pointer restores the current conversation without merging chats."""
 
 from __future__ import annotations
 
@@ -52,6 +52,35 @@ def test_the_choice_survives_a_restart(tmp_path: Path) -> None:
     assert again.lead_session().session_id == sid
 
 
+def test_opening_an_older_chat_becomes_the_restart_choice(tmp_path: Path) -> None:
+    db = str(tmp_path / "agent_chat.db")
+    first = _service(tmp_path, db)
+    older = first.create_session(provider="openai", model="m", effort="low", surface="jarvis")
+    newer = first.create_session(provider="openai", model="m", effort="low", surface="jarvis")
+    first.store.set_lead_session_id(newer.session_id)
+    first.bind_voice_chat(older.session_id)
+    assert first.store.lead_session_id() == older.session_id
+    first.store.close()
+
+    again = _service(tmp_path, db)
+    assert again.lead_session().session_id == older.session_id
+
+
+def test_ordinary_chat_event_streams_are_isolated(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        svc = _service(tmp_path)
+        first = svc.create_session(provider="openai", model="m", effort="low", surface="jarvis")
+        second = svc.create_session(provider="openai", model="m", effort="low", surface="jarvis")
+        await svc.import_voice_turn(first.session_id, "first question", "first answer")
+        await svc.import_voice_turn(second.session_id, "second question", "second answer")
+        first_text = str(svc.store.list_events(first.session_id))
+        second_text = str(svc.store.list_events(second.session_id))
+        assert "first question" in first_text and "second question" not in first_text
+        assert "second question" in second_text and "first question" not in second_text
+
+    asyncio.run(scenario())
+
+
 def test_a_deleted_lead_is_replaced(tmp_path: Path) -> None:
     svc = _service(tmp_path)
     svc.store.save_chat_selection(ChatSelection("openai", "m", "low"))
@@ -100,7 +129,7 @@ def test_voice_history_is_the_conversation_tail(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_routes_return_the_one_conversation_and_keep_it(tmp_path: Path, monkeypatch) -> None:
+def test_routes_create_isolated_conversations_and_restore_the_latest(tmp_path: Path, monkeypatch) -> None:
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -119,12 +148,19 @@ def test_routes_return_the_one_conversation_and_keep_it(tmp_path: Path, monkeypa
         first = client.post("/api/agent-chat/sessions", json=body)
         assert first.status_code == 201, first.text
         assert first.json()["lead"] is True
-        second = client.post("/api/agent-chat/sessions", json={**body, "model": "second"})
-        assert second.json()["session_id"] == first.json()["session_id"]
+        second = client.post(
+            "/api/agent-chat/sessions",
+            json={**body, "model": "second", "project_id": "project-two"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["session_id"] != first.json()["session_id"]
         assert second.json()["model"] == "second"
+        assert second.json()["project_id"] == "project-two"
+        assert client.get("/api/agent-chat/lead").json()["session_id"] == second.json()["session_id"]
         sid = first.json()["session_id"]
-        refused = client.delete(f"/api/agent-chat/sessions/{sid}")
-        assert refused.status_code == 409
+        removed = client.delete(f"/api/agent-chat/sessions/{sid}")
+        assert removed.status_code == 200
+        assert client.get(f"/api/agent-chat/sessions/{sid}").status_code == 404
         # Coding chats keep their own sessions.
         coding = client.post(
             "/api/agent-chat/sessions", json={**body, "surface": "agent", "provider": "openai"}

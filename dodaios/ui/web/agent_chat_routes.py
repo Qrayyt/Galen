@@ -276,6 +276,9 @@ class CreateSessionBody(BaseModel):
     #: Continue an existing Claude Code / Codex session (a grid pane's): the
     #: thread's next turn resumes it. Empty = a fresh conversation.
     vendor_session: str = ""
+    #: Optional unified Galen project. This is metadata only; it never changes
+    #: the working directory or grants access to project files.
+    project_id: str | None = Field(default=None, max_length=120)
 
 
 class ForkSessionBody(BaseModel):
@@ -1202,33 +1205,6 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
                 + ", ".join(m.id for m in permission_modes(ladder))
             ),
         )
-    if body.surface == "jarvis":
-        # Dodaios keeps ONE endless conversation: "new chat" returns it with
-        # the picked model on its seat instead of opening a second chat.
-        from dodaios.agent_chat.lead import adopt_seat
-
-        try:
-            lead = adopt_seat(
-                svc,
-                {
-                    "provider": body.provider,
-                    "model": body.model or None,
-                    "effort": body.effort,
-                    "account_id": body.account_id,
-                },
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if lead is not None:
-            from dodaios.agent_chat.store import ChatSelection
-
-            svc.store.save_chat_selection(
-                ChatSelection(lead.provider, lead.model, lead.effort, lead.account_id)
-            )
-            d = lead.to_dict()
-            d["running"] = svc.is_running(lead.session_id)
-            d["lead"] = True
-            return d
     cwd = _folder_for(body.surface, body.cwd)
     computer_id = _validate_computer(body.computer_id, body.surface)
     try:
@@ -1253,6 +1229,7 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
             title=body.title,
             surface=body.surface,
             account_id=body.account_id,
+            project_id=(body.project_id or "").strip() or None,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1261,15 +1238,20 @@ def create_session(body: CreateSessionBody, request: Request) -> dict[str, Any]:
     if session.surface == "jarvis":
         from dodaios.agent_chat.store import ChatSelection
 
+        svc.store.set_lead_session_id(session.session_id)
         svc.store.save_chat_selection(
             ChatSelection(session.provider, session.model, session.effort, session.account_id)
         )
     d = session.to_dict()
     d["running"] = False
+    if session.surface == "jarvis":
+        # Compatibility marker: this is now the current/default conversation,
+        # not a claim that only one Jarvis conversation can exist.
+        d["lead"] = True
     return d
 
 
-@router.get("/lead", summary="The lead's one endless conversation (created on first use)")
+@router.get("/lead", summary="The lead's current/default conversation (created on first use)")
 async def get_lead_session(request: Request) -> dict[str, Any]:
     from dodaios.agent_chat.lead import lead_session
 
@@ -2120,12 +2102,6 @@ async def delete_session(session_id: str, request: Request) -> dict[str, Any]:
     svc = (await _async_service(request))
     if svc.store.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
-    from dodaios.agent_chat.lead import is_lead
-
-    if is_lead(svc, session_id):
-        raise HTTPException(
-            status_code=409, detail="The main Dodaios conversation cannot be deleted"
-        )
     await svc.controls.pause(session_id, "Session deleted")
     # No request of a deleted chat may come back as a turn.
     svc.parked_work.stop(session_id)

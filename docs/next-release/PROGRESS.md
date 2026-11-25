@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 15:45 MSK (UTC+03:00).
-- Stage: unified Chat/Work history and project controls implemented in the web shell; desktop smoke verification remains.
+- Date: 2026-11-25 15:52 MSK (UTC+03:00).
+- Stage: isolated multi-session ordinary chats implemented and focused backend verification passed.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `5d52aeb62523cd29361e2927ece60ed8a732421f`.
-- Working tree before this journal update: unified frontend, compatibility labels, and focused test updates only.
+  `7faa554`.
+- Working tree before this journal update: multi-session chat semantics and focused tests only.
 
 ## Repository audit
 
@@ -41,7 +41,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 | # | Task | Status | Evidence / note |
 | ---: | --- | --- | --- |
-| 1 | Multi-session ordinary chats | in progress | Durable multi-thread store/API and current agent-chat bridge verified; active UI still needs navigation |
+| 1 | Multi-session ordinary chats | implemented | New ordinary conversations create distinct durable sessions; opening/restoring, deletion, voice-first creation, and event isolation have focused tests; desktop scenario remains before verified |
 | 2 | Unified history sidebar | in progress | Chat and Work rows, search, recent chats, and project groups render in one sidebar; running-desktop scenarios remain |
 | 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
 | 4 | Chat search | in progress | Title and message-body search verified at store/API level; sidebar UI remains |
@@ -72,7 +72,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 29 | Unified extension manifest | not started | Existing plugin/skill formats must be audited |
 | 30 | Moderation and safe installation | not started | Audit pending |
 
-Summary: 0 verified, 2 implemented, 14 in progress, 14 not started, 0 blocked.
+Summary: 0 verified, 3 implemented, 13 in progress, 14 not started, 0 blocked.
 
 ## Files changed in this checkpoint
 
@@ -94,6 +94,12 @@ Summary: 0 verified, 2 implemented, 14 in progress, 14 not started, 0 blocked.
   and chat metadata clients used by the compatibility-preserving frontend bridge.
 - Main locale files — expose Work in primary navigation/mode labels without changing internal route ids.
 - Shell/sidebar/i18n tests — update assertions to the intended unified navigation behavior.
+- `dodaios/agent_chat/lead.py`, `service.py`, and `voice_mirror.py` — retain a last-active
+  default pointer while creating isolated ordinary sessions, including a voice-first blank chat.
+- `dodaios/ui/web/agent_chat_routes.py` — create and delete separate ordinary sessions and accept
+  project metadata at creation without rewriting existing histories.
+- Lead and voice-mirror tests — verify separate IDs and events, restart restoration, safe deletion,
+  project metadata, and one new conversation for a voice call started on a blank page.
 
 No release marker, workflow, website, external server, or secret has been changed.
 
@@ -132,6 +138,8 @@ No release marker, workflow, website, external server, or secret has been change
 | `npm run build` in the frontend | Passed; 8,738 modules transformed; existing chunk-size, Tailwind ambiguity, and third-party annotation warnings only |
 | `npm test -- --run src/components/layout/Sidebar.test.tsx src/App.shell.test.tsx src/components/layout/AppSurfaceSwitch.test.tsx src/__tests__/i18n.test.ts` | 4 files passed, 87 tests passed, 4.02 seconds |
 | `git diff --check` after unified frontend changes | Passed |
+| `python -m py_compile dodaios/agent_chat/lead.py dodaios/agent_chat/service.py dodaios/agent_chat/voice_mirror.py dodaios/ui/web/agent_chat_routes.py` | Passed |
+| `python -m pytest tests/unit/agent_chat/test_lead_thread.py tests/unit/agent_chat/test_voice_mirror.py tests/unit/agent_chat/test_agent_chat_service.py tests/unit/agent_chat/test_agent_chat_surface_parity.py -q` | 72 passed, 1 third-party deprecation warning, 4.56 seconds |
 
 ## Architecture audit findings
 
@@ -270,7 +278,7 @@ None. No server credentials were read or recorded. No deployment, database, cata
 
 ## Risk checkpoint before ordinary-chat multi-session semantics
 
-- Date: 2026-11-25 15:55 MSK (UTC+03:00).
+- Date: 2026-11-25 15:48 MSK (UTC+03:00).
 - Current committed SHA: `b31acae`.
 - Planned action: change a new `jarvis` conversation from reusing the historical singleton lead
   session to creating a distinct durable session, while retaining the lead pointer as the last
@@ -282,6 +290,21 @@ None. No server credentials were read or recorded. No deployment, database, cata
   voice; add focused route, restart, deletion, isolation, and voice-call tests before pushing.
 - Rollback boundary: this block changes behavior and tests only. The additive database schema remains
   compatible with existing installations, and no existing history row is migrated or removed.
+
+## Ordinary-chat multi-session checkpoint
+
+- Result: each new typed ordinary chat now creates a distinct `jarvis` session instead of changing
+  the model on the historical singleton. Existing sessions remain untouched and independently openable.
+- Restoration: the existing lead-session table is retained as a last-active/default pointer. Creating
+  or opening a chat updates it, so the selected chat survives a process restart without a new schema.
+- Voice: binding a blank page records an explicit fresh state. Its first voice turn creates one new
+  conversation and binds later turns/calls to it; opening an existing row binds voice to that row.
+- Deletion: the current/default conversation is no longer artificially undeletable. After deletion,
+  the existing fallback selects the newest remaining ordinary chat or creates one on demand.
+- Isolation evidence: focused tests put different turns into two sessions and assert neither event
+  stream contains the other's text. A route test asserts distinct IDs and project metadata.
+- Compatibility: `/lead`, the `lead` response marker, saved model selection, background defaulting,
+  and all internal `jarvis` identifiers remain available. No stored event or session is rewritten.
 
 ## Next concrete step
 
