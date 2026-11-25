@@ -93,3 +93,33 @@ def test_an_unknown_surface_is_refused():
     store = AgentChatStore(":memory:")
     with pytest.raises(ValueError):
         store.create_session(provider="openai", model="m", effort="", cwd=".", surface="voice")
+
+
+def test_unified_project_draft_and_state_survive_restart(tmp_path: Path):
+    db = tmp_path / "agent_chat.db"
+    store = AgentChatStore(db)
+    session = store.create_session(
+        provider="openai",
+        model="m",
+        effort="",
+        cwd=".",
+        surface="jarvis",
+        project_id="project-1",
+        draft="unfinished",
+        state={"checklist": {"a": True}},
+    )
+    store.close()
+
+    reopened = AgentChatStore(db)
+    restored = reopened.get_session(session.session_id)
+    assert restored is not None
+    assert restored.project_id == "project-1"
+    assert restored.draft == "unfinished"
+    assert restored.state == {"checklist": {"a": True}}
+    reopened.update_session(
+        session.session_id, project_id="", draft="changed", state={"progress": 40}
+    )
+    changed = reopened.get_session(session.session_id)
+    assert changed is not None and changed.project_id is None
+    assert changed.draft == "changed" and changed.state == {"progress": 40}
+    reopened.close()

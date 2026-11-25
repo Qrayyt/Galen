@@ -63,7 +63,10 @@ CREATE TABLE IF NOT EXISTS agent_chat_sessions (
     last_message_ms  INTEGER NOT NULL DEFAULT 0,
     speed            TEXT NOT NULL DEFAULT '',
     started_by       TEXT NOT NULL DEFAULT '',
-    build_mode       TEXT NOT NULL DEFAULT ''
+    build_mode       TEXT NOT NULL DEFAULT '',
+    project_id       TEXT,
+    draft            TEXT NOT NULL DEFAULT '',
+    state_json       TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS agent_chat_events (
     session_id  TEXT NOT NULL,
@@ -239,6 +242,14 @@ class AgentChatSession:
     #: pill names. Set only while the session is in Plan; empty there means
     #: the ladder's default.
     build_mode: str = ""
+    #: Optional unified Galen project. The project record lives in the chat
+    #: metadata store; this id is deliberately soft so either database can be
+    #: restored independently without making sessions unreadable.
+    project_id: str | None = None
+    #: Unsent composer text, persisted for restart restoration.
+    draft: str = ""
+    #: Bounded UI state owned by native components, never executable model data.
+    state: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -365,6 +376,16 @@ class AgentChatStore:
             self._conn.execute(
                 "ALTER TABLE agent_chat_sessions ADD COLUMN build_mode TEXT NOT NULL DEFAULT ''"
             )
+        if "project_id" not in have:
+            self._conn.execute("ALTER TABLE agent_chat_sessions ADD COLUMN project_id TEXT")
+        if "draft" not in have:
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN draft TEXT NOT NULL DEFAULT ''"
+            )
+        if "state_json" not in have:
+            self._conn.execute(
+                "ALTER TABLE agent_chat_sessions ADD COLUMN state_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -445,6 +466,9 @@ class AgentChatStore:
         computer_id: str = "",
         speed: str = "",
         build_mode: str = "",
+        project_id: str | None = None,
+        draft: str = "",
+        state: dict[str, Any] | None = None,
     ) -> AgentChatSession:
         if surface not in SURFACES:
             raise ValueError(f"surface must be one of {SURFACES}, not {surface!r}")
@@ -458,7 +482,8 @@ class AgentChatStore:
                 "INSERT INTO agent_chat_sessions (session_id, title, provider, model, effort, "
                 "cwd, permission_mode, vendor_session, created_ms, updated_ms, message_count, "
                 "preview, surface, account_id, runtime, computer_id, last_message_ms, speed, "
-                "build_mode) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?)",
+                "build_mode, project_id, draft, state_json) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     title,
@@ -477,6 +502,9 @@ class AgentChatStore:
                     speed,
                     # Only a session that starts in Plan has a mode to return to.
                     build_mode if mode in _PLAN_MODES else "",
+                    project_id or None,
+                    draft,
+                    json.dumps(state or {}, ensure_ascii=False),
                 ),
             )
             self._conn.commit()
@@ -649,7 +677,7 @@ class AgentChatStore:
 
     def update_session(self, session_id: str, **fields: Any) -> AgentChatSession | None:
         """Set any of title / provider / model / effort / speed / cwd /
-        permission_mode / build_mode / vendor_session. Unknown keys are ignored so a route
+        permission_mode / build_mode / vendor_session / project_id / draft / state. Unknown keys are ignored so a route
         can pass its body through after validation. ``surface`` is deliberately NOT
         settable: a session is born on one chat and stays there.
 
@@ -668,8 +696,13 @@ class AgentChatStore:
             "account_id",
             "runtime",
             "computer_id",
+            "project_id",
+            "draft",
+            "state",
         }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if "state" in updates:
+            updates["state_json"] = json.dumps(updates.pop("state"), ensure_ascii=False)
         if not updates:
             return self.get_session(session_id)
         updates["updated_ms"] = now_ms()
@@ -1358,4 +1391,11 @@ class AgentChatStore:
             speed=str(row["speed"] or "") if "speed" in row.keys() else "",
             started_by=str(row["started_by"] or "") if "started_by" in row.keys() else "",
             build_mode=str(row["build_mode"] or "") if "build_mode" in row.keys() else "",
+            project_id=(str(row["project_id"]) if "project_id" in row.keys() and row["project_id"] else None),
+            draft=str(row["draft"] or "") if "draft" in row.keys() else "",
+            state=(
+                json.loads(row["state_json"] or "{}")
+                if "state_json" in row.keys()
+                else {}
+            ),
         )

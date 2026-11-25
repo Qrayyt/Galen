@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 15:28 MSK (UTC+03:00).
-- Stage: additive unified chat/project data model and API implemented and verified; frontend next.
+- Date: 2026-11-25 16:02 MSK (UTC+03:00).
+- Stage: current agent-chat metadata bridge implemented and verified; unified frontend next.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `bc24adab511001fe4b110b9f50db4534178399b1`.
-- Working tree before this journal update: four intentionally modified product/test files.
+  `482bd03`.
+- Working tree before this journal update: agent-chat metadata bridge and tests only.
 
 ## Repository audit
 
@@ -41,15 +41,15 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 | # | Task | Status | Evidence / note |
 | ---: | --- | --- | --- |
-| 1 | Multi-session ordinary chats | in progress | Durable multi-thread store/API verified; active UI still needs navigation |
+| 1 | Multi-session ordinary chats | in progress | Durable multi-thread store/API and current agent-chat bridge verified; active UI still needs navigation |
 | 2 | Unified history sidebar | not started | Audit pending |
 | 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
 | 4 | Chat search | in progress | Title and message-body search verified at store/API level; sidebar UI remains |
 | 5 | Isolated chat context and global memory | in progress | Existing per-thread message isolation preserved; project context injection still remains |
-| 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated legacy SQLite migration verified; active-chat UI restoration remains |
+| 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated migrations verified in both chat stores; active-chat UI restoration remains |
 | 7 | Rename IDE to Work | not started | Audit pending |
 | 8 | Remove separate Chat/IDE tabs | not started | Audit pending |
-| 9 | Per-chat mode selection and persistence | in progress | Validated `chat`/`work` mode is persisted and exposed by API; dialog selector remains |
+| 9 | Per-chat mode selection and persistence | in progress | Legacy mode and current agent-chat surface metadata persist; dialog selector remains |
 | 10 | Unified Chat/Work history | not started | Audit pending |
 | 11 | Project lifecycle | in progress | Project CRUD and safe ungroup/delete semantics verified at store/API level; UI remains |
 | 12 | Project names, icons, collapsible groups | in progress | Name, icon, collapse, and ordering metadata persist; sidebar rendering remains |
@@ -117,6 +117,9 @@ No release marker, workflow, website, external server, or secret has been change
 | First focused `pytest` run | Environment setup failed before collection because `tomlkit` was absent; no test failure |
 | `python -m pytest tests/unit/state/test_chat_store_persistence.py tests/unit/state/test_chats_routes.py -q` | 36 passed, 1 third-party deprecation warning, 1.44 seconds |
 | `git diff --check` | Passed |
+| `npm ci` in the frontend | 850 packages installed; audit reports 0 vulnerabilities |
+| First agent-chat test attempts | Environment setup exposed missing `aiosqlite`, `python-multipart`, and `rich`; no product assertion failed |
+| `python -m pytest tests/unit/agent_chat/test_agent_chat_surface_parity.py tests/unit/agent_chat/test_agent_chat_service.py -q` | 37 passed, 1 third-party deprecation warning, 3.20 seconds |
 
 ## Architecture audit findings
 
@@ -209,6 +212,17 @@ None. No server credentials were read or recorded. No deployment, database, cata
 - Safety: deleting a project ungroups its chats by default. Deleting associated chats requires the
   explicit `delete_chats=true` route parameter.
 - Scope boundary: the existing Work library and external CLI resume handles were not modified.
+
+## Current agent-chat metadata bridge checkpoint
+
+- Result: the active typed-chat and Work session store now carries optional project id, unsent
+  draft, and native JSON state alongside its existing immutable execution surface.
+- Migration: three additive columns are idempotently added to existing `agent_chat_sessions`; old
+  sessions default to no project, an empty draft, and empty state.
+- API: the existing agent-chat PATCH route accepts these metadata fields without changing provider,
+  model, CLI resume id, or the session's immutable `jarvis`/`agent` execution surface.
+- Verification: persistence through close/reopen, safe ungrouping, route round-trip, and the broader
+  agent-chat service suite pass.
 
 ## Risk checkpoint before unified frontend work
 

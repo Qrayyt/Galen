@@ -212,6 +212,12 @@ export interface AgentChatSession {
    * society agent's id); empty or absent = the person started it.
    */
   started_by?: string;
+  /** Unified Galen project; null/empty means the ungrouped history. */
+  project_id?: string | null;
+  /** Unsent composer text restored after restart. */
+  draft?: string;
+  /** Persisted native component state; never executable model content. */
+  state?: Record<string, unknown>;
 }
 
 export const INTERNAL_DELIVERY_STATUSES = ["queued", "delivered", "failed"] as const;
@@ -605,7 +611,7 @@ export async function createAgentChatSession(input: CreateSessionInput): Promise
 }
 
 export type PatchSessionInput = Partial<
-  Pick<AgentChatSession, "title" | "provider" | "model" | "effort" | "speed" | "cwd" | "permission_mode" | "build_mode" | "computer_id">
+  Pick<AgentChatSession, "title" | "provider" | "model" | "effort" | "speed" | "cwd" | "permission_mode" | "build_mode" | "computer_id" | "project_id" | "draft" | "state">
 >;
 
 export async function patchAgentChatSession(

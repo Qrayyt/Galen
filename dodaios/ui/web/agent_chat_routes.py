@@ -305,6 +305,13 @@ class PatchSessionBody(BaseModel):
     #: plan builds in. Ignored for a session that is not in Plan.
     build_mode: str | None = Field(default=None, max_length=64)
     computer_id: str | None = None
+    #: Unified Galen project metadata. Empty string moves the chat back to
+    #: the ungrouped history without changing its immutable execution surface.
+    project_id: str | None = Field(default=None, max_length=120)
+    #: Unsent composer text restored after a restart.
+    draft: str | None = Field(default=None, max_length=200_000)
+    #: Native UI state only; it is stored as JSON and never executed.
+    state: dict[str, Any] | None = None
 
 
 class MessageBody(BaseModel):
@@ -2008,6 +2015,12 @@ async def patch_session(
             fields["computer_id"] = new_computer
             # The CLI's conversation lives on the old computer.
             fields["vendor_session"] = ""
+    if body.project_id is not None:
+        fields["project_id"] = body.project_id.strip()
+    if body.draft is not None:
+        fields["draft"] = body.draft
+    if body.state is not None:
+        fields["state"] = body.state
     runner = resolve_runner(
         fields.get("provider") or current.provider,
         surface=current.surface,

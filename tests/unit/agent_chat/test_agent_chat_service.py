@@ -700,9 +700,19 @@ def _exercise_routes(client: TestClient, tmp_path: Path) -> None:
     assert bad.status_code == 400
 
     patched = client.patch(
-        f"/api/agent-chat/sessions/{sid}", json={"title": "My chat", "effort": "low"}
+        f"/api/agent-chat/sessions/{sid}",
+        json={
+            "title": "My chat",
+            "effort": "low",
+            "project_id": "project-1",
+            "draft": "keep me",
+            "state": {"checklist": {"first": True}},
+        },
     )
     assert patched.json()["title"] == "My chat" and patched.json()["effort"] == "low"
+    assert patched.json()["project_id"] == "project-1"
+    assert patched.json()["draft"] == "keep me"
+    assert patched.json()["state"] == {"checklist": {"first": True}}
 
     with client.websocket_connect(f"/api/agent-chat/sessions/{sid}/ws") as ws:
         snap = ws.receive_json()
