@@ -11,13 +11,13 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 ## Current checkpoint
 
 - Date: 2026-11-25 15:52 MSK (UTC+03:00).
-- Stage: isolated multi-session ordinary chats implemented and focused backend verification passed.
+- Stage: unified navigation, scoped Work creation, project editing and search advanced; new acceptance checks pending.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `7faa554`.
-- Working tree before this journal update: multi-session chat semantics and focused tests only.
+  `d3bddcc`.
+- Latest code checkpoint: project-detachment behavior and regression tests, in addition to the preceding frontend changes.
 
 ## Repository audit
 
@@ -44,7 +44,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 1 | Multi-session ordinary chats | implemented | New ordinary conversations create distinct durable sessions; opening/restoring, deletion, voice-first creation, and event isolation have focused tests; desktop scenario remains before verified |
 | 2 | Unified history sidebar | in progress | Chat and Work rows, search, recent chats, and project groups render in one sidebar; running-desktop scenarios remain |
 | 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
-| 4 | Chat search | in progress | Title and message-body search verified at store/API level; sidebar UI remains |
+| 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
 | 5 | Isolated chat context and global memory | in progress | Existing per-thread message isolation preserved; project context injection still remains |
 | 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated migrations verified in both chat stores; active-chat UI restoration remains |
 | 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
@@ -52,8 +52,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 9 | Per-chat mode selection and persistence | in progress | New-conversation Chat/Work selector is in the history column and session metadata persists; existing-chat dialog/state restoration remains |
 | 10 | Unified Chat/Work history | in progress | Ordinary and Work sessions are merged and ordered in the Chat sidebar without removing the mature Work project tree |
 | 11 | Project lifecycle | in progress | Create, rename, collapse, and safe delete/ungroup controls are rendered; user-scenario and desktop checks remain |
-| 12 | Project names, icons, collapsible groups | in progress | Persisted names, icons, and collapse state are rendered as grouped sidebar sections; icon editing remains |
-| 13 | Chat and Work creation in projects | in progress | Mode creation exists and project grouping exists, but creation directly inside a selected project remains |
+| 12 | Project names, icons, collapsible groups | in progress | Name/icon editing and collapse controls implemented; desktop and new tests pending |
+| 13 | Chat and Work creation in projects | in progress | Chat and Work can be created directly in selected project; voice-first scope and runtime verification remain |
 | 14 | Move chats between project scopes | in progress | Agent-backed Chat and Work rows can move between project groups or back to recent/ungrouped; voice rows remain unassignable |
 | 15 | Project instructions, context, and files | in progress | Instructions and context-file references persist; scoped prompt/file injection remains |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
@@ -338,6 +338,11 @@ starting the scoped project-context injection block.
 - `7f6d758`: unified history remains visible in Work thread layout; mature Work project tree is retained in a collapsible section.
 - `6aac84b`: focused frontend tests for project-scoped Chat/Work creation, message search, icon editing and confirmations.
 - `b7aa75b`: fix application-state PUT envelope and add regression test.
-- Tasks 2–4, 6, 9–14 advanced; desktop acceptance and execution of newly added tests remain outstanding. No verified status is assigned. Existing project deletion does not yet clear agent-store project references; fix this before claiming complete project deletion semantics. Project instructions/files are not yet injected; voice-first scoping, full restart/draft restore, mode changes of existing chats, and full-text voice archive search remain.
+- Tasks 2–4, 6, 9–14 advanced; desktop acceptance and execution of newly added tests remain outstanding. No verified status is assigned. Project deletion originally did not clear agent-store references; see following checkpoint. Project instructions/files are not yet injected; voice-first scoping, full restart/draft restore, mode changes of existing chats, and full-text voice archive search remain.
 - No build, dependency installation or test execution was performed during this direct connector session. No release marker, tag, deployment, server, or existing conversation data was changed. A large multi-locale write failed at transport level; smaller commits succeeded. Keep the release unverified.
 - Next: reconcile project deletion across both stores; implement scoped project context and restart/draft restore; then continue generative UI and GLNT marketplace blocks (17–30) and final acceptance matrix.
+
+## Project detachment checkpoint
+
+- `d3bddcc`: project deletion now detaches associated agent-backed Chat and Work sessions in addition to legacy text threads; retains sessions, drafts, timestamps and CLI resume handles. Added focused store test. Agent sessions are deliberately retained even if the legacy text deletion flag is set. The two database operations are not atomic; detach precedes metadata deletion to preserve access on failure.
+- Test execution and route-level acceptance still pending. No existing data mutated by this commit; changes affect application behavior only.
