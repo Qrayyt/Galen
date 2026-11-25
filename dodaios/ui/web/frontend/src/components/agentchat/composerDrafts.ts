@@ -22,18 +22,22 @@ export function registerComposerDraftPersistence(chat: AgentChatStoreHook, names
   namespaces.set(chat, namespace);
 }
 
-function storageKey(chat: AgentChatStoreHook, sessionId: string): string | null {
+function storageKey(chat: AgentChatStoreHook, sessionId: string | null): string | null {
   const ns = namespaces.get(chat);
-  return ns ? `galen.composer.text.v1:${encodeURIComponent(ns)}:${encodeURIComponent(sessionId)}` : null;
+  if (!ns) return null;
+  // Only the durable front-page blank composer can be restored across runs.
+  // Ephemeral side panes retain their previous in-memory-only blank drafts.
+  if (sessionId === null) return ns === "jarvis.agentChat.draft.v2" ? "galen.composer.blank.v1" : null;
+  return `galen.composer.text.v1:${encodeURIComponent(ns)}:${encodeURIComponent(sessionId)}`;
 }
 
 function storedText(chat: AgentChatStoreHook, sessionId: string | null): string {
-  const key = sessionId === null ? null : storageKey(chat, sessionId);
+  const key = storageKey(chat, sessionId);
   try { return key ? (localStorage.getItem(key) ?? "").slice(0, 200000) : ""; } catch { return ""; }
 }
 
 function persistText(chat: AgentChatStoreHook, sessionId: string | null, text: string) {
-  const key = sessionId === null ? null : storageKey(chat, sessionId);
+  const key = storageKey(chat, sessionId);
   if (!key) return;
   try {
     if (text) localStorage.setItem(key, text.slice(0, 200000));

@@ -316,6 +316,17 @@ function writeDraft(key: string, draft: ComposerDraft): void {
  * The route still answers and corrects a stale id.
  */
 const LEAD_SESSION_KEY = "jarvis.agentChat.leadSession.v1";
+const BLANK_PROJECT_KEY = "galen.composer.blank.project.v1";
+
+function readBlankProject(): string | undefined {
+  try { return localStorage.getItem(BLANK_PROJECT_KEY) || undefined; } catch { return undefined; }
+}
+function writeBlankProject(projectId?: string): void {
+  try {
+    if (projectId) localStorage.setItem(BLANK_PROJECT_KEY, projectId);
+    else localStorage.removeItem(BLANK_PROJECT_KEY);
+  } catch { /* storage unavailable */ }
+}
 
 function readLeadSessionId(): string | null {
   try {
@@ -1170,7 +1181,10 @@ export function createAgentChatStore(
         // A lead open still waiting on its route must not replace this page.
         ++leadRequest;
         restoreAttempted = true;
-        if (surface === "jarvis" && options.voice !== false) writeLeadSessionId(null);
+        if (surface === "jarvis" && options.voice !== false) {
+          writeLeadSessionId(null);
+          writeBlankProject(opts?.projectId);
+        }
         // Keep the transcript on hand: on the front page "new chat" reopens
         // this same conversation (the Dodaios tab does it on every visit),
         // and it then paints at once instead of reading it all again. Other
@@ -1205,7 +1219,13 @@ export function createAgentChatStore(
         if (surface !== "jarvis" || options.voice === false || restoreAttempted) return;
         restoreAttempted = true;
         const remembered = readLeadSessionId();
-        if (!remembered || get().activeSessionId) return;
+        if (get().activeSessionId) return;
+        if (!remembered) {
+          const projectId = readBlankProject();
+          newChatLane.projectId = projectId;
+          bindVoice(null, null, projectId);
+          return;
+        }
         const revision = ++leadRequest;
         set({ opening: true });
         try {
@@ -1219,7 +1239,9 @@ export function createAgentChatStore(
       openSession: (sessionId) => {
         ++leadRequest;
         restoreAttempted = true;
-        if (surface === "jarvis" && options.voice !== false) writeLeadSessionId(sessionId);
+        if (surface === "jarvis" && options.voice !== false) {
+          writeLeadSessionId(sessionId);
+        }
         if (get().activeSessionId === sessionId && socket) return;
         const prev = get();
         if (prev.activeSessionId && prev.activeSessionId !== sessionId) {
@@ -1348,7 +1370,10 @@ export function createAgentChatStore(
             onSessionCreated?.(session);
             if (visible) {
               set({ activeSessionId: session.session_id, activeSession: session, timeline: EMPTY_TIMELINE, opening: false });
-              if (surface === "jarvis" && options.voice !== false) writeLeadSessionId(session.session_id);
+              if (surface === "jarvis" && options.voice !== false) {
+                writeLeadSessionId(session.session_id);
+                writeBlankProject();
+              }
               bindVoice(session.session_id);
               connect(session.session_id, 0);
             }

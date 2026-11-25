@@ -31,6 +31,23 @@ describe("restore selected ordinary chat without resurrecting a new blank chat",
     expect(localStorage.getItem(KEY)).toBeNull();
     store.getState().disconnect();
   });
+  it("restores the ordinary blank draft across restarts without sharing it with Work or side panes", async () => {
+    const store = createAgentChatStore("jarvis");
+    store.getState().newChat({ projectId: "project-a" });
+    writeComposerDraft(store, null, { text: "unsent blank", choices: [] });
+    const restarted = createAgentChatStore("jarvis");
+    await restarted.getState().restoreLastChat();
+    expect(restarted.getState().activeSessionId).toBeNull();
+    expect(readComposerDraft(restarted, null).text).toBe("unsent blank");
+    expect(localStorage.getItem("galen.composer.blank.project.v1")).toBe("project-a");
+    expect(readComposerDraft(createAgentChatStore("agent"), null).text).toBe("");
+    expect(readComposerDraft(createAgentChatStore("jarvis", "side"), null).text).toBe("");
+    restarted.getState().newChat({ projectId: "project-b" });
+    expect(readComposerDraft(restarted, null).text).toBe("");
+    expect(localStorage.getItem("galen.composer.blank.project.v1")).toBe("project-b");
+    restarted.getState().disconnect();
+    store.getState().disconnect();
+  });
   it("restores draft text only for its own chat and store namespace", () => {
     const store = createAgentChatStore("jarvis", "draft-test");
     writeComposerDraft(store, "saved", { text: "unsent", choices: [] });
