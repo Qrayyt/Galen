@@ -452,3 +452,9 @@ starting the scoped project-context injection block.
 
 - Captured caller-owned history and project briefing for classic speech and push-to-talk. Streaming, nonstreaming, buffered completion and local spoken briefs use the call-owned scope; no fallback to shared history on a supported brain. Realtime-to-classic fallback reuses one pinned call seed rather than a newer selection. Scope is released on call teardown. Project-scoped brain turns also opt out of automatic global-memory curation to prevent private response data becoming shared memory.
 - Added focused seed, stream and classic context fixtures and included them in candidate backend regression. This is not yet a verified hardware microphone / real provider scenario. Tasks 5 and 15 still require integration acceptance; rich binary document ingestion is not included in this change.
+
+## GLNT deployment preflight and isolated packaging
+
+- Authorized read-only Moscow inventory: no GLNT container, port 8768 unused, nginx configuration test passed, current Galen HTTPS returned 200, TLS valid until 2027-02-22. Docker available. Root filesystem 97% used (483 MiB free). Amsterdam root filesystem 93% used (1.1 GiB free). Both fail the conservative 2 GiB free-space prerequisite for a new image/build. No production service, credentials, DNS, website or nginx config changed; no cleanup or paid provisioning performed.
+- Added a minimal isolated catalog image build, scratch container smoke, restricted nginx locations/rate limits and a deployment/rollback runbook. CI now verifies the standalone catalog image with no desktop dependencies. Repository verification has an overall deadline and a bounded concurrency gate. The default desktop catalog URL remains empty until live HTTPS acceptance.
+- Deployment and real publisher authorization remain blocked by host capacity and live acceptance. Task 28 remains in progress; implementation and mocked tests are not a production deployment.

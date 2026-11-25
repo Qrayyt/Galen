@@ -1,6 +1,7 @@
 """GLNT metadata-only catalog. Run behind HTTPS; no archive proxy or package store."""
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -21,7 +22,8 @@ from dodaios.marketplace.glnt_manifest import (
     MANIFEST, MAX_FILE, MAX_FILES, MAX_EXPANDED, SHA, data_path, github_repo, parse_manifest,
 )
 
-app = FastAPI(title="GLNT Marketplace", version="1.0.0")
+app = FastAPI(title="GLNT Marketplace", version="1.0.0", docs_url=None, redoc_url=None, openapi_url=None)
+_submission_slots = asyncio.Semaphore(3)
 API = "https://api.github.com"
 
 
@@ -204,7 +206,13 @@ def detail(entry_id: str):
 async def submit(body: Submission, authorization: str | None = Header(None)):
     token = bearer(authorization)
     try:
-        metadata, repo_id, owner_id, submitter = await inspect_repository(body.repository_url, token)
+        # Bound total verification time as well as each GitHub request. Do
+        # not leave a large repository scan running indefinitely behind nginx.
+        async with asyncio.timeout(75):
+            async with _submission_slots:
+                metadata, repo_id, owner_id, submitter = await inspect_repository(body.repository_url, token)
+    except TimeoutError as exc:
+        raise HTTPException(504, "Repository verification timed out; try again later") from exc
     except (ValueError, KeyError, TypeError, httpx.HTTPError) as exc:
         raise HTTPException(400, "Repository or manifest validation failed") from exc
     entry_id = hashlib.sha256(f"{repo_id}:{metadata['version']}".encode()).hexdigest()[:32]
