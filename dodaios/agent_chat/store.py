@@ -246,6 +246,7 @@ class AgentChatSession:
     #: metadata store; this id is deliberately soft so either database can be
     #: restored independently without making sessions unreadable.
     project_id: str | None = None
+    private_project_history: bool = False
     #: Unsent composer text, persisted for restart restoration.
     draft: str = ""
     #: Bounded UI state owned by native components, never executable model data.
@@ -378,6 +379,15 @@ class AgentChatStore:
             )
         if "project_id" not in have:
             self._conn.execute("ALTER TABLE agent_chat_sessions ADD COLUMN project_id TEXT")
+        if "private_project_history" not in have:
+            self._conn.execute("ALTER TABLE agent_chat_sessions ADD COLUMN private_project_history INTEGER NOT NULL DEFAULT 0")
+        self._conn.execute("UPDATE agent_chat_sessions SET private_project_history = 1 WHERE COALESCE(project_id, '') <> '' AND private_project_history = 0")
+        self._conn.execute("""CREATE TRIGGER IF NOT EXISTS agent_chat_sessions_private_insert AFTER INSERT ON agent_chat_sessions
+            WHEN COALESCE(NEW.project_id, '') <> '' BEGIN
+            UPDATE agent_chat_sessions SET private_project_history = 1 WHERE session_id = NEW.session_id; END""")
+        self._conn.execute("""CREATE TRIGGER IF NOT EXISTS agent_chat_sessions_private_update AFTER UPDATE OF project_id ON agent_chat_sessions
+            WHEN COALESCE(NEW.project_id, '') <> '' OR COALESCE(OLD.project_id, '') <> '' BEGIN
+            UPDATE agent_chat_sessions SET private_project_history = 1 WHERE session_id = NEW.session_id; END""")
         if "draft" not in have:
             self._conn.execute(
                 "ALTER TABLE agent_chat_sessions ADD COLUMN draft TEXT NOT NULL DEFAULT ''"
@@ -1431,6 +1441,7 @@ class AgentChatStore:
             started_by=str(row["started_by"] or "") if "started_by" in row.keys() else "",
             build_mode=str(row["build_mode"] or "") if "build_mode" in row.keys() else "",
             project_id=(str(row["project_id"]) if "project_id" in row.keys() and row["project_id"] else None),
+            private_project_history=bool(row["private_project_history"]) if "private_project_history" in row.keys() else False,
             draft=str(row["draft"] or "") if "draft" in row.keys() else "",
             state=(
                 json.loads(row["state_json"] or "{}")

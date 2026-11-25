@@ -255,6 +255,10 @@ async def _society_completed(session: Any, completion: ChatCompletion) -> None:
 
 async def _jarvis_completed(session: Any, completion: ChatCompletion) -> None:
     """Feed Jarvis' own learning loop and the self-building loop (lazy, no-ops when off)."""
+    from dodaios.agent_chat.project_context import private_project_history
+
+    if private_project_history(session):
+        return
     from dodaios.memory.learning.loop import current_loop
     from dodaios.self_build.app import chat_turn_completed as self_build_observe
 
@@ -321,6 +325,10 @@ async def read_proactive_cues(session_id: str, text: str, tool_names: tuple[str,
 async def _person_chat_completed(session: Any, completion: ChatCompletion) -> None:
     """The IDE's agent chat and side chat: the person's typed turns feed the
     self-building loop (lazy, a no-op when off)."""
+    from dodaios.agent_chat.project_context import private_project_history
+
+    if private_project_history(session):
+        return
     from dodaios.self_build.app import chat_turn_completed as self_build_observe
 
     await self_build_observe(session, completion, surface=str(getattr(session, "surface", "")))

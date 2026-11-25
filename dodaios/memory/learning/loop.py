@@ -283,6 +283,10 @@ class JarvisLearningLoop:
         return "voice:" + (session or "unknown")
 
     async def _on_voice_turn(self, event: Any) -> None:
+        from dodaios.agent_chat.project_context import private_voice_call
+
+        if private_voice_call(str(getattr(event, "session_id", "") or "")):
+            return
         tools = tuple(str(t) for t in (getattr(event, "tool_calls", ()) or ()))
         self.record(
             self._voice_key(event),
@@ -300,8 +304,9 @@ class JarvisLearningLoop:
     async def chat_turn_completed(self, session: Any, completion: Any) -> None:
         """Jarvis chat surface hook: one typed turn with its tool names."""
         from dodaios.society.memory_intent import user_evidence
+        from dodaios.agent_chat.project_context import private_project_history
 
-        if self._stopped:
+        if self._stopped or private_project_history(session):
             return
         turn = getattr(completion, "turn", None)
         if turn is not None and not getattr(turn, "direct_user", True):

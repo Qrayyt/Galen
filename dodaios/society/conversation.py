@@ -460,7 +460,9 @@ async def prepare_history(
             if boundary is not None:
                 through = boundary
                 await asyncio.to_thread(archive.save_checkpoint, sid, through, summary)
-                if getattr(session, "surface", "") == "jarvis":
+                from dodaios.agent_chat.project_context import private_project_history
+
+                if getattr(session, "surface", "") == "jarvis" and not private_project_history(session):
                     # The lead's one conversation: what happened becomes episode
                     # memories (ADR-0044). Agents' own threads stay out of the vault.
                     from dodaios.memory.vault.runtime import record_checkpoint

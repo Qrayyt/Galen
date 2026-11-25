@@ -36,7 +36,7 @@ SINCE_DAYS = 180
 Reviewer = Callable[[str], Awaitable[Any]]
 
 
-def _read(db: Path, sql: str, args: tuple[Any, ...]) -> list[sqlite3.Row]:
+def _read(db: Path, sql: str, args: tuple[Any, ...], *, project_table: str) -> list[sqlite3.Row]:
     if not db.is_file():
         return []
     try:
@@ -46,6 +46,18 @@ def _read(db: Path, sql: str, args: tuple[Any, ...]) -> list[sqlite3.Row]:
         return []
     conn.row_factory = sqlite3.Row
     try:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({project_table})")}
+        guards = []
+        if "project_id" in columns:
+            guards.append("COALESCE(s.project_id, '') <> ''")
+        if "private_project_history" in columns:
+            guards.append("s.private_project_history <> 0")
+        if guards:
+            predicate = " OR ".join(guards)
+            if project_table == "agent_chat_sessions":
+                sql += f" AND NOT ({predicate})"
+            else:
+                sql += f" AND NOT EXISTS (SELECT 1 FROM chat_threads s WHERE s.thread_id = chat_messages.thread_id AND ({predicate}))"
         return conn.execute(sql, args).fetchall()
     except sqlite3.Error:  # an older schema without these columns has nothing to give
         log.info("memory backfill: %s has no readable chat rows", db)
@@ -65,7 +77,7 @@ def collect_user_turns(data_dir: Path, *, since_days: int = SINCE_DAYS) -> list[
         "SELECT e.ts_ms AS ts, e.payload AS payload FROM agent_chat_events e "
         "JOIN agent_chat_sessions s ON s.session_id = e.session_id "
         "WHERE s.surface = 'jarvis' AND e.kind = 'user_message' AND e.ts_ms >= ?",
-        (cutoff_ms,),
+        (cutoff_ms,), project_table="agent_chat_sessions",
     ):
         try:
             text = str((json.loads(row["payload"]) or {}).get("text") or "")
@@ -76,7 +88,7 @@ def collect_user_turns(data_dir: Path, *, since_days: int = SINCE_DAYS) -> list[
         data_dir / "chats.db",
         "SELECT timestamp_ns AS ts, text FROM chat_messages "
         "WHERE role = 'user' AND timestamp_ns >= ?",
-        (cutoff_ms * 1_000_000,),
+        (cutoff_ms * 1_000_000,), project_table="chat_threads",
     ):
         rows.append((int(row["ts"]) // 1_000_000, str(row["text"] or "")))
     seen: set[str] = set()

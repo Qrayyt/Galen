@@ -109,6 +109,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("chat_messages", "trace_json", "TEXT"),
     ("chat_threads", "mode", "TEXT NOT NULL DEFAULT 'chat'"),
     ("chat_threads", "project_id", "TEXT"),
+    ("chat_threads", "private_project_history", "INTEGER NOT NULL DEFAULT 0"),
     ("chat_threads", "draft", "TEXT NOT NULL DEFAULT ''"),
     ("chat_threads", "state_json", "TEXT NOT NULL DEFAULT '{}'"),
     ("chat_projects", "context_documents_json", "TEXT NOT NULL DEFAULT '{}'"),
@@ -143,6 +144,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         if column not in have:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.execute("UPDATE chat_threads SET private_project_history = 1 WHERE COALESCE(project_id, '') <> '' AND private_project_history = 0")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS chat_threads_private_insert AFTER INSERT ON chat_threads
+        WHEN COALESCE(NEW.project_id, '') <> '' BEGIN
+        UPDATE chat_threads SET private_project_history = 1 WHERE thread_id = NEW.thread_id; END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS chat_threads_private_update AFTER UPDATE OF project_id ON chat_threads
+        WHEN COALESCE(NEW.project_id, '') <> '' OR COALESCE(OLD.project_id, '') <> '' BEGIN
+        UPDATE chat_threads SET private_project_history = 1 WHERE thread_id = NEW.thread_id; END""")
 
 
 def _dump_trace(trace: dict[str, Any] | None) -> str | None:

@@ -41,3 +41,16 @@ def test_change_surface_refuses_vendor_and_approval_state():
         store.change_surface(sid, "jarvis", "agent", cwd="/work", permission_mode="ask")
     assert store.get_session(sid).surface == "jarvis"
     store.close()
+
+
+def test_project_history_stays_private_after_detach_and_restart(tmp_path):
+    path = tmp_path / "chat.db"
+    store = AgentChatStore(path)
+    sid = session(store).session_id
+    assert store.get_session(sid).private_project_history
+    store.detach_project("project")
+    store.close()
+    store = AgentChatStore(path)
+    row = store.get_session(sid)
+    assert row.project_id is None and row.private_project_history
+    store.close()

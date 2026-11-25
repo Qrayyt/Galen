@@ -478,3 +478,8 @@ starting the scoped project-context injection block.
 ## Native UI provider adapter regression
 
 - Extended native UI model guidance with matching-fence rules, JSON/option constraints, a concrete checklist example and plain-Markdown preference. Added 18 deterministic adapter scenarios over actual OpenAI-compatible, Anthropic and Gemini code paths (single-character, mixed and whole-answer fragments, complete and truncated). Fake SDK events exercise the real normalization, not live accounts; tests assert exact text, prompt delivery and absence of tool calls. Added prompt-example contract tests and included both suites in dependency-backed candidate CI. Task 20 remains in progress until CI results are available.
+
+## Private project automatic-learning safeguards
+
+- Added sticky SQLite privacy flags for project-associated text and agent histories, retained after ungrouping. Automatic typed learning, self-building, proactive cues, archive backfill and global episode recording exclude these histories. Captured scoped voice calls are excluded from voice-event learning by call ID. Local history/checkpoints and explicit memory actions remain available.
+- Added restart/detach and learning-loop regression tests and included the learning suite in candidate CI. Existing memories are not purged; previously ungrouped histories with no recorded association cannot be inferred retrospectively. Full candidate acceptance remains pending.

@@ -597,3 +597,19 @@ def test_the_brain_prompt_carries_the_learned_block(book: JarvisNotebook) -> Non
 
     assert "The user's printer is in the attic." in prompt
     assert prompt == manager._build_system_prompt()  # byte-stable for the prompt cache
+
+
+async def test_project_turns_never_feed_automatic_global_learning(book: JarvisNotebook) -> None:
+    from dodaios.agent_chat.project_context import mark_private_voice_call
+    from dodaios.core.events import VoiceTurnCompleted
+
+    loop = JarvisLearningLoop(book, ScriptedReviewer(), review_every_turns=50, idle_review_seconds=0)
+    for session in (SimpleNamespace(session_id="project-chat", project_id="p"),
+                    SimpleNamespace(session_id="former-project", private_project_history=True)):
+        await loop.chat_turn_completed(session, _completion("I am training for a private project"))
+    mark_private_voice_call("private-project-call")
+    await loop._on_voice_turn(VoiceTurnCompleted(session_id="private-project-call", turn_id="t",
+        user_text="I am training for a private project", jarvis_text="Noted", tier="realtime"))
+    assert loop.pending() == {}
+    await loop.chat_turn_completed(SimpleNamespace(session_id="ordinary-chat"), _completion("I am training for the Berlin marathon"))
+    assert loop.pending() == {"chat:ordinary-chat": 1}

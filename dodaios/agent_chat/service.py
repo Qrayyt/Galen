@@ -2804,7 +2804,7 @@ class AgentChatService:
         """Capture one call's history and project together, before opening its provider."""
         from types import SimpleNamespace
         from dodaios.agent_chat import lead
-        from dodaios.agent_chat.project_context import project_brief
+        from dodaios.agent_chat.project_context import project_brief, private_project_history, mark_private_voice_call
 
         binding = getattr(self, "_voice_seed_binding", None)
         if binding is None:
@@ -2819,6 +2819,8 @@ class AgentChatService:
         if archived:
             lookup = getattr(self, "voice_archive_project_lookup", None)
             project_id = lookup(archived) if callable(lookup) else None
+        if project_id or private_project_history(session):
+            mark_private_voice_call(call_id)
         scope = {"session_id": session_id, "project_id": project_id, "archived": bool(archived), "binding": binding}
         if call_id:
             scopes = self._voice_call_scopes
@@ -2948,7 +2950,9 @@ class AgentChatService:
                 return None
         if user:
             await self._emit(session_id, make_event("user_message", {"text": user}))
-            if session.surface == "jarvis":
+            from dodaios.agent_chat.project_context import private_project_history
+
+            if session.surface == "jarvis" and not private_project_history(session):
                 await self._read_voice_cues(session_id, user, tool_calls)
         if not reply:
             return None
