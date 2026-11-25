@@ -378,3 +378,11 @@ starting the scoped project-context injection block.
 ## CI repair checkpoint
 
 - Run 45627405167: 9 focused frontend tests passed; TypeScript failed because split-pane stores did not implement the new restoration method. Python compileall passed, GLNT test collection failed because uvicorn was missing from the CI dependencies. Added scoped no-op restoration in split panes and missing dependency; expanded focused tests. No release changes.
+
+## Continued implementation — native state, marketplace registration, voice isolation
+
+- `02bc09b`: repaired split-pane TypeScript contract and CI dependencies. Focused backend and frontend test steps now pass on subsequent runs; prior full builds were canceled by new pushes, not verified.
+- `b1dfe6c`: bounded message/block-scoped native UI state, checklist/selection/calculator persistence and completed truncated response fallback.
+- `87f5cee`: consent-based GLNT installation into the native plugin catalog (disconnected) or skill registry (draft), source and version checks, integrity and moderation recheck, staged update and rollback on rename failure. Live registration integration and update/uninstall acceptance still need testing.
+- `cf08e29`: fresh voice chat cannot seed prior lead history; voice-first project association preserved by the bind API and mirror. Actual voice runtime project briefing remains outstanding.
+- This checkpoint adds reviewed commit-pinned raster icons with size/dimension limits and PNG normalization, client validation fixtures, and stops CI from canceling in-progress builds on each push. Native state fixtures are now included in CI. No deployment or release changes.

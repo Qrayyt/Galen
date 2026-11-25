@@ -22,6 +22,8 @@ def _digest(data: bytes) -> str:
 
 def _public_https(value: str) -> bool:
     from ipaddress import ip_address
+    if not isinstance(value, str):
+        return False
     try:
         u = urlsplit(value)
         host = u.hostname or ""

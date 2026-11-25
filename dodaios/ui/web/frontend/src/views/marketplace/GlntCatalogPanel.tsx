@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 
 type Item = { id: string; name: string; title: string; description: string; type: string;
   version: string; min_galen: string; category: string; author: string; repository_url: string;
-  commit: string; manifest_sha256: string; permissions: string[]; local_status?: string; installed_version?: string | null };
+  commit: string; icon_url?: string | null; manifest_sha256: string; permissions: string[]; local_status?: string; installed_version?: string | null };
 type Page = { configured: boolean; items: Item[]; staged: Item[]; stale: boolean; next_offset: number | null };
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {
@@ -75,7 +75,7 @@ export function GlntCatalogPanel({ onClose, onSignIn, signedIn }: {
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
       {page?.items.map(item => <button key={item.id} type="button" disabled={busy} onClick={() => setSelected(item)}
         className="rounded-lg border border-border bg-card p-4 text-left hover:bg-muted/40">
-        <p className="font-medium">{item.title}</p><p className="text-xs text-muted-foreground">{item.author} · {item.version} · {item.type}</p>
+        <div className="flex items-center gap-3"><span className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-muted text-lg font-medium">{item.title.slice(0, 1).toUpperCase()}{item.icon_url && !page.stale && <img className="absolute inset-0 h-full w-full bg-card object-contain" alt="" loading="lazy" src={"/api/marketplace/glnt/icon/" + item.id + "?commit=" + item.commit} onError={e => {e.currentTarget.style.display = "none";}} />}</span><p className="font-medium">{item.title}</p></div><p className="text-xs text-muted-foreground">{item.author} · {item.version} · {item.type}</p>
         <p className="mt-2 text-sm text-muted-foreground">{item.description}</p>
       </button>)}
     </div>

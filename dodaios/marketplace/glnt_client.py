@@ -15,7 +15,7 @@ from packaging.version import Version
 from dodaios import __version__
 from dodaios.marketplace.glnt_manifest import (
     DIGEST, MAX_ARCHIVE, PERMISSIONS, SHA, SLUG, VERSION, github_archive_url,
-    github_repo, read_package,
+    github_repo, read_package, safe_path,
 )
 
 ENTRY_ID = re.compile(r"[0-9a-f]{32}")
@@ -50,7 +50,41 @@ def validate_entry(item: dict) -> dict:
     if not isinstance(p, list) or any(x not in PERMISSIONS for x in p) or len(set(p)) != len(p):
         raise ValueError("Invalid package permissions")
     v["repository_url"] = "https://github.com/" + github_repo(v["repository_url"])
+    icon = item.get("icon_url")
+    if icon is not None:
+        prefix = f"https://raw.githubusercontent.com/{github_repo(v['repository_url'])}/{v['commit']}/"
+        if not isinstance(icon, str) or not icon.startswith(prefix):
+            raise ValueError("Icon source must match the reviewed commit")
+        path = safe_path(icon[len(prefix):])
+        if Path(path).suffix.lower() not in {".png", ".jpg", ".jpeg", ".webp"}:
+            raise ValueError("Invalid icon format")
+    v["icon_url"] = icon
     return v
+
+
+async def download_icon(item: dict) -> bytes:
+    """Fetch only a reviewed, commit-pinned raster and normalize it to PNG."""
+    import io
+    from PIL import Image
+    item = validate_entry(item)
+    url = item["icon_url"]
+    if not url:
+        raise ValueError("No icon")
+    raw = bytearray()
+    async with httpx.AsyncClient(timeout=10, follow_redirects=False, trust_env=False) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                raw.extend(chunk)
+                if len(raw) > 512 * 1024:
+                    raise ValueError("Icon too large")
+    with Image.open(io.BytesIO(raw)) as image:
+        if image.format not in {"PNG", "JPEG", "WEBP"} or max(image.size) > 1024:
+            raise ValueError("Unsupported icon dimensions or format")
+        image.thumbnail((128, 128))
+        output = io.BytesIO()
+        image.convert("RGBA").save(output, format="PNG")
+    return output.getvalue()
 
 
 @contextmanager

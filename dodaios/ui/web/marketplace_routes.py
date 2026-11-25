@@ -2498,6 +2498,22 @@ async def glnt_browse(q: str = "", kind: str = "", offset: int = 0):
     return {"configured": True, "staged": local, **page}
 
 
+@router.get("/glnt/icon/{entry_id}")
+async def glnt_icon(entry_id: str, commit: str):
+    from dodaios.marketplace.glnt_client import ENTRY_ID, SHA, request_json, validate_entry, download_icon
+    if not ENTRY_ID.fullmatch(entry_id) or not SHA.fullmatch(commit):
+        raise HTTPException(404, "Icon unavailable")
+    base, _ = _glnt_settings()
+    try:
+        item = validate_entry((await request_json(base, "/v1/catalog/" + entry_id))["item"])
+        if item["id"] != entry_id or item["commit"] != commit:
+            raise ValueError("Icon source changed")
+        raw = await download_icon(item)
+        return Response(raw, media_type="image/png", headers={"Cache-Control": "private, max-age=3600", "X-Content-Type-Options": "nosniff"})
+    except Exception:
+        raise HTTPException(404, "Icon unavailable")
+
+
 @router.post("/glnt/stage")
 async def glnt_stage(body: GlntStageBody):
     from dodaios.marketplace.glnt_client import request_json, validate_entry, download_archive, stage_verified

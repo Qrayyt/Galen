@@ -62,3 +62,19 @@ def test_incompatible_and_repository_collision(tmp_path):
 def test_catalog_origin(url):
     with pytest.raises(ValueError):
         catalog_base(url)
+
+
+@pytest.mark.parametrize("url", ["https://evil.test/icon.png", "https://raw.githubusercontent.com/owner/repo/main/icon.png", "https://raw.githubusercontent.com/owner/repo/" + "b"*40 + "/../icon.png", "https://raw.githubusercontent.com/owner/repo/" + "b"*40 + "/icon.svg"])
+def test_icon_requires_pinned_safe_raster(url):
+    from dodaios.marketplace.glnt_client import validate_entry
+    item, _ = package()
+    item["icon_url"] = url
+    with pytest.raises(ValueError):
+        validate_entry(item)
+
+
+def test_pinned_icon_metadata():
+    from dodaios.marketplace.glnt_client import validate_entry
+    item, _ = package()
+    item["icon_url"] = "https://raw.githubusercontent.com/owner/repo/" + "b"*40 + "/icon.png"
+    assert validate_entry(item)["icon_url"] == item["icon_url"]
