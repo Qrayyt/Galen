@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 # that depends on this one at the same version and re-declares its extras and
 # [project.scripts] (scripts/ci/build_distributions.py).
 name = "dodaios"
-version = "1.0.0-preview.4"
+version = "1.0.0-preview.5"
 description = "One voice-driven assistant that directs your models, your coding agents and your computer. Open source, installed on your own machine."
 requires-python = ">=3.11,<3.15"
 readme = "README.md"
