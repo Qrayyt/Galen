@@ -43,6 +43,27 @@ export interface ChatProject {
   updated_ms: number;
 }
 
+/** Wire format from ProjectResponse in chats_routes.py. Keep the UI's stable
+ * project_id field while decoding the backend's canonical id. */
+type ChatProjectResponse = Omit<ChatProject, "project_id" | "created_ms" | "updated_ms"> & {
+  id: string;
+  created_at_ns: number;
+  updated_at_ns: number;
+};
+
+function decodeChatProject(row: ChatProjectResponse): ChatProject {
+  if (typeof row.id !== "string" || !row.id) {
+    throw new Error("project-response-invalid-id");
+  }
+  const { id, created_at_ns, updated_at_ns, ...metadata } = row;
+  return {
+    ...metadata,
+    project_id: id,
+    created_ms: Math.floor(created_at_ns / 1_000_000),
+    updated_ms: Math.floor(updated_at_ns / 1_000_000),
+  };
+}
+
 export interface ChatAppState {
   active_kind?: ConversationKind;
   active_id?: string | null;
@@ -102,7 +123,7 @@ export async function patchTextConversation(
 export async function fetchChatProjects(): Promise<ChatProject[]> {
   const res = await fetch("/api/chats/projects");
   if (!res.ok) throw new ChatsApiError("projects-failed", res.status);
-  return (await res.json()) as ChatProject[];
+  return ((await res.json()) as ChatProjectResponse[]).map(decodeChatProject);
 }
 
 export async function createChatProject(input: { name: string; icon?: string }): Promise<ChatProject> {
@@ -112,7 +133,7 @@ export async function createChatProject(input: { name: string; icon?: string }):
     body: JSON.stringify(input),
   });
   if (!res.ok) throw new ChatsApiError("project-create-failed", res.status);
-  return (await res.json()) as ChatProject;
+  return decodeChatProject((await res.json()) as ChatProjectResponse);
 }
 
 export async function patchChatProject(projectId: string, input: Partial<Pick<ChatProject, "name" | "icon" | "instructions" | "context_files" | "agent_id" | "collapsed" | "position">>): Promise<ChatProject> {
@@ -122,7 +143,7 @@ export async function patchChatProject(projectId: string, input: Partial<Pick<Ch
     body: JSON.stringify(input),
   });
   if (!res.ok) throw new ChatsApiError("project-update-failed", res.status);
-  return (await res.json()) as ChatProject;
+  return decodeChatProject((await res.json()) as ChatProjectResponse);
 }
 
 export async function deleteChatProject(projectId: string, deleteChats = false): Promise<void> {
