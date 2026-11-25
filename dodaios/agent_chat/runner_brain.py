@@ -576,6 +576,8 @@ async def run_brain_turn(
     cwd = Path(session.cwd or Path.home())
     stance = handle.stance or "ask"
     kit_tools, system_extra = await kit_payload(session, brain)
+    if handle.project_context:
+        system_extra += "\n\n" + handle.project_context
     from dodaios.agent_chat.delegation_wait import CONTINUE_TURN, is_continuation_prompt
 
     person_request = ""

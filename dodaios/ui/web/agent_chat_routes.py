@@ -62,7 +62,7 @@ from pydantic import BaseModel, Field
 
 from dodaios.agent_chat import attachments as chat_attachments
 from dodaios.agent_chat import runner_cli, send_queue, typeahead
-from dodaios.agent_chat.app_service import service_from_state
+from dodaios.agent_chat.app_service import bind_project_lookup, service_from_state
 from dodaios.agent_chat.catalog import ACCESS_ACCOUNTS, claude_code_models, offers, rows_for
 from dodaios.agent_chat.control_types import CommandRequest, CommandResult
 from dodaios.agent_chat.credential_requests import CredentialRequestBusy
@@ -464,7 +464,7 @@ async def _async_service(request: Request) -> AgentChatService:
     """Wait for lazy construction without holding the serving event loop."""
     service = getattr(request.app.state, "agent_chat", None)
     if service is not None:
-        return service
+        return bind_project_lookup(service, request.app.state)
     # The build runs in a plain worker thread, which cannot find this loop by
     # asking. Unrecorded, the first request of a window that was open across
     # an app restart closed every thread turn the turn host still ran as

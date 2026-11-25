@@ -161,6 +161,7 @@ class TurnHandle:
     #: A plain chat's whole system prompt (``SurfaceKit.plain_chat``); empty on
     #: every other surface. With it the turn carries no tools.
     plain_system: str = ""
+    project_context: str = ""
     #: A plain chat's pictures for THIS message, as files in the session's
     #: folder (``plain_chat.image_paths``). Empty everywhere else.
     images: tuple[str, ...] = ()
@@ -400,6 +401,8 @@ async def run_api_turn(handle: TurnHandle, user_text: str) -> None:
     system = handle.plain_system or system_prompt(
         cwd=cwd, assistant_name=handle.assistant_name, plan=permission_mode == "plan"
     )
+    if handle.project_context:
+        system += "\n\n" + handle.project_context
     if handle.output_language:
         system += "\nRespond in this language: " + handle.output_language
     note = effort_note(provider, effort)

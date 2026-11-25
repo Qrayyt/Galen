@@ -129,6 +129,7 @@ class ProjectRequest(BaseModel):
     icon: str = Field(default="", max_length=200)
     instructions: str = Field(default="", max_length=100_000)
     context_files: list[str] = Field(default_factory=list, max_length=200)
+    context_documents: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = Field(default=None, max_length=200)
 
 
@@ -137,6 +138,7 @@ class PatchProjectRequest(BaseModel):
     icon: str | None = Field(default=None, max_length=200)
     instructions: str | None = Field(default=None, max_length=100_000)
     context_files: list[str] | None = Field(default=None, max_length=200)
+    context_documents: dict[str, str] | None = None
     agent_id: str | None = Field(default=None, max_length=200)
     collapsed: bool | None = None
     position: float | None = None
@@ -148,6 +150,7 @@ class ProjectResponse(BaseModel):
     icon: str = ""
     instructions: str = ""
     context_files: list[str] = Field(default_factory=list)
+    context_documents: dict[str, str] = Field(default_factory=dict)
     agent_id: str | None = None
     collapsed: bool = False
     position: float = 0

@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS chat_projects (
     icon                TEXT NOT NULL DEFAULT '',
     instructions        TEXT NOT NULL DEFAULT '',
     context_files_json  TEXT NOT NULL DEFAULT '[]',
+    context_documents_json TEXT NOT NULL DEFAULT '{}',
     agent_id            TEXT,
     collapsed           INTEGER NOT NULL DEFAULT 0,
     position            REAL NOT NULL DEFAULT 0,
@@ -105,6 +106,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("chat_threads", "project_id", "TEXT"),
     ("chat_threads", "draft", "TEXT NOT NULL DEFAULT ''"),
     ("chat_threads", "state_json", "TEXT NOT NULL DEFAULT '{}'"),
+    ("chat_projects", "context_documents_json", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 
@@ -563,6 +565,7 @@ class ChatStore:
             "icon": row["icon"] or "",
             "instructions": row["instructions"] or "",
             "context_files": _load_string_list(row["context_files_json"]),
+            "context_documents": _load_object(row["context_documents_json"]),
             "agent_id": row["agent_id"],
             "collapsed": bool(row["collapsed"]),
             "position": float(row["position"] or 0),
@@ -578,12 +581,16 @@ class ChatStore:
         icon: str = "",
         instructions: str = "",
         context_files: list[str] | None = None,
+        context_documents: dict[str, str] | None = None,
         agent_id: str | None = None,
         project_id: str | None = None,
     ) -> dict[str, Any]:
         cleaned = " ".join(name.split())[:_TITLE_MAX_CHARS]
         if not cleaned:
             raise ValueError("Project name is required")
+        from dodaios.agent_chat.project_context import validate_documents
+
+        documents = validate_documents(context_documents or {})
         pid = project_id or str(uuid.uuid4())
         now = time_ns()
         conn = self._ensure_conn()
@@ -592,8 +599,8 @@ class ChatStore:
                 """
                 INSERT INTO chat_projects
                     (project_id, name, icon, instructions, context_files_json,
-                     agent_id, created_at_ns, updated_at_ns)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     context_documents_json, agent_id, created_at_ns, updated_at_ns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pid,
@@ -601,6 +608,7 @@ class ChatStore:
                     icon.strip()[:200],
                     instructions[:100_000],
                     json.dumps(context_files or [], ensure_ascii=False),
+                    json.dumps(documents, ensure_ascii=False),
                     agent_id or None,
                     now,
                     now,
@@ -642,6 +650,11 @@ class ChatStore:
         if "context_files" in changes and changes["context_files"] is not None:
             sets.append("context_files_json = ?")
             values.append(json.dumps(list(changes["context_files"]), ensure_ascii=False))
+        if "context_documents" in changes and changes["context_documents"] is not None:
+            from dodaios.agent_chat.project_context import validate_documents
+
+            sets.append("context_documents_json = ?")
+            values.append(json.dumps(validate_documents(changes["context_documents"]), ensure_ascii=False))
         if not sets:
             return self.get_project(project_id)
         sets.append("updated_at_ns = ?")

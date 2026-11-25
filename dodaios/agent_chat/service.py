@@ -626,6 +626,7 @@ class AgentChatService:
         bus: Callable[[], Any | None] | None = None,
     ) -> None:
         self.store = store
+        self.project_lookup: Callable[[str], dict[str, Any] | None] | None = None
         self._assistant_name = assistant_name or (lambda: DEFAULT_ASSISTANT_NAME)
         self._default_cwd = default_cwd or (lambda: str(Path.home()))
         # The app bus, resolved late (the server builds this service before
@@ -2317,6 +2318,9 @@ class AgentChatService:
                 if kit.plain_chat is not None
                 else ""
             )
+            from dodaios.agent_chat.project_context import project_brief
+
+            project_context = await asyncio.to_thread(project_brief, session, self.project_lookup)
             handle = TurnHandle(
                 session=session,
                 turn_id=turn_id,
@@ -2328,6 +2332,7 @@ class AgentChatService:
                 history=history,
                 tools_disabled=kit.plain,
                 plain_system=plain_system,
+                project_context=project_context,
                 images=images,
                 assistant_name=self._assistant_name(),
                 bus=bus,
@@ -2508,7 +2513,8 @@ class AgentChatService:
                         active_handle,
                         run_prompt
                         + selection_briefing(selected)
-                        + (f"\n\n{background}" if background else ""),
+                        + (f"\n\n{background}" if background else "")
+                        + (f"\n\n{active_handle.project_context}" if active_handle.project_context else ""),
                         runner,
                         identity=as_jarvis,
                         bridge=self._bridge_for(bus) if as_jarvis else None,

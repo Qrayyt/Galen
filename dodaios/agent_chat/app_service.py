@@ -26,6 +26,16 @@ log = logging.getLogger(__name__)
 BUILD_LOCK = threading.Lock()
 
 
+def bind_project_lookup(svc: AgentChatService, state: Any) -> AgentChatService:
+    # Resolve the store lazily: the application may initialize it after the service.
+    def lookup(project_id: str) -> dict[str, Any] | None:
+        store = getattr(state, "chat_store", None)
+        return store.get_project(project_id) if store is not None else None
+
+    svc.project_lookup = lookup
+    return svc
+
+
 def service_from_state(state: Any) -> AgentChatService | None:
     """The service on ``state.agent_chat``, built once from ``state.agent_chat_factory``.
 
@@ -34,7 +44,7 @@ def service_from_state(state: Any) -> AgentChatService | None:
     """
     svc = getattr(state, "agent_chat", None)
     if svc is not None:
-        return svc
+        return bind_project_lookup(svc, state)
     if getattr(state, "agent_chat_factory", None) is not None:
         # Resolve the app's loop while NOT holding the lock: from a worker
         # thread this waits for the loop, and the loop may itself be waiting
@@ -45,7 +55,7 @@ def service_from_state(state: Any) -> AgentChatService | None:
     with BUILD_LOCK:
         svc = getattr(state, "agent_chat", None)
         if svc is not None:
-            return svc
+            return bind_project_lookup(svc, state)
         factory = getattr(state, "agent_chat_factory", None)
         if factory is None:
             return None
@@ -55,4 +65,4 @@ def service_from_state(state: Any) -> AgentChatService | None:
             log.warning("agent chat: service could not be built: %s", exc)
             return None
         state.agent_chat = svc
-        return svc
+        return bind_project_lookup(svc, state)
