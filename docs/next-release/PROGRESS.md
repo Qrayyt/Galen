@@ -519,3 +519,7 @@ starting the scoped project-context injection block.
 ## Preview 6 three-platform installer candidates
 
 - User requested new Windows x64, macOS Apple Silicon and macOS Intel installers. Bumped the Python package and app version from 1.0.0-preview.5 to 1.0.0-preview.6; added both macOS runners to the existing no-publication Windows candidate workflow, sharing backend and frontend preflight gates. Preserve Preview 5 and its assets. All three binaries and SHA-256 receipts will be uploaded as Actions artifacts only; no automatic public release. macOS notarization depends on configured Apple credentials. Previous focused run 45673933496 at 48376141 completed successfully; new exact-version checks pending.
+
+## Preview 6 release authorization
+
+- Exact candidate [45675994014](https://github.com/Qrayyt/Galen/actions/runs/45675994014) and focused [45675994013](https://github.com/Qrayyt/Galen/actions/runs/45675994013) at da7a30e4 succeeded. All six jobs green; 46 basic and 256 expanded tests passed, Windows installed UI report passed. Three installer artifacts available with checksum files. User authorized publication. Promotion workflow validates exact successful run, checksums and source SHA, uploads all seven assets to a draft and publishes only after asset verification. No rebuild and no modification of Preview 5. Publication and site metadata refresh pending confirmation.
