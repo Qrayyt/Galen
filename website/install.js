@@ -55,7 +55,7 @@ function download(key){
   const entry=results[key];if(!entry?.asset)return;
   const {asset,data}=entry;
   document.querySelector('#install-title').textContent='Скачивание Galen';
-  document.querySelector('#install-status').textContent=key!=='Windows'?'Загрузка передана браузеру. Откройте DMG и перетащите Galen в папку Программы.':'Загрузка передана браузеру. После завершения откройте EXE и следуйте инструкциям.';
+  document.querySelector('#install-status').textContent=key!=='Windows'?'Загрузка передана браузеру. Откройте DMG и перетащите Galen в папку Программы. Версия не нотарифицирована Apple; при первом запуске macOS может запросить разрешение в настройках конфиденциальности и безопасности.':'Загрузка передана браузеру. После завершения откройте EXE и следуйте инструкциям.';
   document.querySelector('#install-os').textContent=data.tag_name+' · '+feeds[key].label;
   document.querySelector('#percent').textContent=(asset.size/1e6).toFixed(1)+' МБ';
   dialog.querySelector('.progress').hidden=true;
