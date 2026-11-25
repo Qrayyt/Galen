@@ -191,8 +191,8 @@ INSTALLER_ASSET_NAMES: dict[tuple[str, str], tuple[str, ...]] = {
         "Dodaios-Setup-x64.exe",
         "PersonalJarvis-Setup-x64.exe",
     ),
-    ("macos", "arm64"): ("Dodaios-macOS-arm64.dmg", "PersonalJarvis-macOS-arm64.dmg"),
-    ("macos", "x64"): ("Dodaios-macOS-x64.dmg", "PersonalJarvis-macOS-x64.dmg"),
+    ("macos", "arm64"): ("Galen-macOS-arm64.dmg", "Dodaios-macOS-arm64.dmg", "PersonalJarvis-macOS-arm64.dmg"),
+    ("macos", "x64"): ("Galen-macOS-x64.dmg", "Dodaios-macOS-x64.dmg", "PersonalJarvis-macOS-x64.dmg"),
     ("linux", "x64"): (
         "Dodaios-Linux-x86_64.AppImage",
         "PersonalJarvis-Linux-x86_64.AppImage",
