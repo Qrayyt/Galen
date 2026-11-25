@@ -311,3 +311,12 @@ None. No server credentials were read or recorded. No deployment, database, cata
 Commit and push the unified frontend checkpoint. Then finish Work copy, selected-project creation,
 active-chat/draft restoration, project icon editing, and running-desktop chat/project scenarios before
 starting the scoped project-context injection block.
+
+## Continuation checkpoint — direct GitHub editing
+
+- Base: `8199085`; branch: `feat/galen-next-release`.
+- Product commits: `4e9adf6`, `21a6b8a`, `79ae60c`.
+- Removed the frontend singleton lead reopening path on newChat; added per-send-lane project metadata to avoid cross-chat leakage during asynchronous creation.
+- Added project-aware ordinary chat navigation and a new chat button in project groups.
+- Tasks 1 and 13: frontend implementation advanced, NOT verified; Work project creation, voice-first project scope, and desktop regression checks remain.
+- No external server or release changes. No build or tests run in this environment. Next: inspect Work thread initialization, project editing, and add targeted tests before marking complete.
