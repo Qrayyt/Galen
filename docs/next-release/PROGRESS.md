@@ -11,13 +11,13 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 ## Current checkpoint
 
 - Date: 2026-11-25 15:52 MSK (UTC+03:00).
-- Stage: unified navigation, scoped Work creation, project editing and search advanced; new acceptance checks pending.
+- Stage: project context, restore, native UI and GLNT catalog/client implementation; focused acceptance checks pending.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `d3bddcc`.
-- Latest code checkpoint: project-detachment behavior and regression tests, in addition to the preceding frontend changes.
+  `912720f`.
+- Latest code checkpoint: GLNT desktop panel, verified staging client and non-release CI.
 
 ## Repository audit
 
@@ -45,8 +45,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 2 | Unified history sidebar | in progress | Chat and Work rows, search, recent chats, and project groups render in one sidebar; running-desktop scenarios remain |
 | 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
 | 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
-| 5 | Isolated chat context and global memory | in progress | Existing per-thread message isolation preserved; project context injection still remains |
-| 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated migrations verified in both chat stores; active-chat UI restoration remains |
+| 5 | Isolated chat context and global memory | in progress | Project-scoped runtime instructions/snapshots wired into brain/API/CLI; voice and global-memory boundary checks pending |
+| 6 | Restart restore and lossless migration | in progress | Last ordinary session and scoped text drafts restore; blank draft, full UI state and desktop checks pending |
 | 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
 | 9 | Per-chat mode selection and persistence | in progress | New-conversation Chat/Work selector is in the history column and session metadata persists; existing-chat dialog/state restoration remains |
@@ -55,24 +55,24 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 12 | Project names, icons, collapsible groups | in progress | Name/icon editing and collapse controls implemented; desktop and new tests pending |
 | 13 | Chat and Work creation in projects | in progress | Chat and Work can be created directly in selected project; voice-first scope and runtime verification remain |
 | 14 | Move chats between project scopes | in progress | Agent-backed Chat and Work rows can move between project groups or back to recent/ungrouped; voice rows remain unassignable |
-| 15 | Project instructions, context, and files | in progress | Instructions and context-file references persist; scoped prompt/file injection remains |
+| 15 | Project instructions, context, and files | in progress | Project instructions and bounded text snapshots implemented; rich formats and voice scope pending |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
-| 17 | Native visual component library | not started | Existing chart/report support must be audited first |
-| 18 | Structured response schema | not started | Audit pending |
-| 19 | Safe renderer and Markdown fallback | not started | Audit pending |
-| 20 | Provider/model instructions and examples | not started | Prior library selection will not be invented |
-| 21 | Safe interactions and state | not started | Audit pending |
-| 22 | Streaming validation and recovery | not started | Audit pending |
-| 23 | Metadata-only marketplace catalog | not started | Server infrastructure/access audit required |
-| 24 | Catalog API and Galen client | not started | Audit pending |
-| 25 | GitHub metadata and icons | not started | Audit pending |
-| 26 | Direct GitHub installation | not started | Audit pending |
-| 27 | Direct updates and local removal | not started | Audit pending |
-| 28 | Publish by repository link | not started | Existing partial flow must be identified |
-| 29 | Unified extension manifest | not started | Existing plugin/skill formats must be audited |
-| 30 | Moderation and safe installation | not started | Audit pending |
+| 17 | Native visual component library | implemented | Native cards/tables/charts/diagrams/checklists/progress/calculators/input; focused schema fixtures, runtime acceptance pending |
+| 18 | Structured response schema | implemented | Versioned galen-ui envelope and bounded allow-list parser with fixtures |
+| 19 | Safe renderer and Markdown fallback | in progress | Native renderer and text fallback; model chat HTML scripts disabled; end-to-end safety tests pending |
+| 20 | Provider/model instructions and examples | in progress | Provider-independent guidance added; representative provider response fixtures pending |
+| 21 | Safe interactions and state | in progress | Local selection/copy/calculation only; message-scoped persisted UI state pending |
+| 22 | Streaming validation and recovery | in progress | Partial fence handling and invalid fallback; incremental/streaming acceptance pending |
+| 23 | Metadata-only marketplace catalog | implemented | Metadata-only SQLite catalog service and focused API tests; deployment pending |
+| 24 | Catalog API and Galen client | in progress | Versioned API, client pagination, cached offline browsing and frontend panel; integration checks pending |
+| 25 | GitHub metadata and icons | in progress | GitHub metadata, pinned source and icon URL extraction; bounded icon rendering pending |
+| 26 | Direct GitHub installation | in progress | Direct download and digest validation, local staged receipt; active plugin/skill registration pending |
+| 27 | Direct updates and local removal | in progress | Atomic verified staged updates/removal with rollback tests; active extension lifecycle pending |
+| 28 | Publish by repository link | in progress | GitHub URL submission through catalog API and signed-in desktop panel; real auth/deployment test pending |
+| 29 | Unified extension manifest | implemented | Strict versioned manifest and archive parser for declarative plugins and skills; fixtures added |
+| 30 | Moderation and safe installation | in progress | Moderation, archive checks, permission display and explicit staged-download consent; activation approval pending |
 
-Summary: 0 verified, 3 implemented, 13 in progress, 14 not started, 0 blocked.
+Summary: 0 verified, 7 implemented, 23 in progress, 0 not started, 0 blocked.
 
 ## Files changed in this checkpoint
 
@@ -364,3 +364,13 @@ starting the scoped project-context injection block.
 - Baseline for marketplace work: `ea611ff` (native UI commit). Read-only Moscow inventory confirmed nginx, Galen website mirror and Galenite central API are active; no GLNT catalog service appears in systemd or enabled nginx sites. Existing deployment is production infrastructure; do not change it before tests and an explicit deployment configuration.
 - Existing client: community_source.py consumes a GitHub Pages index with embedded plugin manifests; marketplace_routes.py converts manifests and the skill install path downloads SKILL.md; publish.py defaults to the old Dodaios registry issue flow. Keep installed extensions intact and introduce the new GLNT metadata contract separately until migration is verified.
 - Planned work: strict versioned manifest, GitHub commit-pinned source, bounded declarative ZIP validation, metadata-only catalog service, explicit moderation, local staged installation and UI. No credentials or binaries in catalog records. Reject arbitrary executable payloads in v1; native activation is a separate reviewed integration, never automatic.
+
+## GLNT implementation and verification checkpoint
+
+- `8cc74e6`: strict manifest, pinned GitHub archive and integrity verification; declarative packages only; parser tests and manifest documentation.
+- `327786c`: independent metadata-only catalog service, authenticated repository submissions, moderation, audit and API fixtures. No package proxy or remote deployment.
+- `8dc3255`: desktop REST client with trusted Galenite HTTPS endpoint, bounded catalog cache, fresh approval recheck, direct GitHub archive retrieval, compatibility and integrity verification, atomic local staging/removal. Packages are staged, not activated; legacy marketplace remains untouched.
+- `245de70`: GLNT panel in existing marketplace: browse, filters, paging, offline/error state, permissions/source/commit, explicit download consent, local staged packages, GitHub repository submission. Russian UI copy; full locale coverage pending.
+- `912720f`: focused client tests and a non-release branch CI workflow (syntax, isolated GLNT tests, focused frontend tests and build). Workflow must run successfully before any verified claim. No test result is asserted here.
+- Server changes: none; inventory read-only. glnt_catalog_url defaults to empty until service URL and publisher authorization are verified. Existing publisher GitHub app may require updated scopes. No release marker, tags, or deployment altered.
+- Remaining: actual native extension activation/update/removal, icon retrieval/render, voice project scoping, complete mode/state restoration, message-scoped UI interaction persistence, broader backend/frontend tests and installed Windows smoke. Do not publish yet.
