@@ -105,7 +105,10 @@ export function GlntCatalogPanel({ onClose, onSignIn, signedIn }: {
       <div className="flex flex-wrap gap-2"><Button disabled={busy || !page.configured || page.stale || item.installed_version === item.version} onClick={() => {
         if (!window.confirm("Установить " + item.title + " " + item.version + "? Разрешения: " + (item.permissions.join(", ") || "нет") + ". Плагин останется отключённым, навык — черновиком.")) return;
         void run(() => call("install", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({name:item.name,kind:item.type,commit:item.commit,consent:true})}), "Установлено. Включение доступно отдельно в Плагинах или Навыках.");
-      }}>{item.installed_version ? "Обновить" : "Установить"}</Button><Button variant="outline" disabled={busy} onClick={() => void run(() => call("staged/" + item.type + "/" + item.name, {method:"DELETE"}), "Локальный пакет удалён.")}>Удалить архив</Button></div>
+      }}>{item.installed_version ? "Обновить" : "Установить"}</Button><Button variant="outline" disabled={busy || Boolean(item.installed_version)} onClick={() => void run(() => call("staged/" + item.type + "/" + item.name, {method:"DELETE"}), "Локальный пакет удалён.")}>Удалить архив</Button>{item.installed_version && <Button variant="outline" disabled={busy} onClick={() => {
+        if (!window.confirm("Удалить установленное расширение " + item.title + "? Для плагина будут удалены данные подключения. Файлы навыка сохранятся в папке восстановления.")) return;
+        void run(() => call("uninstall", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:item.name,kind:item.type,consent:true})}), "Расширение удалено.");
+      }}>Удалить расширение</Button>}</div>
     </div>)}
     {page?.configured && <div className="space-y-2 rounded-lg border border-border p-4">
       <h2 className="font-semibold">Предложить расширение</h2>

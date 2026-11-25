@@ -392,3 +392,8 @@ starting the scoped project-context injection block.
 - Run [45628884438](https://github.com/Qrayyt/Galen/actions/runs/45628884438) succeeded on `cf08e29`: 26 backend tests, 12 frontend tests, Python syntax compilation and production frontend build (1m43s). These are focused checks, not the full regression or installed Windows acceptance.
 - `64b1f30` adds safe catalog raster icons and expanded checks; `0319439` restores Chat/Work workspace on launch without overriding explicit deep links.
 - Mode change uses the same durable session and event log, with explicit confirmation and ask-first permissions, idle API-only runners, no active calls/goals/approvals/queued work, no owned threads or vendor resume handles. Work requires a connected folder; unsent drafts/attachments must be handled before the switch. CLI-bound conversations remain in their original mode pending provider-specific safe conversion. Added store fixtures and integrated frontend launch-mode tests. Full route and desktop acceptance remain pending.
+
+## GLNT lifecycle safety checkpoint
+
+- Skill staging and previous versions now live outside the recursively scanned skills directory; nested skill entry points are refused, updates recheck ownership and local file hashes before publishing. Previous versions are retained in `.glnt-recovery` for manual recovery.
+- GLNT uninstall requires explicit consent, verifies source ownership, delegates plugin revocation to the existing native manager, and quarantines skill directories intact outside the scanner (including local edits). UI retains the archive receipt while an extension is installed. Added focused quarantine and endpoint fixtures. Live registry acceptance remains pending.

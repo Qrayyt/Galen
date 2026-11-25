@@ -2605,3 +2605,39 @@ async def glnt_install(body: GlntInstallBody, request: Request):
         return result
     except (ValueError, KeyError, TypeError, OSError, httpx.HTTPError) as exc:
         raise HTTPException(400, str(exc) if isinstance(exc, ValueError) else "GLNT installation failed")
+
+
+class GlntUninstallBody(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$")
+    kind: str = Field(pattern=r"^(plugin|skill)$")
+    consent: bool = False
+
+
+@router.post("/glnt/uninstall", openapi_extra={"x-jarvis-dangerous": True})
+async def glnt_uninstall(body: GlntUninstallBody, request: Request):
+    from dodaios.marketplace.glnt_client import staged
+    from dodaios.marketplace.glnt_install import quarantine_skill
+    from dodaios.core.paths import user_skills_dir
+    from dodaios.ui.web.skills_routes import _require_registry
+    if not body.consent:
+        raise HTTPException(400, "Explicit uninstall consent required")
+    _, db = _glnt_settings()
+    items = await asyncio.to_thread(staged, db)
+    item = next((row for row in items if row["name"] == body.name and row["type"] == body.kind), None)
+    if not item:
+        raise HTTPException(404, "Local GLNT receipt not found")
+    if body.kind == "plugin":
+        spec = load_catalog().by_id(body.name)
+        if not spec or spec.source != "glnt" or spec.source_url != item["repository_url"]:
+            raise HTTPException(409, "Plugin belongs to another source")
+        return await community_uninstall(body.name)
+    registry = _require_registry(request)
+    try:
+        backup = await asyncio.to_thread(quarantine_skill, item, user_skills_dir())
+    except (ValueError, OSError, KeyError) as exc:
+        raise HTTPException(409, str(exc))
+    try:
+        await registry.reload()
+    except Exception:
+        return {"removed": True, "backup": backup, "warning": "Restart Galen to reload skill registry"}
+    return {"removed": True, "backup": backup}

@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,6 +15,7 @@ from packaging.version import Version
 from dodaios.marketplace.glnt_manifest import safe_path
 
 RECEIPT = ".glnt-receipt.json"
+_SKILL_LOCK = threading.RLock()
 
 
 def _digest(data: bytes) -> str:
@@ -107,10 +109,17 @@ def skill_receipt(root: Path):
 
 
 def register_skill(item, manifest, files, root: Path):
+    with _SKILL_LOCK:
+        return _register_skill(item, manifest, files, root)
+
+
+def _register_skill(item, manifest, files, root: Path):
     from dodaios.skills.loader import parse_skill
     from dodaios.skills.registry import _rewrite_state_in_frontmatter
     from dodaios.skills.schema import SkillLifecycleState
-    from dodaios.ui.web.skills_routes import BUILTIN_SKILL_NAMES
+    from dodaios.skills.builtin import BUILTIN_SKILL_NAMES
+    if any(Path(name).name.casefold() == 'skill.md' and name != 'SKILL.md' for name in files):
+        raise ValueError('Nested skill entry points are not supported')
     if manifest.name in BUILTIN_SKILL_NAMES:
         raise ValueError("Built-in skill name is reserved")
     root.mkdir(parents=True, exist_ok=True)
@@ -123,8 +132,13 @@ def register_skill(item, manifest, files, root: Path):
             raise ValueError("Source collision or downgrade")
     # Stage on the same volume. The skill loader must see a valid draft BEFORE
     # publishing the directory. No hooks, commands or auto-activation.
-    with tempfile.TemporaryDirectory(prefix=".glnt-stage-", dir=root) as tmp:
-        incoming = Path(tmp) / "incoming"
+    # Never stage within the recursively scanned skill root.
+    recovery = root.parent / ".glnt-recovery"
+    recovery.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="install-", dir=recovery))
+    backup = tmp / "previous"
+    try:
+        incoming = tmp / "incoming"
         incoming.mkdir()
         for relative, data in files.items():
             safe_path(relative)
@@ -142,8 +156,11 @@ def register_skill(item, manifest, files, root: Path):
             raise ValueError("Skill cannot be safely registered as a draft")
         receipt = {**item, "files": {name: _digest((incoming / name).read_bytes()) for name in files}}
         (incoming / RECEIPT).write_text(json.dumps(receipt), encoding="utf-8")
-        backup = Path(tmp) / "previous"
         if target.exists():
+            # Recheck ownership and local edits immediately before the swap.
+            previous = skill_receipt(target)
+            if previous["repository_url"] != item["repository_url"] or Version(previous["version"]) > Version(manifest.version):
+                raise ValueError("Source collision or downgrade")
             os.replace(target, backup)
         try:
             os.replace(incoming, target)
@@ -151,7 +168,31 @@ def register_skill(item, manifest, files, root: Path):
             if backup.exists():
                 os.replace(backup, target)
             raise
+        # Keep the previous installed version outside the scanner for recovery.
+    finally:
+        if not backup.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
     return {"name": manifest.name, "version": manifest.version, "status": "installed", "enabled": False}
+
+
+def quarantine_skill(item, root: Path) -> str:
+    """Uninstall a GLNT skill without deleting user edits or unrelated data."""
+    from dodaios.marketplace.glnt_manifest import SLUG
+    if not SLUG.fullmatch(item["name"]):
+        raise ValueError("Invalid skill identity")
+    with _SKILL_LOCK:
+        target = root / item["name"]
+        marker = target / RECEIPT
+        if target.is_symlink() or marker.is_symlink() or not marker.is_file():
+            raise ValueError("Skill is not a managed GLNT installation")
+        receipt = json.loads(marker.read_text(encoding="utf-8"))
+        if receipt.get("name") != item["name"] or receipt.get("repository_url") != item["repository_url"]:
+            raise ValueError("Skill belongs to another source")
+        recovery = root.parent / ".glnt-recovery"
+        recovery.mkdir(parents=True, exist_ok=True)
+        backup = Path(tempfile.mkdtemp(prefix="removed-", dir=recovery)) / item["name"]
+        os.replace(target, backup)
+        return str(backup)
 
 
 def installed_status(item, skill_root: Path):
