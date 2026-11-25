@@ -1,0 +1,188 @@
+name: Galen next-release Windows candidate (no publication)
+on:
+  push:
+    branches: [feat/galen-next-release]
+    paths: [.galen-next-candidate]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: galen-next-windows-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m compileall -q dodaios services/glnt_catalog
+      - run: python -m pip install pytest httpx fastapi packaging pytest-asyncio uvicorn
+      - run: python -m pytest --noconftest -o addopts='' -q tests/unit/marketplace/test_glnt_manifest.py tests/unit/marketplace/test_glnt_catalog.py tests/unit/marketplace/test_glnt_client.py tests/unit/marketplace/test_glnt_install.py tests/unit/agent_chat/test_project_context.py tests/unit/agent_chat/test_mode_switch_store.py
+      - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libsndfile1 ffmpeg
+      - run: python scripts/pip_install.py -e ".[dev]"
+      - name: Chat, persistence, voice and project regression
+        run: python -m pytest -q tests/unit/state/test_chat_store_persistence.py tests/unit/state/test_chats_routes.py tests/unit/agent_chat/test_lead_thread.py tests/unit/agent_chat/test_voice_mirror.py tests/unit/agent_chat/test_agent_chat_service.py tests/unit/agent_chat/test_agent_chat_surface_parity.py tests/unit/agent_chat/test_project_detach.py tests/unit/agent_chat/test_thread_search.py tests/unit/agent_chat/test_restart_durability.py tests/unit/agent_chat/test_chat_ide_separation.py tests/unit/agent_chat/test_mode_switch_store.py tests/unit/agent_chat/test_project_context.py
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dodaios/ui/web/frontend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test -- UnifiedChatSidebar chatsApi.projects galenUiSpec nativeUiState agentChat.leadOpen events.workspaceMode
+      - run: npm test -- --changed e222545822e19ad867e52e0dd13b945a02326d49
+      - run: npm run build
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+  windows:
+    name: Build Windows desktop installer (artifact only)
+    needs: [frontend, backend]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore an identical verified Windows installer
+        id: installer-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dist/installers/Galen-Setup-x64.exe
+            dist/installers/Galen-Setup-x64.exe.sha256
+          key: galen-installer-v4-${{ runner.os }}-${{ hashFiles('dodaios/**', 'packaging/**', 'assets/**', 'integrations/openrealtime/source/**', 'third_party/**', 'install/update-contract.json', 'dodaios.spec', 'dodaios.toml.example', 'pyproject.toml', 'LICENSE', 'NOTICE', 'scripts/galen/brand.py', 'scripts/pip_install.py', 'requirements.in', 'requirements.txt', 'uv.lock') }}
+      - uses: actions/setup-node@v4
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
+      - name: Identify exact frontend inputs
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        id: frontend-input
+        shell: bash
+        run: echo "tree=$(git rev-parse HEAD:dodaios/ui/web/frontend)" >> "$GITHUB_OUTPUT"
+      - name: Restore previously built Windows frontend
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        id: windows-frontend
+        uses: actions/cache@v4
+        with:
+          path: dodaios/ui/web/dist
+          key: galen-frontend-v2-${{ runner.os }}-${{ steps.frontend-input.outputs.tree }}
+      - name: Build frontend on the packaging runner
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        working-directory: dodaios/ui/web/frontend
+        shell: bash
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.windows-frontend.outputs.cache-hit }}" != "true" || ! -s ../dist/index.html ]]; then
+            npm ci
+            npm run build
+          fi
+          test -s ../dist/index.html
+      - uses: actions/setup-python@v5
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Restore the unchanged OpenRealtime companion
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        id: realtime-cache
+        uses: actions/cache@v4
+        with:
+          path: integrations/openrealtime/bin/openrealtime.exe
+          key: galen-openrealtime-v1-${{ runner.os }}-${{ hashFiles('integrations/openrealtime/source/**') }}
+      - uses: actions/setup-go@v5
+        if: steps.installer-cache.outputs.cache-hit != 'true' && steps.realtime-cache.outputs.cache-hit != 'true'
+        with:
+          go-version: '1.25'
+          cache-dependency-path: integrations/openrealtime/source/go.sum
+      - name: Install Python desktop dependencies
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python scripts/pip_install.py -e ".[desktop,dev]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compile the optional OpenRealtime runtime
+        if: steps.installer-cache.outputs.cache-hit != 'true' && steps.realtime-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force integrations/openrealtime/bin | Out-Null
+          Push-Location integrations/openrealtime/source
+          go build -o ../bin/openrealtime.exe ./cmd/openrealtime
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+      - uses: actions/setup-dotnet@v4
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        with:
+          dotnet-version: '8.0.x'
+      - name: Ensure Inno Setup 6 is available
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $candidate = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $candidate)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Build Galen desktop application
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: |
+          pwsh packaging/windows/build.ps1 -SkipFrontend
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "dist/installers/Galen-Setup-x64.exe")) { throw "Missing installer" }
+          if (-not (Test-Path "dist/Jarvis/GalenApp.exe")) { throw "Missing Galen desktop executable" }
+          if (-not (Test-Path "dist/Jarvis/GalenRealtime.exe")) { throw "Missing realtime companion" }
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/installers/Galen-Setup-x64.exe").Hash.ToLowerInvariant()
+          "$hash  Galen-Setup-x64.exe" | Set-Content -Encoding ascii "dist/installers/Galen-Setup-x64.exe.sha256"
+          "$hash  Galen-Setup-x64.exe" | Set-Content -Encoding ascii "dist/installers/installers-SHA256SUMS.txt"
+      - name: Verify the reused or rebuilt installer
+        shell: pwsh
+        run: |
+          $installer = "dist/installers/Galen-Setup-x64.exe"
+          $checksum = "$installer.sha256"
+          $manifest = "dist/installers/installers-SHA256SUMS.txt"
+          if (-not (Test-Path $manifest) -and (Test-Path $checksum)) {
+            Copy-Item -LiteralPath $checksum -Destination $manifest
+          }
+          if (-not (Test-Path $installer) -or -not (Test-Path $checksum) -or -not (Test-Path $manifest)) { throw "Missing installer or checksum" }
+          $actual = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          $expected = ((Get-Content $checksum -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Installer checksum mismatch" }
+          $manifestExpected = ((Get-Content $manifest -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          if ($actual -ne $manifestExpected) { throw "Update manifest checksum mismatch" }
+      - name: Save the verified installer for identical runtime inputs
+        if: steps.installer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dist/installers/Galen-Setup-x64.exe
+            dist/installers/Galen-Setup-x64.exe.sha256
+            dist/installers/installers-SHA256SUMS.txt
+          key: ${{ steps.installer-cache.outputs.cache-primary-key }}
+      - name: Upload candidate installer without releasing
+        uses: actions/upload-artifact@v4
+        with:
+          name: Galen-next-Windows-${{ github.sha }}
+          path: |
+            dist/installers/Galen-Setup-x64.exe
+            dist/installers/Galen-Setup-x64.exe.sha256
+            dist/installers/installers-SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

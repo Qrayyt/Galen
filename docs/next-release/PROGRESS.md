@@ -11,13 +11,13 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 ## Current checkpoint
 
 - Date: 2026-11-25 15:52 MSK (UTC+03:00).
-- Stage: project context, restore, native UI and GLNT catalog/client implementation; focused acceptance checks pending.
+- Stage: integrated feature implementation and candidate verification; full regression and desktop acceptance pending.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `912720f`.
-- Latest code checkpoint: GLNT desktop panel, verified staging client and non-release CI.
+  `971ad4f`.
+- Latest code checkpoint: scoped voice call context, native UI state, Chat/Work mode switching, GLNT install/update/uninstall, and catalog file integrity.
 
 ## Repository audit
 
@@ -42,37 +42,37 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | # | Task | Status | Evidence / note |
 | ---: | --- | --- | --- |
 | 1 | Multi-session ordinary chats | implemented | New ordinary conversations create distinct durable sessions; opening/restoring, deletion, voice-first creation, and event isolation have focused tests; desktop scenario remains before verified |
-| 2 | Unified history sidebar | in progress | Chat and Work rows, search, recent chats, and project groups render in one sidebar; running-desktop scenarios remain |
-| 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
+| 2 | Unified history sidebar | implemented | Unified sidebar and search; desktop acceptance outstanding |
+| 3 | Chat lifecycle and durable history | implemented | Create, rename, delete, auto-title and durable history; desktop acceptance outstanding |
 | 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
 | 5 | Isolated chat context and global memory | in progress | Project-scoped runtime instructions/snapshots wired into brain/API/CLI; voice and global-memory boundary checks pending |
-| 6 | Restart restore and lossless migration | in progress | Last ordinary session and scoped text drafts restore; blank draft, full UI state and desktop checks pending |
+| 6 | Restart restore and lossless migration | in progress | Last mode/session and scoped text drafts restore; blank drafts and desktop migration acceptance remain |
 | 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
-| 9 | Per-chat mode selection and persistence | in progress | New-conversation Chat/Work selector is in the history column and session metadata persists; existing-chat dialog/state restoration remains |
-| 10 | Unified Chat/Work history | in progress | Ordinary and Work sessions are merged and ordered in the Chat sidebar without removing the mature Work project tree |
-| 11 | Project lifecycle | in progress | Create, rename, collapse, and safe delete/ungroup controls are rendered; user-scenario and desktop checks remain |
-| 12 | Project names, icons, collapsible groups | in progress | Name/icon editing and collapse controls implemented; desktop and new tests pending |
-| 13 | Chat and Work creation in projects | in progress | Chat and Work can be created directly in selected project; voice-first scope and runtime verification remain |
-| 14 | Move chats between project scopes | in progress | Agent-backed Chat and Work rows can move between project groups or back to recent/ungrouped; voice rows remain unassignable |
-| 15 | Project instructions, context, and files | in progress | Project instructions and bounded text snapshots implemented; rich formats and voice scope pending |
+| 9 | Per-chat mode selection and persistence | implemented | New and idle API-backed existing chats support mode selection; CLI-bound chats cannot safely convert |
+| 10 | Unified Chat/Work history | implemented | Unified history remains available in Work; desktop acceptance outstanding |
+| 11 | Project lifecycle | implemented | Create, rename, collapse and non-destructive deletion/ungroup; desktop acceptance outstanding |
+| 12 | Project names, icons, collapsible groups | implemented | Name/icon edit and persistent collapse; desktop acceptance outstanding |
+| 13 | Chat and Work creation in projects | implemented | Scoped Chat/Work creation and voice-first realtime binding; desktop acceptance outstanding |
+| 14 | Move chats between project scopes | in progress | Agent-backed Chat/Work move/ungroup implemented; voice archive rows remain unassignable |
+| 15 | Project instructions, context, and files | in progress | Project instructions and text snapshots for typed/realtime/live paths; classic voice and rich formats remain |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
 | 17 | Native visual component library | implemented | Native cards/tables/charts/diagrams/checklists/progress/calculators/input; focused schema fixtures, runtime acceptance pending |
 | 18 | Structured response schema | implemented | Versioned galen-ui envelope and bounded allow-list parser with fixtures |
-| 19 | Safe renderer and Markdown fallback | in progress | Native renderer and text fallback; model chat HTML scripts disabled; end-to-end safety tests pending |
+| 19 | Safe renderer and Markdown fallback | implemented | Allow-listed renderer and fallback; scripts disabled in chat HTML previews; runtime safety acceptance outstanding |
 | 20 | Provider/model instructions and examples | in progress | Provider-independent guidance added; representative provider response fixtures pending |
-| 21 | Safe interactions and state | in progress | Local selection/copy/calculation only; message-scoped persisted UI state pending |
-| 22 | Streaming validation and recovery | in progress | Partial fence handling and invalid fallback; incremental/streaming acceptance pending |
+| 21 | Safe interactions and state | implemented | Message-scoped local checklist, choice and calculator state; no tool execution |
+| 22 | Streaming validation and recovery | implemented | Partial streaming fence and completed malformed/truncated fallback; provider streaming acceptance remains |
 | 23 | Metadata-only marketplace catalog | implemented | Metadata-only SQLite catalog service and focused API tests; deployment pending |
-| 24 | Catalog API and Galen client | in progress | Versioned API, client pagination, cached offline browsing and frontend panel; integration checks pending |
-| 25 | GitHub metadata and icons | in progress | GitHub metadata, pinned source and icon URL extraction; bounded icon rendering pending |
-| 26 | Direct GitHub installation | in progress | Direct download and digest validation, local staged receipt; active plugin/skill registration pending |
-| 27 | Direct updates and local removal | in progress | Atomic verified staged updates/removal with rollback tests; active extension lifecycle pending |
+| 24 | Catalog API and Galen client | implemented | Versioned API, paged client, offline cache and panel; deployment and end-to-end acceptance remain |
+| 25 | GitHub metadata and icons | implemented | Commit-pinned icon metadata and bounded raster normalization; runtime acceptance remains |
+| 26 | Direct GitHub installation | implemented | Direct GitHub download, verification and explicit native registration; real endpoint acceptance remains |
+| 27 | Direct updates and local removal | implemented | Verified update and uninstall, ownership checks, quarantine and recovery; runtime acceptance remains |
 | 28 | Publish by repository link | in progress | GitHub URL submission through catalog API and signed-in desktop panel; real auth/deployment test pending |
 | 29 | Unified extension manifest | implemented | Strict versioned manifest and archive parser for declarative plugins and skills; fixtures added |
-| 30 | Moderation and safe installation | in progress | Moderation, archive checks, permission display and explicit staged-download consent; activation approval pending |
+| 30 | Moderation and safe installation | implemented | Moderation, declared file hash checks, bounded archive and explicit native install consent; real endpoint acceptance remains |
 
-Summary: 0 verified, 7 implemented, 23 in progress, 0 not started, 0 blocked.
+Summary: 0 verified, 22 implemented, 8 in progress, 0 not started, 0 blocked.
 
 ## Files changed in this checkpoint
 
@@ -401,3 +401,10 @@ starting the scoped project-context injection block.
 ## Voice call project scope
 
 - Captures history and project briefing together at realtime/live call startup; per-call instructions survive reconnects and are passed to delegated brain turns via a task-local parameter. Explicit resume seeds without proven project association receive no project briefing. A first-turn mirror uses its captured binding, not a different chat selected mid-call; a moved or deleted captured conversation is not redirected to an unrelated chat. Classic pipeline and complete voice integration regression remain outstanding.
+
+## Candidate verification checkpoint
+
+- Source commit `7019e59` passed the focused workflow [45630092334](https://github.com/Qrayyt/Galen/actions/runs/45630092334). Subsequent commits add safe uninstall and scoped voice runtime; their checks are pending.
+- `971ad4f` validates declared file digests against GitHub's pinned blobs before catalog admission, bounds total package size, rejects nested skills at manifest admission, checks icon MIME, clears stale explicit voice history on new bindings and adds regression fixtures for captured voice scope and first-turn routing.
+- Candidate workflow: changed-source frontend tests, focused backend checks, dependency-backed chat/voice/migration regression, then Windows packaging from the exact candidate SHA. The installer is uploaded as an Actions artifact only; no release, tag, updater marker or production deployment is changed. Running-desktop acceptance remains required.
+- Remaining constraints: classic speech-pipeline project briefing and full voice archive search/assignment; CLI mode conversion without losing vendor handles; rich document support; all-provider/locale acceptance; live GLNT endpoint and publisher authorization; interactive desktop smoke. Do not mark the release verified until actual acceptance evidence exists.
