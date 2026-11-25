@@ -99,13 +99,15 @@ CREATE INDEX IF NOT EXISTS idx_voice_project_links_project ON voice_project_link
 CREATE TABLE IF NOT EXISTS private_voice_histories (
     voice_session_id TEXT PRIMARY KEY
 );
+DROP TRIGGER IF EXISTS voice_project_private_insert;
 CREATE TRIGGER IF NOT EXISTS voice_project_private_insert AFTER INSERT ON voice_project_links
 BEGIN
-    INSERT OR IGNORE INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id);
+    INSERT INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id) ON CONFLICT(voice_session_id) DO NOTHING;
 END;
+DROP TRIGGER IF EXISTS voice_project_private_update;
 CREATE TRIGGER IF NOT EXISTS voice_project_private_update AFTER UPDATE ON voice_project_links
 BEGIN
-    INSERT OR IGNORE INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id);
+    INSERT INTO private_voice_histories (voice_session_id) VALUES (NEW.voice_session_id) ON CONFLICT(voice_session_id) DO NOTHING;
 END;
 CREATE TABLE IF NOT EXISTS chat_app_state (
     key    TEXT PRIMARY KEY,
