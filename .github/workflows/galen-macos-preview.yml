@@ -61,27 +61,21 @@ jobs:
           file="Galen-macOS-${{ matrix.arch }}.dmg"
           test -s "$file"
           shasum -a 256 "$file" > "$file.sha256"
-      - name: Store verified build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Galen-macOS-${{ matrix.arch }}
-          path: |
-            dist/installers/Galen-macOS-${{ matrix.arch }}.dmg
-            dist/installers/Galen-macOS-${{ matrix.arch }}.dmg.sha256
-          if-no-files-found: error
-      - name: Publish only notarized macOS installer to existing Windows release
+      - name: Store verified DMG in GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           cd dist/installers
           file="Galen-macOS-${{ matrix.arch }}.dmg"
-          if ! xcrun stapler validate "$file"; then
-            echo "::warning::No Apple notarization ticket. Build is available as a CI artifact only; public download is not enabled."
-            echo 'Public publication blocked: Apple Developer ID / notarization required.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           shasum -a 256 -c "$file.sha256"
-          gh release view v1.0.0-preview.5 --repo "$GITHUB_REPOSITORY" >/dev/null
-          gh release upload v1.0.0-preview.5 "$file" "$file.sha256" --repo "$GITHUB_REPOSITORY" --clobber
-          echo "Published $file to Preview 5." >> "$GITHUB_STEP_SUMMARY"
+          if xcrun stapler validate "$file"; then
+            gh release view v1.0.0-preview.5 --repo "$GITHUB_REPOSITORY" >/dev/null
+            gh release upload v1.0.0-preview.5 "$file" "$file.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+            echo "Published $file to Preview 5." >> "$GITHUB_STEP_SUMMARY"
+          else
+            tag="macos-preview-5-${{ matrix.arch }}-test-${{ github.run_id }}-${{ github.run_attempt }}"
+            gh release create "$tag" "$file" "$file.sha256" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --prerelease --title "Galen Preview 5 macOS ${{ matrix.arch }} — local testing only" --notes "Ad-hoc signed, not Apple-notarized. Verified build and checksum; not a public distribution release."
+            echo "::warning::Apple notarization missing. Verified DMG saved to a private draft release for local testing."
+            echo "Local test DMG: https://github.com/$GITHUB_REPOSITORY/releases (draft $tag). Public website publication remains blocked until notarization." >> "$GITHUB_STEP_SUMMARY"
+          fi
