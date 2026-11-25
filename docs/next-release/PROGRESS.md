@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 15:21 MSK (UTC+03:00).
-- Stage: architecture audit complete; unified chat data-model implementation next.
+- Date: 2026-11-25 15:28 MSK (UTC+03:00).
+- Stage: additive unified chat/project data model and API implemented and verified; frontend next.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
-- Current code SHA before this journal-only checkpoint:
-  `3b8982938f36ac38b9413511584a0daf4a4aee64`.
-- Working tree before this journal update: clean.
+- Current committed SHA before this product checkpoint:
+  `bc24adab511001fe4b110b9f50db4534178399b1`.
+- Working tree before this journal update: four intentionally modified product/test files.
 
 ## Repository audit
 
@@ -41,22 +41,22 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 | # | Task | Status | Evidence / note |
 | ---: | --- | --- | --- |
-| 1 | Multi-session ordinary chats | not started | Audit pending |
+| 1 | Multi-session ordinary chats | in progress | Durable multi-thread store/API verified; active UI still needs navigation |
 | 2 | Unified history sidebar | not started | Audit pending |
-| 3 | Chat lifecycle and durable history | not started | Audit pending |
-| 4 | Chat search | not started | Audit pending |
-| 5 | Isolated chat context and global memory | not started | Audit pending |
-| 6 | Restart restore and lossless migration | not started | Audit pending |
+| 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
+| 4 | Chat search | in progress | Title and message-body search verified at store/API level; sidebar UI remains |
+| 5 | Isolated chat context and global memory | in progress | Existing per-thread message isolation preserved; project context injection still remains |
+| 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated legacy SQLite migration verified; active-chat UI restoration remains |
 | 7 | Rename IDE to Work | not started | Audit pending |
 | 8 | Remove separate Chat/IDE tabs | not started | Audit pending |
-| 9 | Per-chat mode selection and persistence | not started | Audit pending |
+| 9 | Per-chat mode selection and persistence | in progress | Validated `chat`/`work` mode is persisted and exposed by API; dialog selector remains |
 | 10 | Unified Chat/Work history | not started | Audit pending |
-| 11 | Project lifecycle | not started | Audit pending |
-| 12 | Project names, icons, collapsible groups | not started | Audit pending |
-| 13 | Chat and Work creation in projects | not started | Audit pending |
-| 14 | Move chats between project scopes | not started | Audit pending |
-| 15 | Project instructions, context, and files | not started | Audit pending |
-| 16 | Future project-agent relationship | not started | Schema design pending; no agent system in scope |
+| 11 | Project lifecycle | in progress | Project CRUD and safe ungroup/delete semantics verified at store/API level; UI remains |
+| 12 | Project names, icons, collapsible groups | in progress | Name, icon, collapse, and ordering metadata persist; sidebar rendering remains |
+| 13 | Chat and Work creation in projects | in progress | Project-scoped creation with either mode is supported; UI remains |
+| 14 | Move chats between project scopes | in progress | Move between projects and ungroup verified by route tests; UI remains |
+| 15 | Project instructions, context, and files | in progress | Instructions and context-file references persist; scoped prompt/file injection remains |
+| 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
 | 17 | Native visual component library | not started | Existing chart/report support must be audited first |
 | 18 | Structured response schema | not started | Audit pending |
 | 19 | Safe renderer and Markdown fallback | not started | Audit pending |
@@ -72,14 +72,21 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 29 | Unified extension manifest | not started | Existing plugin/skill formats must be audited |
 | 30 | Moderation and safe installation | not started | Audit pending |
 
-Summary: 0 verified, 0 implemented, 0 in progress, 30 not started, 0 blocked.
+Summary: 0 verified, 1 implemented, 11 in progress, 18 not started, 0 blocked.
 
 ## Files changed in this checkpoint
 
-- `docs/next-release/PLAN.md` — authoritative 30-task plan and acceptance criteria.
-- `docs/next-release/PROGRESS.md` — resumable execution journal.
+- `dodaios/state/chat_store.py` — additive thread metadata migrations, project store,
+  search, safe metadata updates, and persisted application state.
+- `dodaios/ui/web/chats_routes.py` — mode/project-aware chat routes, search, project CRUD,
+  chat metadata patching, and restart-state routes.
+- `tests/unit/state/test_chat_store_persistence.py` — legacy migration, search, project,
+  app-state, and deletion-disposition coverage.
+- `tests/unit/state/test_chats_routes.py` — end-to-end route coverage for lifecycle, search,
+  modes, projects, moves, state restoration, and safe project deletion.
+- `docs/next-release/PROGRESS.md` — this resumable implementation checkpoint.
 
-No product source, configuration, release marker, website, or server file has been changed.
+No release marker, workflow, website, external server, or secret has been changed.
 
 ## Architecture decisions
 
@@ -106,7 +113,10 @@ No product source, configuration, release marker, website, or server file has be
 | GitHub releases API audit | Preview 5 is latest; published; prerelease |
 | GitHub Actions API audit | Head macOS workflow succeeded; Preview 5 Windows workflow succeeded |
 | `git status --short --branch` | Clean branch created from `origin/v1.0.0` |
-| Test commands | Not run yet; no product code changed |
+| `python -m py_compile dodaios/state/chat_store.py dodaios/ui/web/chats_routes.py` | Passed |
+| First focused `pytest` run | Environment setup failed before collection because `tomlkit` was absent; no test failure |
+| `python -m pytest tests/unit/state/test_chat_store_persistence.py tests/unit/state/test_chats_routes.py -q` | 36 passed, 1 third-party deprecation warning, 1.44 seconds |
+| `git diff --check` | Passed |
 
 ## Architecture audit findings
 
@@ -168,6 +178,8 @@ No product source, configuration, release marker, website, or server file has be
 - The active chat surface and the mature Work surface use different stores and interaction models.
   A destructive merge would risk both ordinary history and external CLI resume handles, so the
   first migration is additive and compatibility-preserving.
+- Focused tests emit upstream `pytest-asyncio` and Starlette/httpx deprecation warnings. They do
+  not affect the result, but dependency/configuration cleanup remains for the full regression stage.
 
 ## Risk checkpoint before first push
 
@@ -189,8 +201,26 @@ None. No server credentials were read or recorded. No deployment, database, cata
   idempotent; tests open a legacy schema, run migration twice, and verify messages are unchanged;
   no existing column/table/file is renamed or removed.
 
+## Additive data-model and API checkpoint
+
+- Result: the migration and API block is implemented and its focused test suite passes.
+- Compatibility: old text messages remain byte-for-byte readable; opening the store twice is
+  idempotent; legacy chat behavior defaults to `chat`, no project, empty draft, and empty state.
+- Safety: deleting a project ungroups its chats by default. Deleting associated chats requires the
+  explicit `delete_chats=true` route parameter.
+- Scope boundary: the existing Work library and external CLI resume handles were not modified.
+
+## Risk checkpoint before unified frontend work
+
+- Planned action: replace separate top-level Chat/IDE navigation with a unified history sidebar and
+  per-conversation Chat/Work mode controls while retaining all existing Work panes and routes.
+- Risk: navigation regressions could hide mature Work tools or make an existing chat appear lost.
+- Safeguards: keep legacy route identifiers as compatibility aliases; render from the additive API;
+  never delete histories during UI selection; persist active chat/draft state; run component tests,
+  a production web build, and a packaged desktop smoke check before calling the UI verified.
+
 ## Next concrete step
 
-Commit and push this architecture-audit checkpoint. Then implement and test the additive SQLite
-schema for per-chat mode/project/draft and project metadata, followed by rename/search/move/state
-routes. Do not change the active UI until legacy migration tests and route tests pass.
+Commit and push the verified additive data-model/API block. Then implement the unified sidebar,
+project groups, search, lifecycle controls, active-chat restoration, and in-dialog Chat/Work mode
+selection without removing any Work files, terminal, project, git, or tool functionality.

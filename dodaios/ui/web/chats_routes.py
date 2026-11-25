@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
@@ -35,7 +35,7 @@ from dodaios.sessions import chat_titles
 from dodaios.sessions.chat_titles import TitleRequest
 from dodaios.sessions.continuation import CALL_SEGMENT_PREFIX
 from dodaios.sessions.formatter import _jarvis_outputs_for_turn
-from dodaios.state.chat_store import ChatStore
+from dodaios.state.chat_store import CHAT_MODE_CHAT, CHAT_MODES, ChatStore
 from dodaios.state.conversation_constants import (
     CONVERSATION_KIND_TEXT,
     CONVERSATION_KIND_VOICE,
@@ -55,6 +55,8 @@ _SEED_MAX_MESSAGES = 40
 # Roles that are meaningful to seed back into the brain conversation buffer.
 _SEEDABLE_ROLES = frozenset({"user", "assistant", "system"})
 
+ChatMode = Literal["chat", "work"]
+
 
 # ----------------------------------------------------------------------
 # Response models
@@ -71,6 +73,8 @@ class ConversationSummary(BaseModel):
     created_ms: int = 0
     updated_ms: int = 0
     message_count: int = 0
+    mode: ChatMode = CHAT_MODE_CHAT
+    project_id: str | None = None
 
 
 class ChatTurn(BaseModel):
@@ -92,16 +96,68 @@ class ConversationDetail(BaseModel):
     id: str
     title: str = ""
     messages: list[ChatTurn] = Field(default_factory=list)
+    mode: ChatMode = CHAT_MODE_CHAT
+    project_id: str | None = None
+    draft: str = ""
+    state: dict[str, Any] = Field(default_factory=dict)
 
 
 class NewChatResponse(BaseModel):
     kind: ConversationKind = CONVERSATION_KIND_TEXT
     id: str
     title: str = ""
+    mode: ChatMode = CHAT_MODE_CHAT
+    project_id: str | None = None
 
 
 class NewChatRequest(BaseModel):
     title: str = "New Chat"
+    mode: ChatMode = CHAT_MODE_CHAT
+    project_id: str | None = None
+
+
+class PatchChatRequest(BaseModel):
+    title: str | None = None
+    mode: ChatMode | None = None
+    project_id: str | None = None
+    draft: str | None = None
+    state: dict[str, Any] | None = None
+
+
+class ProjectRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    icon: str = Field(default="", max_length=200)
+    instructions: str = Field(default="", max_length=100_000)
+    context_files: list[str] = Field(default_factory=list, max_length=200)
+    agent_id: str | None = Field(default=None, max_length=200)
+
+
+class PatchProjectRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    icon: str | None = Field(default=None, max_length=200)
+    instructions: str | None = Field(default=None, max_length=100_000)
+    context_files: list[str] | None = Field(default=None, max_length=200)
+    agent_id: str | None = Field(default=None, max_length=200)
+    collapsed: bool | None = None
+    position: float | None = None
+
+
+class ProjectResponse(BaseModel):
+    id: str
+    name: str
+    icon: str = ""
+    instructions: str = ""
+    context_files: list[str] = Field(default_factory=list)
+    agent_id: str | None = None
+    collapsed: bool = False
+    position: float = 0
+    created_at_ns: int = 0
+    updated_at_ns: int = 0
+    chat_count: int = 0
+
+
+class AppStateRequest(BaseModel):
+    state: dict[str, Any] = Field(default_factory=dict)
 
 
 class ResumeResponse(BaseModel):
@@ -181,6 +237,8 @@ def _text_thread_to_summary(t: dict[str, Any]) -> ConversationSummary:
         created_ms=int(t.get("created_at_ns", 0)) // 1_000_000,
         updated_ms=int(t.get("updated_at_ns", t.get("created_at_ns", 0))) // 1_000_000,
         message_count=int(t.get("message_count", 0)),
+        mode=t.get("mode", CHAT_MODE_CHAT),
+        project_id=t.get("project_id"),
     )
 
 
@@ -433,6 +491,8 @@ def list_conversations(
     request: Request,
     days: int = Query(default=0, ge=0, le=3650),
     limit: int = Query(default=200, ge=1, le=1000),
+    q: str = Query(default="", max_length=500),
+    project_id: str | None = Query(default=None, max_length=200),
 ) -> list[ConversationSummary]:
     """Unified history (text threads + voice sessions), newest-first.
 
@@ -442,9 +502,13 @@ def list_conversations(
     session_store = _optional_session_store(request)
 
     items: list[ConversationSummary] = [
-        _text_thread_to_summary(t) for t in chat_store.list_threads(include_empty=False)
+        _text_thread_to_summary(t)
+        for t in chat_store.list_threads(include_empty=False, query=q)
+        if project_id is None
+        or (project_id == "none" and t.get("project_id") is None)
+        or t.get("project_id") == project_id
     ]
-    if session_store is not None:
+    if session_store is not None and project_id in {None, "none"}:
         try:
             sessions = session_store.list_sessions(limit=limit, include_empty=False)
             titles = _voice_titles(request, sessions, chat_store, session_store)
@@ -458,6 +522,15 @@ def list_conversations(
         cutoff = int(time.time() * 1000) - days * 86_400_000
         items = [c for c in items if c.updated_ms >= cutoff]
 
+    if q:
+        needle = q.casefold()
+        items = [
+            item for item in items
+            if item.kind == CONVERSATION_KIND_TEXT
+            or needle in item.title.casefold()
+            or needle in item.preview.casefold()
+        ]
+
     items.sort(key=lambda c: c.updated_ms, reverse=True)
     return items[:limit]
 
@@ -466,9 +539,70 @@ def list_conversations(
 async def create_chat(request: Request, body: NewChatRequest | None = None) -> NewChatResponse:
     """Create a new, empty text conversation and return its id."""
     chat_store = _require_chat_store(request)
-    title = (body.title if body else "New Chat") or "New Chat"
-    created = await chat_store.create_thread(title=title)
-    return NewChatResponse(id=str(created["thread_id"]), title=created["title"])
+    payload = body or NewChatRequest()
+    title = payload.title or "New Chat"
+    if payload.project_id and chat_store.get_project(payload.project_id) is None:
+        raise HTTPException(status_code=404, detail="project-not-found")
+    created = await chat_store.create_thread(
+        title=title, mode=payload.mode, project_id=payload.project_id
+    )
+    return NewChatResponse(
+        id=str(created["thread_id"]),
+        title=created["title"],
+        mode=created["mode"],
+        project_id=created["project_id"],
+    )
+
+
+@router.get("/projects", response_model=list[ProjectResponse])
+def list_projects(request: Request) -> list[ProjectResponse]:
+    return [ProjectResponse(**row) for row in _require_chat_store(request).list_projects()]
+
+
+@router.post("/projects", response_model=ProjectResponse)
+def create_project(body: ProjectRequest, request: Request) -> ProjectResponse:
+    store = _require_chat_store(request)
+    try:
+        row = store.create_project(**body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ProjectResponse(**row)
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectResponse)
+def patch_project(
+    project_id: str, body: PatchProjectRequest, request: Request
+) -> ProjectResponse:
+    store = _require_chat_store(request)
+    try:
+        row = store.update_project(project_id, **body.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="project-not-found")
+    return ProjectResponse(**row)
+
+
+@router.delete("/projects/{project_id}")
+def delete_project(
+    project_id: str,
+    request: Request,
+    delete_chats: bool = Query(default=False),
+) -> dict[str, Any]:
+    store = _require_chat_store(request)
+    if not store.delete_project(project_id, delete_chats=delete_chats):
+        raise HTTPException(status_code=404, detail="project-not-found")
+    return {"deleted": True, "id": project_id, "chats": "deleted" if delete_chats else "ungrouped"}
+
+
+@router.get("/state")
+def get_app_state(request: Request) -> dict[str, Any]:
+    return {"state": _require_chat_store(request).get_app_state()}
+
+
+@router.put("/state")
+def put_app_state(body: AppStateRequest, request: Request) -> dict[str, Any]:
+    return {"state": _require_chat_store(request).set_app_state(body.state)}
 
 
 @router.post("/voice/new", response_model=NewVoiceRunResponse)
@@ -527,11 +661,43 @@ async def get_conversation(
     messages = _normalized_messages(kind, cid, chat_store, session_store)
     if messages is None:
         raise HTTPException(status_code=404, detail="conversation-not-found")
+    metadata = chat_store.get_thread(cid) if kind == CONVERSATION_KIND_TEXT else None
     return ConversationDetail(
         kind=kind,
         id=cid,
         title=_conversation_title(request, kind, cid, chat_store, session_store),
         messages=messages,
+        mode=(metadata or {}).get("mode", CHAT_MODE_CHAT),
+        project_id=(metadata or {}).get("project_id"),
+        draft=(metadata or {}).get("draft", ""),
+        state=(metadata or {}).get("state", {}),
+    )
+
+
+@router.patch("/text/{cid}", response_model=ConversationDetail)
+async def patch_text_conversation(
+    cid: str, body: PatchChatRequest, request: Request
+) -> ConversationDetail:
+    store = _require_chat_store(request)
+    values = body.model_dump(exclude_unset=True)
+    if "project_id" in values and values["project_id"] is not None:
+        if store.get_project(values["project_id"]) is None:
+            raise HTTPException(status_code=404, detail="project-not-found")
+    if values.get("mode") not in {None, *CHAT_MODES}:
+        raise HTTPException(status_code=422, detail="unsupported-chat-mode")
+    metadata = store.update_thread(cid, **values)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="conversation-not-found")
+    messages = _normalized_messages(CONVERSATION_KIND_TEXT, cid, store, None) or []
+    return ConversationDetail(
+        kind=CONVERSATION_KIND_TEXT,
+        id=cid,
+        title=metadata["title"],
+        messages=messages,
+        mode=metadata["mode"],
+        project_id=metadata["project_id"],
+        draft=metadata["draft"],
+        state=metadata["state"],
     )
 
 

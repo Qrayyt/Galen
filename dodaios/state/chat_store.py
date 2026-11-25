@@ -53,6 +53,10 @@ class ChatMessage:
 # An explicitly chosen title is never overwritten.
 _PLACEHOLDER_TITLES: frozenset[str] = frozenset({"", "New Thread", "New Chat"})
 
+CHAT_MODE_CHAT = "chat"
+CHAT_MODE_WORK = "work"
+CHAT_MODES: frozenset[str] = frozenset({CHAT_MODE_CHAT, CHAT_MODE_WORK})
+
 _TITLE_MAX_CHARS = 80
 
 _SCHEMA = """
@@ -73,6 +77,22 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
     ON chat_messages(thread_id);
+CREATE TABLE IF NOT EXISTS chat_projects (
+    project_id          TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    icon                TEXT NOT NULL DEFAULT '',
+    instructions        TEXT NOT NULL DEFAULT '',
+    context_files_json  TEXT NOT NULL DEFAULT '[]',
+    agent_id            TEXT,
+    collapsed           INTEGER NOT NULL DEFAULT 0,
+    position            REAL NOT NULL DEFAULT 0,
+    created_at_ns       INTEGER NOT NULL,
+    updated_at_ns       INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_app_state (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
 """
 
 # Columns added after the first release, applied by ``_migrate`` when missing.
@@ -81,6 +101,10 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_thread
 # the UI replays into "Thought for 4s" + steps when a chat is reopened.
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("chat_messages", "trace_json", "TEXT"),
+    ("chat_threads", "mode", "TEXT NOT NULL DEFAULT 'chat'"),
+    ("chat_threads", "project_id", "TEXT"),
+    ("chat_threads", "draft", "TEXT NOT NULL DEFAULT ''"),
+    ("chat_threads", "state_json", "TEXT NOT NULL DEFAULT '{}'"),
 )
 
 
@@ -139,6 +163,35 @@ def _load_trace(raw: Any) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _load_object(raw: Any) -> dict[str, Any]:
+    if not raw or not isinstance(raw, str):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_string_list(raw: Any) -> list[str]:
+    if not raw or not isinstance(raw, str):
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [str(item) for item in data if isinstance(item, str)]
+
+
+def _clean_mode(value: str) -> str:
+    mode = str(value or CHAT_MODE_CHAT).strip().lower()
+    if mode not in CHAT_MODES:
+        raise ValueError(f"Unsupported chat mode: {value}")
+    return mode
+
+
 class ChatStore:
     """sqlite3-backed thread/message store. Sync DB ops under a threading.Lock,
     async public mutators (they also publish on the EventBus)."""
@@ -188,7 +241,9 @@ class ChatStore:
                 self._conn = None
 
     # ------- Queries (sync, reads are idempotent) ---------------------
-    def list_threads(self, *, include_empty: bool = True) -> list[dict[str, Any]]:
+    def list_threads(
+        self, *, include_empty: bool = True, query: str = ""
+    ) -> list[dict[str, Any]]:
         """All threads, most-recently-active first.
 
         Recency uses the largest message ``rowid`` per thread (monotonic with
@@ -202,6 +257,7 @@ class ChatStore:
         """
         conn = self._ensure_conn()
         with self._lock:
+            pattern = f"%{query.strip().lower()}%"
             rows = conn.execute(
                 """
                 SELECT
@@ -210,6 +266,10 @@ class ChatStore:
                     t.kind           AS kind,
                     t.created_at_ns  AS created_at_ns,
                     t.updated_at_ns  AS updated_at_ns,
+                    t.mode           AS mode,
+                    t.project_id     AS project_id,
+                    t.draft          AS draft,
+                    t.state_json     AS state_json,
                     (SELECT COUNT(*) FROM chat_messages m
                         WHERE m.thread_id = t.thread_id) AS message_count,
                     (SELECT COUNT(*) FROM chat_messages m
@@ -223,15 +283,25 @@ class ChatStore:
                     (SELECT MAX(m.rowid) FROM chat_messages m
                         WHERE m.thread_id = t.thread_id) AS last_seq
                 FROM chat_threads t
-                WHERE ? = 1 OR EXISTS (
-                    SELECT 1 FROM chat_messages visible
-                    WHERE visible.thread_id = t.thread_id
-                      AND visible.role = 'user'
-                      AND TRIM(visible.text) != ''
+                WHERE (
+                    ? = 1 OR EXISTS (
+                        SELECT 1 FROM chat_messages visible
+                        WHERE visible.thread_id = t.thread_id
+                          AND visible.role = 'user'
+                          AND TRIM(visible.text) != ''
+                    )
+                ) AND (
+                    ? = '%%'
+                    OR LOWER(t.title) LIKE ?
+                    OR EXISTS (
+                        SELECT 1 FROM chat_messages searched
+                        WHERE searched.thread_id = t.thread_id
+                          AND LOWER(searched.text) LIKE ?
+                    )
                 )
                 ORDER BY (last_seq IS NULL), last_seq DESC, t.rowid DESC
                 """,
-                (1 if include_empty else 0,),
+                (1 if include_empty else 0, pattern, pattern, pattern),
             ).fetchall()
         return [
             {
@@ -240,6 +310,10 @@ class ChatStore:
                 "kind": r["kind"],
                 "created_at_ns": r["created_at_ns"],
                 "updated_at_ns": r["updated_at_ns"],
+                "mode": r["mode"] or CHAT_MODE_CHAT,
+                "project_id": r["project_id"],
+                "draft": r["draft"] or "",
+                "state": _load_object(r["state_json"]),
                 "message_count": r["message_count"],
                 "user_message_count": r["user_message_count"],
                 "preview": r["preview"] or "",
@@ -251,7 +325,8 @@ class ChatStore:
         conn = self._ensure_conn()
         with self._lock:
             head = conn.execute(
-                "SELECT thread_id, title, kind, created_at_ns, updated_at_ns "
+                "SELECT thread_id, title, kind, created_at_ns, updated_at_ns, "
+                "mode, project_id, draft, state_json "
                 "FROM chat_threads WHERE thread_id = ?",
                 (thread_id,),
             ).fetchone()
@@ -268,6 +343,10 @@ class ChatStore:
             "kind": head["kind"],
             "created_at_ns": head["created_at_ns"],
             "updated_at_ns": head["updated_at_ns"],
+            "mode": head["mode"] or CHAT_MODE_CHAT,
+            "project_id": head["project_id"],
+            "draft": head["draft"] or "",
+            "state": _load_object(head["state_json"]),
             "messages": [
                 {
                     "message_id": m["message_id"],
@@ -283,22 +362,30 @@ class ChatStore:
 
     # ------- Mutations ------------------------------------------------
     async def create_thread(
-        self, *, title: str, thread_id: str | None = None, kind: str = "text"
+        self,
+        *,
+        title: str,
+        thread_id: str | None = None,
+        kind: str = "text",
+        mode: str = CHAT_MODE_CHAT,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         tid = thread_id or str(uuid.uuid4())
+        mode = _clean_mode(mode)
         conn = self._ensure_conn()
         now = time_ns()
         with self._lock:
             existing = conn.execute(
-                "SELECT created_at_ns, title, kind FROM chat_threads WHERE thread_id = ?",
+                "SELECT created_at_ns, title, kind, mode, project_id "
+                "FROM chat_threads WHERE thread_id = ?",
                 (tid,),
             ).fetchone()
             if existing is None:
                 conn.execute(
                     "INSERT INTO chat_threads "
-                    "(thread_id, title, kind, created_at_ns, updated_at_ns) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (tid, title, kind, now, now),
+                    "(thread_id, title, kind, created_at_ns, updated_at_ns, mode, project_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (tid, title, kind, now, now, mode, project_id),
                 )
                 created_at = now
                 final_title = title
@@ -313,6 +400,8 @@ class ChatStore:
             "title": final_title,
             "created_at_ns": created_at,
             "message_count": 0,
+            "mode": existing["mode"] if existing is not None else mode,
+            "project_id": existing["project_id"] if existing is not None else project_id,
         }
 
     async def ensure_thread(
@@ -395,6 +484,217 @@ class ChatStore:
                 "DELETE FROM chat_threads WHERE thread_id = ?", (thread_id,)
             )
             return cur.rowcount > 0
+
+    def update_thread(
+        self,
+        thread_id: str,
+        *,
+        title: str | None = None,
+        mode: str | None = None,
+        project_id: str | None | object = ...,
+        draft: str | None = None,
+        state: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Update safe chat metadata without touching its messages."""
+        conn = self._ensure_conn()
+        changes: list[str] = []
+        values: list[Any] = []
+        if title is not None:
+            changes.append("title = ?")
+            values.append(" ".join(title.split())[:_TITLE_MAX_CHARS])
+        if mode is not None:
+            changes.append("mode = ?")
+            values.append(_clean_mode(mode))
+        if project_id is not ...:
+            changes.append("project_id = ?")
+            values.append(project_id)
+        if draft is not None:
+            changes.append("draft = ?")
+            values.append(draft[:100_000])
+        if state is not None:
+            changes.append("state_json = ?")
+            values.append(json.dumps(state, ensure_ascii=False, default=str))
+        if not changes:
+            return self.get_thread(thread_id)
+        changes.append("updated_at_ns = ?")
+        values.append(time_ns())
+        values.append(thread_id)
+        with self._lock:
+            cur = conn.execute(
+                f"UPDATE chat_threads SET {', '.join(changes)} WHERE thread_id = ?",
+                values,
+            )
+        return self.get_thread(thread_id) if cur.rowcount else None
+
+    # ------- Projects --------------------------------------------------
+    def list_projects(self) -> list[dict[str, Any]]:
+        conn = self._ensure_conn()
+        with self._lock:
+            rows = conn.execute(
+                """
+                SELECT p.*,
+                       (SELECT COUNT(*) FROM chat_threads t
+                        WHERE t.project_id = p.project_id) AS chat_count
+                FROM chat_projects p
+                ORDER BY p.position, p.updated_at_ns DESC, p.name COLLATE NOCASE
+                """
+            ).fetchall()
+        return [self._project_row(row) for row in rows]
+
+    def get_project(self, project_id: str) -> dict[str, Any] | None:
+        conn = self._ensure_conn()
+        with self._lock:
+            row = conn.execute(
+                """
+                SELECT p.*,
+                       (SELECT COUNT(*) FROM chat_threads t
+                        WHERE t.project_id = p.project_id) AS chat_count
+                FROM chat_projects p WHERE p.project_id = ?
+                """,
+                (project_id,),
+            ).fetchone()
+        return self._project_row(row) if row is not None else None
+
+    @staticmethod
+    def _project_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["project_id"],
+            "name": row["name"],
+            "icon": row["icon"] or "",
+            "instructions": row["instructions"] or "",
+            "context_files": _load_string_list(row["context_files_json"]),
+            "agent_id": row["agent_id"],
+            "collapsed": bool(row["collapsed"]),
+            "position": float(row["position"] or 0),
+            "created_at_ns": int(row["created_at_ns"]),
+            "updated_at_ns": int(row["updated_at_ns"]),
+            "chat_count": int(row["chat_count"]),
+        }
+
+    def create_project(
+        self,
+        *,
+        name: str,
+        icon: str = "",
+        instructions: str = "",
+        context_files: list[str] | None = None,
+        agent_id: str | None = None,
+        project_id: str | None = None,
+    ) -> dict[str, Any]:
+        cleaned = " ".join(name.split())[:_TITLE_MAX_CHARS]
+        if not cleaned:
+            raise ValueError("Project name is required")
+        pid = project_id or str(uuid.uuid4())
+        now = time_ns()
+        conn = self._ensure_conn()
+        with self._lock:
+            conn.execute(
+                """
+                INSERT INTO chat_projects
+                    (project_id, name, icon, instructions, context_files_json,
+                     agent_id, created_at_ns, updated_at_ns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pid,
+                    cleaned,
+                    icon.strip()[:200],
+                    instructions[:100_000],
+                    json.dumps(context_files or [], ensure_ascii=False),
+                    agent_id or None,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_project(pid) or {}
+
+    def update_project(self, project_id: str, **changes: Any) -> dict[str, Any] | None:
+        allowed = {
+            "name": "name",
+            "icon": "icon",
+            "instructions": "instructions",
+            "agent_id": "agent_id",
+            "collapsed": "collapsed",
+            "position": "position",
+        }
+        sets: list[str] = []
+        values: list[Any] = []
+        for key, column in allowed.items():
+            if key not in changes or changes[key] is None:
+                continue
+            value = changes[key]
+            if key == "name":
+                value = " ".join(str(value).split())[:_TITLE_MAX_CHARS]
+                if not value:
+                    raise ValueError("Project name is required")
+            elif key == "icon":
+                value = str(value).strip()[:200]
+            elif key == "instructions":
+                value = str(value)[:100_000]
+            elif key == "agent_id":
+                value = str(value).strip() or None
+            elif key == "collapsed":
+                value = int(bool(value))
+            elif key == "position":
+                value = float(value)
+            sets.append(f"{column} = ?")
+            values.append(value)
+        if "context_files" in changes and changes["context_files"] is not None:
+            sets.append("context_files_json = ?")
+            values.append(json.dumps(list(changes["context_files"]), ensure_ascii=False))
+        if not sets:
+            return self.get_project(project_id)
+        sets.append("updated_at_ns = ?")
+        values.extend((time_ns(), project_id))
+        conn = self._ensure_conn()
+        with self._lock:
+            cur = conn.execute(
+                f"UPDATE chat_projects SET {', '.join(sets)} WHERE project_id = ?",
+                values,
+            )
+        return self.get_project(project_id) if cur.rowcount else None
+
+    def delete_project(self, project_id: str, *, delete_chats: bool = False) -> bool:
+        """Delete project metadata, either ungrouping or deleting its chats."""
+        conn = self._ensure_conn()
+        with self._lock:
+            if delete_chats:
+                conn.execute("DELETE FROM chat_threads WHERE project_id = ?", (project_id,))
+            else:
+                conn.execute(
+                    "UPDATE chat_threads SET project_id = NULL WHERE project_id = ?",
+                    (project_id,),
+                )
+            cur = conn.execute(
+                "DELETE FROM chat_projects WHERE project_id = ?", (project_id,)
+            )
+        return cur.rowcount > 0
+
+    # ------- Restorable UI state --------------------------------------
+    def get_app_state(self) -> dict[str, Any]:
+        conn = self._ensure_conn()
+        with self._lock:
+            rows = conn.execute("SELECT key, value FROM chat_app_state").fetchall()
+        out: dict[str, Any] = {}
+        for row in rows:
+            try:
+                out[row["key"]] = json.loads(row["value"])
+            except ValueError:
+                continue
+        return out
+
+    def set_app_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        conn = self._ensure_conn()
+        with self._lock:
+            for key, value in state.items():
+                if not isinstance(key, str) or len(key) > 80:
+                    continue
+                conn.execute(
+                    "INSERT INTO chat_app_state (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(value, ensure_ascii=False, default=str)),
+                )
+        return self.get_app_state()
 
     # ------- Retention / maintenance ----------------------------------
     def prune_older_than(self, days: int) -> int:

@@ -313,3 +313,87 @@ async def test_new_voice_run_without_brain_or_pipeline() -> None:
         r = await c.post("/api/chats/voice/new")
     assert r.status_code == 200
     assert r.json() == {"cleared": False, "ended": False}
+
+
+async def test_chat_lifecycle_search_mode_project_and_restore_state() -> None:
+    app, store = await _make_app()
+    async with _client(app) as client:
+        project = (
+            await client.post(
+                "/api/chats/projects",
+                json={
+                    "name": "Galen",
+                    "icon": "sparkles",
+                    "instructions": "Preserve the visual language.",
+                    "context_files": ["docs/BRAND.md"],
+                    "agent_id": "future-only",
+                },
+            )
+        ).json()
+        created = await client.post(
+            "/api/chats",
+            json={"title": "New Chat", "mode": "work", "project_id": project["id"]},
+        )
+        chat_id = created.json()["id"]
+        await store.add_message(
+            thread_id=chat_id, role="user", text="Build a safe migration"
+        )
+        updated = await client.patch(
+            f"/api/chats/text/{chat_id}",
+            json={
+                "title": "Migration plan",
+                "draft": "next message",
+                "state": {"work_panel": "terminal"},
+            },
+        )
+        results = await client.get("/api/chats", params={"q": "safe migration"})
+        saved = await client.put(
+            "/api/chats/state",
+            json={"state": {"active_chat_id": chat_id, "active_kind": "text"}},
+        )
+        restored = await client.get("/api/chats/state")
+
+    assert created.status_code == 200
+    assert created.json()["mode"] == "work"
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Migration plan"
+    assert updated.json()["draft"] == "next message"
+    assert updated.json()["state"] == {"work_panel": "terminal"}
+    assert [row["id"] for row in results.json()] == [chat_id]
+    assert saved.json() == restored.json()
+
+
+async def test_chat_can_move_between_project_and_ungrouped_history() -> None:
+    app, _ = await _make_app()
+    async with _client(app) as client:
+        left = (await client.post("/api/chats/projects", json={"name": "Left"})).json()
+        right = (await client.post("/api/chats/projects", json={"name": "Right"})).json()
+        chat = (
+            await client.post(
+                "/api/chats", json={"title": "Move me", "project_id": left["id"]}
+            )
+        ).json()
+        moved = await client.patch(
+            f"/api/chats/text/{chat['id']}", json={"project_id": right["id"]}
+        )
+        ungrouped = await client.patch(
+            f"/api/chats/text/{chat['id']}", json={"project_id": None}
+        )
+
+    assert moved.json()["project_id"] == right["id"]
+    assert ungrouped.json()["project_id"] is None
+
+
+async def test_project_delete_requires_explicit_chat_disposition() -> None:
+    app, store = await _make_app()
+    async with _client(app) as client:
+        project = (await client.post("/api/chats/projects", json={"name": "Safe"})).json()
+        chat = (
+            await client.post(
+                "/api/chats", json={"title": "Keep", "project_id": project["id"]}
+            )
+        ).json()
+        removed = await client.delete(f"/api/chats/projects/{project['id']}")
+
+    assert removed.json()["chats"] == "ungrouped"
+    assert store.get_thread(chat["id"])["project_id"] is None
