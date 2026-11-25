@@ -18,6 +18,7 @@ import { prefetchPaneChanges } from "../paneChangesApi";
 import { ThreadMenuItem, ThreadMenuSeparator, ThreadPopover } from "./ThreadPopover";
 import { copyThreadCode, shownThreadCode } from "./threadCode";
 import { threadTitle, useThreadChatStore } from "./threadModel";
+import { ChatModeSwitch } from "@/components/agentchat/ChatModeSwitch";
 
 const ACTION = cn(
   "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors",
@@ -133,6 +134,7 @@ export function ThreadHeader({ session, projectId, folder, workspaceId }: {
             className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-0.5 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring" />
           <button type="submit" aria-label={t("ide_threads.save_name")} className="rounded p-1 text-muted-foreground hover:text-foreground"><Check className="h-4 w-4" /></button>
         </form>}
+      <ChatModeSwitch session={session} expected="agent" />
       <DoneGateLabel gate={gate} appearance={appearance} name={title} />
       <GitHubStatusBadge status={github.status} pending={github.pending} appearance={appearance} />
       <div className="flex shrink-0 items-center gap-0.5">

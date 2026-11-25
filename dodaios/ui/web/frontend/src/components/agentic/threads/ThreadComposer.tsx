@@ -30,7 +30,7 @@ const STEERABLE_RUNNERS = new Set(["claude-cli", "glm-cli"]);
 /** Draft text per thread, so switching threads never loses a half-written message. */
 const drafts = new Map<string, string>();
 const draftKey = (key: string) => `galen.work.text.v1:${encodeURIComponent(key)}`;
-function readWorkDraft(key: string): string {
+export function readWorkDraft(key: string): string {
   if (drafts.has(key)) return drafts.get(key) ?? "";
   try { return (localStorage.getItem(draftKey(key)) ?? "").slice(0, 200000); } catch { return ""; }
 }

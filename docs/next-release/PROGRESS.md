@@ -386,3 +386,9 @@ starting the scoped project-context injection block.
 - `87f5cee`: consent-based GLNT installation into the native plugin catalog (disconnected) or skill registry (draft), source and version checks, integrity and moderation recheck, staged update and rollback on rename failure. Live registration integration and update/uninstall acceptance still need testing.
 - `cf08e29`: fresh voice chat cannot seed prior lead history; voice-first project association preserved by the bind API and mirror. Actual voice runtime project briefing remains outstanding.
 - This checkpoint adds reviewed commit-pinned raster icons with size/dimension limits and PNG normalization, client validation fixtures, and stops CI from canceling in-progress builds on each push. Native state fixtures are now included in CI. No deployment or release changes.
+
+## CI green and workspace-mode checkpoint
+
+- Run [45628884438](https://github.com/Qrayyt/Galen/actions/runs/45628884438) succeeded on `cf08e29`: 26 backend tests, 12 frontend tests, Python syntax compilation and production frontend build (1m43s). These are focused checks, not the full regression or installed Windows acceptance.
+- `64b1f30` adds safe catalog raster icons and expanded checks; `0319439` restores Chat/Work workspace on launch without overriding explicit deep links.
+- Mode change uses the same durable session and event log, with explicit confirmation and ask-first permissions, idle API-only runners, no active calls/goals/approvals/queued work, no owned threads or vendor resume handles. Work requires a connected folder; unsent drafts/attachments must be handled before the switch. CLI-bound conversations remain in their original mode pending provider-specific safe conversion. Added store fixtures and integrated frontend launch-mode tests. Full route and desktop acceptance remain pending.

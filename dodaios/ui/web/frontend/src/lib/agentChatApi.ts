@@ -617,6 +617,14 @@ export type PatchSessionInput = Partial<
   Pick<AgentChatSession, "title" | "provider" | "model" | "effort" | "speed" | "cwd" | "permission_mode" | "build_mode" | "computer_id" | "project_id" | "draft" | "state">
 >;
 
+export async function changeAgentChatMode(sessionId: string, expected: "jarvis" | "agent", target: "jarvis" | "agent", cwd?: string): Promise<AgentChatSession> {
+  const session = await json<AgentChatSession>(await fetch(`/api/agent-chat/sessions/${encodeURIComponent(sessionId)}/mode`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expected, target, cwd, consent: true }),
+  }), "mode-change-failed");
+  invalidateAgentChatSessions();
+  return session;
+}
+
 export async function patchAgentChatSession(
   sessionId: string,
   input: PatchSessionInput,

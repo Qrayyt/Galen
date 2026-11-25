@@ -1950,6 +1950,57 @@ async def get_context_window(
     }
 
 
+class ChangeModeBody(BaseModel):
+    expected: Literal["jarvis", "agent"]
+    target: Literal["jarvis", "agent"]
+    consent: bool = False
+    cwd: str | None = None
+
+
+@router.post("/sessions/{session_id}/mode", openapi_extra={"x-jarvis-dangerous": True})
+async def change_session_mode(session_id: str, body: ChangeModeBody, request: Request) -> dict[str, Any]:
+    from dodaios.ui.web.voice_runtime import voice_engine_status
+    from dodaios.live.runtime import owns_microphone
+    svc = await _async_service(request)
+    current = svc.store.get_session(session_id)
+    if current is None:
+        raise HTTPException(404, "Session not found")
+    if not body.consent or current.surface != body.expected or body.target == body.expected:
+        raise HTTPException(409, "Review the mode change again")
+    voice = voice_engine_status(request)
+    if voice.get("session_active") or voice.get("transitioning") or owns_microphone():
+        raise HTTPException(409, "End the voice call before switching modes")
+    if svc.is_running(session_id) or svc.pending_approvals(session_id) or svc.pending_questions(session_id) or svc.pending_credential_requests(session_id):
+        raise HTTPException(409, "Finish the current turn and approvals before switching")
+    control = svc.controls.state(session_id)
+    if control.goal and control.goal.status == "active":
+        raise HTTPException(409, "Finish the active goal before switching")
+    if not offers(body.target, current.provider) or any(
+        resolve_runner(current.provider, surface=surface, runtime=current.runtime, account_id=current.account_id) not in {"api", "brain"}
+        for surface in (body.expected, body.target)
+    ):
+        raise HTTPException(409, "Provider-bound CLI chats must remain in their original mode")
+    if body.target == "agent":
+        if not body.cwd:
+            raise HTTPException(400, "Choose a connected Work folder first")
+        cwd = _validate_cwd(body.cwd)
+        if not cwd:
+            raise HTTPException(400, "Work folder is unavailable")
+    else:
+        cwd = svc.default_cwd("jarvis")
+    runner = resolve_runner(current.provider, surface=body.target, account_id=current.account_id)
+    ladder = ladder_key(body.target, runner)
+    # Ask-first is always the ceiling when switching capabilities.
+    permission = normalize_permission(ladder, "ask")
+    try:
+        session = svc.store.change_surface(session_id, body.expected, body.target, cwd=cwd, permission_mode=permission)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    if body.target == "agent" and svc.voice_chat_id == session_id:
+        svc.bind_voice_chat(None)
+    return session.to_dict()
+
+
 @router.patch("/sessions/{session_id}")
 async def patch_session(
     session_id: str, body: PatchSessionBody, request: Request

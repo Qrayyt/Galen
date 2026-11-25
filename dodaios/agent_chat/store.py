@@ -725,6 +725,35 @@ class AgentChatStore:
             self._conn.commit()
         return self.get_session(session_id)
 
+    def change_surface(self, session_id: str, expected: str, target: str, *, cwd: str, permission_mode: str) -> AgentChatSession:
+        """Atomically switch an idle API-backed conversation without rewriting its log.
+
+        Caller validates runner and live state on the service loop. Durable pending
+        work, owned threads and approvals are checked again inside the transaction.
+        """
+        if {expected, target} != {"jarvis", "agent"}:
+            raise ValueError("Only Chat and Work can be switched")
+        with self._lock, self._conn:
+            row = self._conn.execute("SELECT * FROM agent_chat_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is None or row["surface"] != expected:
+                raise ValueError("Conversation mode changed; reload it")
+            if any(row[key] for key in ("vendor_session", "runtime", "computer_id", "started_by")):
+                raise ValueError("This conversation has a provider or workspace binding")
+            for table in ("agent_chat_permission_overrides", "agent_chat_approval_memory", "agent_chat_queued_messages", "agent_chat_parked_work"):
+                if self._conn.execute(f"SELECT 1 FROM {table} WHERE session_id=? LIMIT 1", (session_id,)).fetchone():
+                    raise ValueError("This conversation has saved approvals or unfinished work")
+            if self._conn.execute("SELECT 1 FROM agent_chat_thread_owners WHERE session_id=? OR owner_session=? LIMIT 1", (session_id, session_id)).fetchone():
+                raise ValueError("This conversation owns or belongs to another thread")
+            self._conn.execute(
+                "UPDATE agent_chat_sessions SET surface=?, cwd=?, permission_mode=?, build_mode='', updated_ms=? WHERE session_id=?",
+                (target, cwd, permission_mode, now_ms(), session_id),
+            )
+            if target == "agent":
+                self._conn.execute("DELETE FROM jarvis_lead_session WHERE session_id=?", (session_id,))
+        session = self.get_session(session_id)
+        assert session is not None
+        return session
+
     def permission_override(self, session_id: str) -> str:
         """The user's explicit stance, separate from a Society roster ceiling."""
         with self._lock:

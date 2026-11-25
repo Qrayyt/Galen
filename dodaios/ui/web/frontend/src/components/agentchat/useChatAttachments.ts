@@ -102,6 +102,10 @@ function heldFor(owner: object, key: string): HeldFiles {
   return parked.get(owner)?.get(key) ?? NOTHING_HELD;
 }
 
+export function hasHeldFiles(owner: object, key: string): boolean {
+  return heldFor(owner, key).attachments.length > 0;
+}
+
 function updateHeld(owner: object, key: string, update: (current: HeldFiles) => HeldFiles): void {
   const current = heldFor(owner, key);
   const next = update(current);

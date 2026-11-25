@@ -18,7 +18,7 @@ jobs:
           python-version: '3.12'
       - run: python -m compileall -q dodaios services/glnt_catalog
       - run: python -m pip install pytest httpx fastapi packaging pytest-asyncio uvicorn
-      - run: python -m pytest --noconftest -o addopts='' -q tests/unit/marketplace/test_glnt_manifest.py tests/unit/marketplace/test_glnt_catalog.py tests/unit/marketplace/test_glnt_client.py tests/unit/agent_chat/test_project_context.py
+      - run: python -m pytest --noconftest -o addopts='' -q tests/unit/marketplace/test_glnt_manifest.py tests/unit/marketplace/test_glnt_catalog.py tests/unit/marketplace/test_glnt_client.py tests/unit/agent_chat/test_project_context.py tests/unit/agent_chat/test_mode_switch_store.py
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -32,7 +32,7 @@ jobs:
           cache: npm
           cache-dependency-path: dodaios/ui/web/frontend/package-lock.json
       - run: npm ci
-      - run: npm test -- UnifiedChatSidebar chatsApi.projects galenUiSpec nativeUiState agentChat.leadOpen
+      - run: npm test -- UnifiedChatSidebar chatsApi.projects galenUiSpec nativeUiState agentChat.leadOpen events.workspaceMode
       - run: npm run build
         env:
           NODE_OPTIONS: --max-old-space-size=6144

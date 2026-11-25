@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { ScrollToEndButton } from "@/components/ui/scroll-to-end-button";
 import { scrollViewportOf, useStickToBottom } from "@/hooks/useStickToBottom";
 import { AgentComposer } from "@/components/agentchat/AgentComposer";
+import { ChatModeSwitch } from "@/components/agentchat/ChatModeSwitch";
 import { AgentTimeline } from "@/components/agentchat/AgentTimeline";
 import { withoutAnsweredResults } from "@/components/agentchat/agentResults";
 import { withoutBackgroundNotices } from "@/components/agentchat/backgroundNotices";
@@ -126,9 +127,10 @@ export function ChatStage() {
   const assistantName = useEventStore((s) => s.assistantName);
   const surface = useAgentChat((s) => s.surface);
   const sessionId = useAgentChat((s) => s.activeSessionId);
+  const session = useAgentChat((s) => s.activeSession);
   return surface === "jarvis" ? (
     <PairConversationBoundary key={sessionId} recipient={{ id: "jarvis", name: assistantName }}>
-      <WithRoutineRuns><ChatStageContent /></WithRoutineRuns>
+      <WithRoutineRuns>{session && session.session_id === sessionId && <div className="flex justify-end px-4 pt-2"><ChatModeSwitch session={session} expected="jarvis" /></div>}<ChatStageContent /></WithRoutineRuns>
     </PairConversationBoundary>
   ) : <ChatStageContent />;
 }
