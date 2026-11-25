@@ -1,6 +1,6 @@
 """Dodaios — a voice-driven, cross-platform meta-orchestrator."""
 
-__version__ = "1.0.0-preview.5"
+__version__ = "1.0.0-preview.6"
 
 import os as _os
 
