@@ -230,13 +230,13 @@ export function resolveSectionId(value: unknown): SectionId | null {
   return null;
 }
 
-export function initialSectionFromSearch(search: string): SectionId {
+export function initialSectionFromSearch(search: string, remembered: SectionId = "chats"): SectionId {
   const params = new URLSearchParams(search);
   // ?view= is the general deep-link (drives detached solo windows); an invalid
   // value falls through to the older ?doc shortcut, then the default.
   const view = resolveSectionId(params.get("view"));
   if (view !== null) return view;
-  return params.has("doc") ? "docs" : "chats";
+  return params.has("doc") ? "docs" : (remembered === "agentic-ide" ? "agentic-ide" : "chats");
 }
 
 /**
@@ -746,6 +746,11 @@ function scheduleToastExpiry(
   }, ttl);
 }
 
+const CHAT_MODE_KEY = "galen.workspace-mode.v1";
+function rememberedWorkspaceMode(): SectionId {
+  try { return localStorage.getItem(CHAT_MODE_KEY) === "agentic-ide" ? "agentic-ide" : "chats"; } catch { return "chats"; }
+}
+
 export const useEventStore = create<EventStore>((set, get) => ({
   events: [],
   voiceState: "idle",
@@ -754,6 +759,7 @@ export const useEventStore = create<EventStore>((set, get) => ({
   wsWarming: true,
   activeSection: initialSectionFromSearch(
     typeof window === "undefined" ? "" : window.location.search,
+    rememberedWorkspaceMode(),
   ),
   solo: soloWindowFromSearch(
     typeof window === "undefined" ? "" : window.location.search,
@@ -799,7 +805,13 @@ export const useEventStore = create<EventStore>((set, get) => ({
   setConnected: (c) => set({ connected: c }),
   setWarming: (warming) => set({ wsWarming: warming }),
   clearEvents: () => set({ events: [] }),
-  setActiveSection: (s) => set({ activeSection: landingSection(s) }),
+  setActiveSection: (s) => {
+    const activeSection = landingSection(s);
+    if (!get().solo && (activeSection === "chats" || activeSection === "agentic-ide")) {
+      try { localStorage.setItem(CHAT_MODE_KEY, activeSection); } catch { /* storage unavailable */ }
+    }
+    set({ activeSection });
+  },
 
   requestVisual: (target = "latest") =>
     set((state) => ({
