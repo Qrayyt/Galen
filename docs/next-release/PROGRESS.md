@@ -328,3 +328,16 @@ starting the scoped project-context injection block.
 - Code: `b7f1f01` fixes the project REST contract (server emits `id` and nanosecond timestamps; client had read `project_id` and milliseconds without decoding); `3258a52` adds focused list/create/patch and invalid-ID tests.
 - Test execution: not run; direct GitHub editing has no checked-out dependency environment. No task is promoted to verified.
 - Next risky action: bridge Work draft project metadata without treating the unified project ID as a filesystem/workspace ID, and make project edit/delete explicit. Keep the original Work folder tree and CLI resume behavior; do not change release markers or server state.
+
+## Continuation checkpoint — Work/project navigation and full-history search
+
+- Date: 2026-11-25. Branch: `feat/galen-next-release`.
+- `931bbf3`: distinct unified project scope for new Work drafts and send lanes; do not use the unified project id as a filesystem/workspace id. Project-group new-chat action honors Chat/Work mode. Added focused draft and thread tests.
+- `b5efd4e`: debounced full-message search across ordinary and Work agent sessions; stale-request cancellation, snippets, older hits, and project-group expansion while searching. Voice archive search and pagination beyond the per-mode result cap remain.
+- `c597a34`: edit project name/icon, confirm project deletion and chat moves/deletes; project deletion uses the non-destructive default. Added localized confirmation copy and error feedback.
+- `7f6d758`: unified history remains visible in Work thread layout; mature Work project tree is retained in a collapsible section.
+- `6aac84b`: focused frontend tests for project-scoped Chat/Work creation, message search, icon editing and confirmations.
+- `b7aa75b`: fix application-state PUT envelope and add regression test.
+- Tasks 2–4, 6, 9–14 advanced; desktop acceptance and execution of newly added tests remain outstanding. No verified status is assigned. Existing project deletion does not yet clear agent-store project references; fix this before claiming complete project deletion semantics. Project instructions/files are not yet injected; voice-first scoping, full restart/draft restore, mode changes of existing chats, and full-text voice archive search remain.
+- No build, dependency installation or test execution was performed during this direct connector session. No release marker, tag, deployment, server, or existing conversation data was changed. A large multi-locale write failed at transport level; smaller commits succeeded. Keep the release unverified.
+- Next: reconcile project deletion across both stores; implement scoped project context and restart/draft restore; then continue generative UI and GLNT marketplace blocks (17–30) and final acceptance matrix.
