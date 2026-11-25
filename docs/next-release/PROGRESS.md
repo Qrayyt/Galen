@@ -320,3 +320,11 @@ starting the scoped project-context injection block.
 - Added project-aware ordinary chat navigation and a new chat button in project groups.
 - Tasks 1 and 13: frontend implementation advanced, NOT verified; Work project creation, voice-first project scope, and desktop regression checks remain.
 - No external server or release changes. No build or tests run in this environment. Next: inspect Work thread initialization, project editing, and add targeted tests before marking complete.
+
+
+## Continuation checkpoint — project wire contract and upcoming UI changes
+
+- Date: 2026-11-25, continuation on `feat/galen-next-release`.
+- Code: `b7f1f01` fixes the project REST contract (server emits `id` and nanosecond timestamps; client had read `project_id` and milliseconds without decoding); `3258a52` adds focused list/create/patch and invalid-ID tests.
+- Test execution: not run; direct GitHub editing has no checked-out dependency environment. No task is promoted to verified.
+- Next risky action: bridge Work draft project metadata without treating the unified project ID as a filesystem/workspace ID, and make project edit/delete explicit. Keep the original Work folder tree and CLI resume behavior; do not change release markers or server state.
