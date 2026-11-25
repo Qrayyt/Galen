@@ -29,9 +29,6 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id" | jq -e --arg sha "$SOURCE_SHA" '.head_sha == $sha and .head_branch == "feat/galen-next-release" and .status == "completed" and .conclusion == "success"'
           done
           gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN/jobs?per_page=100" | jq -e '.total_count == 6 and ([.jobs[].conclusion] | all(. == "success"))'
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Refusing to overwrite existing release"; exit 1
-          fi
       - name: Download exact candidate artifacts
         run: |
           set -euo pipefail
@@ -46,27 +43,31 @@ jobs:
             sha256sum -c "$file.sha256"
           done
           cmp Galen-Setup-x64.exe.sha256 installers-SHA256SUMS.txt
-      - name: Create draft and upload all verified assets
+      - name: Verify existing draft through REST API
         run: |
           set -euo pipefail
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --draft --prerelease --title "Galen 1.0 Preview 6 · Galenite" --notes-file docs/GALEN_1_0_PREVIEW_6.md
-          gh release upload "$TAG" assets/Galen-Setup-x64.exe assets/Galen-Setup-x64.exe.sha256 assets/installers-SHA256SUMS.txt assets/Galen-macOS-arm64.dmg assets/Galen-macOS-arm64.dmg.sha256 assets/Galen-macOS-x64.dmg assets/Galen-macOS-x64.dmg.sha256 --repo "$GITHUB_REPOSITORY"
-      - name: Verify uploaded assets and publish
-        run: |
-          set -euo pipefail
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets,isDraft,isPrerelease,targetCommitish > release.json
+          gh api "repos/$GITHUB_REPOSITORY/releases/458599276" > release.json
           python3 - <<'PY'
           import hashlib,json,pathlib,os
           r=json.load(open('release.json'))
-          assert r['isDraft'] and r['isPrerelease'] and r['targetCommitish']==os.environ['SOURCE_SHA'], r.keys()
-          files={p.name:p for p in pathlib.Path('assets').iterdir() if p.is_file()}
-          assert len(r['assets'])==7 and len(files)==7
+          assert r['draft'] and r['prerelease'] and r['target_commitish']==os.environ['SOURCE_SHA'] and r['tag_name']==os.environ['TAG']
+          expected = {'Galen-Setup-x64.exe','Galen-Setup-x64.exe.sha256','installers-SHA256SUMS.txt','Galen-macOS-arm64.dmg','Galen-macOS-arm64.dmg.sha256','Galen-macOS-x64.dmg','Galen-macOS-x64.dmg.sha256'}
+          actual = {a['name'] for a in r['assets']}
+          assert actual == expected and len(r['assets'])==len(expected), (actual, expected)
           for a in r['assets']:
-              p=files[a['name']]
-              assert a['state']=='uploaded' and a['size']==p.stat().st_size, a['name']
+              p=pathlib.Path('assets') / a['name']
+              assert p.is_file() and a['state']=='uploaded' and a['size']==p.stat().st_size, a['name']
               with p.open('rb') as f:
                   digest='sha256:'+hashlib.file_digest(f,'sha256').hexdigest()
               assert a['digest']==digest, a['name']
+              print(a['name'], 'verified')
           PY
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,isDraft,isPrerelease,assets
+      - name: Publish verified draft and verify source tag
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > tag.json 2>/dev/null; then
+            jq -e --arg sha "$SOURCE_SHA" '.object.type=="commit" and .object.sha==$sha' tag.json
+          fi
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/458599276" -F draft=false -F prerelease=true | jq -e --arg tag "$TAG" '.draft==false and .prerelease==true and .tag_name==$tag and (.assets|length)==7'
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" | jq -e --arg sha "$SOURCE_SHA" '.object.type=="commit" and .object.sha==$sha'
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json url,isDraft,isPrerelease

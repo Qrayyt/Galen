@@ -523,3 +523,7 @@ starting the scoped project-context injection block.
 ## Preview 6 release authorization
 
 - Exact candidate [45675994014](https://github.com/Qrayyt/Galen/actions/runs/45675994014) and focused [45675994013](https://github.com/Qrayyt/Galen/actions/runs/45675994013) at da7a30e4 succeeded. All six jobs green; 46 basic and 256 expanded tests passed, Windows installed UI report passed. Three installer artifacts available with checksum files. User authorized publication. Promotion workflow validates exact successful run, checksums and source SHA, uploads all seven assets to a draft and publishes only after asset verification. No rebuild and no modification of Preview 5. Publication and site metadata refresh pending confirmation.
+
+## Preview 6 publication retry
+
+- Promotion run 45692541252 downloaded and verified all three installers and uploaded seven assets to draft 458599276 targeting exact tested SHA. Final verification failed on asset/local-file count assertion. REST release inspection confirmed seven uploaded assets with SHA-256 digests. Retry verifies explicit expected asset names, sizes and SHA-256 against the original successful artifacts using REST, then publishes that exact existing draft; no reupload or rebuild. Publication confirmation pending.
