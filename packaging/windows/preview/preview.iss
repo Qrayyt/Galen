@@ -166,7 +166,7 @@ end;
 
 procedure ShowInstalling; forward;
 procedure ShowFinished; forward;
-function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; lpTimerFunc: NativeInt): UINT_PTR;
+function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; lpTimerFunc: LongWord): UINT_PTR;
   external 'SetTimer@user32.dll stdcall';
 function KillTimer(hWnd: HWND; nIDEvent: UINT_PTR): BOOL;
   external 'KillTimer@user32.dll stdcall';
