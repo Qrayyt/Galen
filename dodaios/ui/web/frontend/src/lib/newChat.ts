@@ -19,9 +19,9 @@ export function resetTextConversation(): void {
 }
 
 /** Land on an empty typed chat on the front page. */
-export function startNewTextChat(): void {
+export function startNewTextChat(projectId?: string): void {
   resetTextConversation();
-  useAgentChatStore.getState().newChat();
+  useAgentChatStore.getState().newChat(projectId ? { projectId } : undefined);
   useHomeStore.getState().openAgentChat(null);
   useHomeStore.getState().setSurface("chat");
   useEventStore.getState().setActiveSection("chats");
