@@ -19,17 +19,15 @@ function choose(name){
   os=name;
   buttons.forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.os===os)));
   macDownloads.hidden=os!=='macOS';
-  button.hidden=os==='macOS';
-  document.querySelector('.install-panel').classList.toggle('is-mac',os==='macOS');
+  document.querySelector('#standard-download').hidden=os==='macOS';
   document.querySelector('#platform-name').textContent='Galen для '+os;
   const note=document.querySelector('#platform-note');
   if(os==='macOS'){
-    note.textContent='Выберите подходящую версию для вашего Mac.';
     for(const b of macButtons){
       const key=b.dataset.mac,entry=results[key];
       b.disabled=!entry?.asset;
-      b.textContent=entry?.asset?'Скачать DMG ↓':entry?.failure?'Пока недоступно':'Проверяем версию…';
-      document.querySelector('#mac-'+key+'-note').textContent=status(entry);
+      b.textContent=entry?.asset?'Скачать установщик ↓':entry?.failure?'Пока недоступно':'Проверяем версию…';
+      document.querySelector('#mac-'+key+'-note').textContent=feeds[key].label+' · '+status(entry);
     }
     info.textContent=macButtons.some(b=>!b.disabled)?'SHA-256 проверен при публикации.':'Скачивание станет доступно после публикации проверенной сборки.';
     return;
