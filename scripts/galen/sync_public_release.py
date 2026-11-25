@@ -2,6 +2,7 @@
 """Publish small verified release manifests, never mirror installer binaries."""
 import hashlib
 import json
+import os
 import pathlib
 import re
 import tempfile
@@ -57,6 +58,13 @@ def atomic(path, data):
 
 def sync():
     rows = json.loads(download(API + "/releases?per_page=100", 8 * 1024**2))
+    pin = os.environ.get("GALEN_RELEASE_PIN", "").strip()
+    if pin and not TAG.fullmatch(pin):
+        raise ValueError("Invalid explicit release pin")
+    if pin:
+        rows = [row for row in rows if row.get("tag_name") == pin and not row.get("draft")]
+        if not rows:
+            raise RuntimeError("Pinned published release unavailable")
     DEST.mkdir(parents=True, exist_ok=True)
     for name, feed, prefix in PLATFORMS:
         checksum = name + ".sha256"
@@ -70,6 +78,8 @@ def sync():
             if valid(assets.get(name), tag, name, 2 * 1024**3) and valid(assets.get(checksum), tag, checksum, 65536):
                 choices.append((key, row, assets))
         if not choices:
+            if pin:
+                raise RuntimeError("Pinned release missing verified asset: " + name)
             print("No published asset:", name)
             continue
         key, row, assets = max(choices, key=lambda x: x[0])
@@ -78,7 +88,7 @@ def sync():
         pointer = DEST / feed
         if pointer.is_file():
             previous = version(json.loads(pointer.read_text()).get("tag_name", ""))
-            if previous and previous > key:
+            if previous and previous > key and not pin:
                 raise ValueError("Refusing rollback: " + feed)
         folder = prefix + tag + "-" + installer["digest"][7:23]
         payload = download(proof["browser_download_url"], 65536)

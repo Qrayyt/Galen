@@ -527,3 +527,7 @@ starting the scoped project-context injection block.
 ## Preview 6 publication retry
 
 - Promotion run 45692541252 downloaded and verified all three installers and uploaded seven assets to draft 458599276 targeting exact tested SHA. Final verification failed on asset/local-file count assertion. REST release inspection confirmed seven uploaded assets with SHA-256 digests. Retry verifies explicit expected asset names, sizes and SHA-256 against the original successful artifacts using REST, then publishes that exact existing draft; no reupload or rebuild. Publication confirmation pending.
+
+## Preview 6 withdrawal
+
+- User requested rollback to Preview 5 after Windows interactive installer failed while Galen was running (Inno Restart Manager could not close applications, suppressed Abort, exit 5). Preserve all source and release assets. Pin public release metadata explicitly to Preview 5, allow downgrade only under explicit configured pin, and return Preview 6 to draft without deleting any assets or tags. Do not reset user profiles or force installed clients to downgrade. Server and GitHub confirmation pending.

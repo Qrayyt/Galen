@@ -1,0 +1,23 @@
+name: Withdraw Galen Preview 6 (preserve assets)
+on:
+  push:
+    branches: [feat/galen-next-release]
+    paths: ['.galen-withdraw-preview6']
+permissions:
+  contents: write
+concurrency:
+  group: galen-publish-preview6
+  cancel-in-progress: false
+jobs:
+  withdraw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Return exact Preview 6 release to draft
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/458599276" | jq -e '.tag_name=="v1.0.0-preview.6" and .target_commitish=="da7a30e43dd87fbb429ca2df5854bb66ebbd7012" and (.assets|length)==7'
+          gh api "repos/$GITHUB_REPOSITORY/releases/457928297" | jq -e '.tag_name=="v1.0.0-preview.5" and .draft==false and (.assets|length)==7'
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/458599276" -F draft=true | jq -e '.draft==true and (.assets|length)==7'
