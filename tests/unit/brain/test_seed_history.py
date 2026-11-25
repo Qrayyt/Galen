@@ -120,3 +120,31 @@ async def test_generate_history_override_is_context_local(monkeypatch) -> None:
 
     assert result == "observed"
     assert manager._last_exchange_text() == "user: stale unrelated request\nassistant: stale answer"
+
+
+def test_voice_context_seed_is_pinned_to_call_until_release() -> None:
+    manager = _bare_manager()
+    manager.set_voice_context_source(lambda _: ([("user", "a")], "project-a"))
+    a = manager.take_voice_context_seed("call-a")
+    manager.set_voice_context_source(lambda _: ([("user", "b")], "project-b"))
+    assert manager.take_voice_context_seed("call-a") == a
+    manager.release_voice_context_seed("call-a")
+    b = manager.take_voice_context_seed("call-b")
+    assert b[0][0].content == "b" and b[1] == "project-b"
+
+
+@pytest.mark.asyncio
+async def test_stream_forwards_scoped_context_without_global_history(monkeypatch) -> None:
+    manager = _bare_manager()
+    manager.seed_history([("user", "unrelated")])
+    async def generate(_text, **kwargs):
+        assert kwargs["use_history"] is False
+        assert kwargs["history_override"][0].content == "only this call"
+        assert kwargs["voice_project_context"] == "project-a"
+        kwargs["text_consumer"]("Hello.")
+        return "Hello."
+    monkeypatch.setattr(manager, "generate", generate)
+    result = [part async for part in manager.generate_stream("hi", use_history=False,
+        history_override=[BrainMessage(role="user", content="only this call")], voice_project_context="project-a")]
+    assert "".join(result) == "Hello."
+    assert manager._history[0].content == "unrelated"

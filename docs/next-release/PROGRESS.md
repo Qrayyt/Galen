@@ -447,3 +447,8 @@ starting the scoped project-context injection block.
 
 - Risk: a voice archive association must not rewrite recordings, discard transcripts, or apply a different project's instructions to a running call. Safeguards: separate additive link table in chats.db with cascading unlink on project removal; only finished archives can move and active voice calls block movement. Runtime resolves an archive's project from its durable association per newly captured call, and discards stale explicit seeds upon rebinding. The sidebar exposes a confirmed move for archives, preserving voice identity; search and history include project metadata.
 - Added route and scoped archive seed fixtures. Task 14 remains pending CI; classic pipeline and direct explicit-seed path still need acceptance. No release/server changes.
+
+## Classic voice scoped context implementation
+
+- Captured caller-owned history and project briefing for classic speech and push-to-talk. Streaming, nonstreaming, buffered completion and local spoken briefs use the call-owned scope; no fallback to shared history on a supported brain. Realtime-to-classic fallback reuses one pinned call seed rather than a newer selection. Scope is released on call teardown. Project-scoped brain turns also opt out of automatic global-memory curation to prevent private response data becoming shared memory.
+- Added focused seed, stream and classic context fixtures and included them in candidate backend regression. This is not yet a verified hardware microphone / real provider scenario. Tasks 5 and 15 still require integration acceptance; rich binary document ingestion is not included in this change.

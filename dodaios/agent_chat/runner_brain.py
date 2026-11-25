@@ -661,6 +661,8 @@ async def run_brain_turn(
         kit_tools=kit_tools,
         system_extra=system_extra,
     )
+    if handle.project_context or getattr(session, "project_id", None):
+        override = replace(override, tool_context={**override.tool_context, "private_project_context": True})
     if session.surface == "jarvis" and _speaks_as_lead(session.session_id):
         # The lead conversation, and a side thread of it, get the lead doctrine
         # and the ecosystem map.

@@ -9530,9 +9530,11 @@ class BrainManager:
             text=response_text,
         )
 
-        if self._curator is not None and not (
+        # Project-private instructions and documents must not enter the global
+        # automatic memory curator through an assistant reply.
+        if self._curator is not None and not _VOICE_PROJECT_CONTEXT.get() and not (
             (profile_override := _TURN_OVERRIDE.get()) is not None
-            and profile_override.tool_context.get("tool_origin") == "society"
+            and (profile_override.tool_context.get("tool_origin") == "society" or profile_override.tool_context.get("private_project_context"))
         ):
             try:
                 asyncio.create_task(
@@ -12612,6 +12614,8 @@ class BrainManager:
         allow_voice_confirm: bool = False,
         conversation_id: str | None = None,
         consume_pending_voice_attachments: bool = False,
+        history_override: Iterable[BrainMessage] | None = None,
+        voice_project_context: str = "",
     ) -> AsyncIterator[str]:
         """Latency sprint 1: streaming variant of ``generate``.
 
@@ -12642,14 +12646,9 @@ class BrainManager:
         # discarded this (BUG-028 pattern), so a leaked action-tool reached TTS
         # as raw JSON and the action was lost. We capture it here.
         holder: dict[str, str | None] = {"final": None}
-        context = tuple(
-            str(message.content or "")
-            for message in (
-                (getattr(self, "_history", ()) or ())[-8:]
-                if use_history
-                else ()
-            )
-        )
+        scoped_history = tuple(history_override) if history_override is not None else None
+        planning_history = scoped_history if scoped_history is not None else (getattr(self, "_history", ()) or ()) if use_history else ()
+        context = tuple(str(message.content or "") for message in planning_history[-8:])
         action_buffered = plan_turn(user_text, context=context).requires_orchestrator
 
         def _consumer(chunk: str) -> None:
@@ -12673,6 +12672,8 @@ class BrainManager:
                     consume_pending_voice_attachments=(
                         consume_pending_voice_attachments
                     ),
+                    **({"history_override": scoped_history} if scoped_history is not None else {}),
+                    **({"voice_project_context": voice_project_context} if voice_project_context else {}),
                 )
             finally:
                 # Sentinel signals "brain is done (or crashed)".
@@ -12919,16 +12920,38 @@ class BrainManager:
         self._voice_context_source = source
 
     def take_voice_context_seed(self, call_id: str) -> tuple[tuple[BrainMessage, ...], str]:
-        # Explicit resume data has no proven project association.
-        source = getattr(self, "_voice_context_source", None)
-        if "_voice_history_seed" in self.__dict__ or not callable(source):
-            return self.take_voice_history_seed(), ""
-        try:
-            history, project = source(call_id)
-            return tuple(self._seedable(history)), project
-        except Exception:
-            log.warning("Voice context unavailable; starting without history or project")
-            return (), ""
+        # One call can fall back from realtime to classic; never recapture a
+        # newer sidebar selection for the same call ID. The cache is RAM-only,
+        # contains one seed, and a different call ID cannot read it.
+        import threading
+
+        lock = self.__dict__.setdefault("_voice_context_lock", threading.Lock())
+        with lock:
+            previous = self.__dict__.get("_last_voice_context_seed")
+            if call_id and previous is not None and previous[0] == call_id:
+                return previous[1]
+            source = getattr(self, "_voice_context_source", None)
+            if "_voice_history_seed" in self.__dict__ or not callable(source):
+                result = (self.take_voice_history_seed(), "")
+            else:
+                try:
+                    history, project = source(call_id)
+                    result = (tuple(self._seedable(history)), project)
+                except Exception:
+                    log.warning("Voice context unavailable; starting without history or project")
+                    result = ((), "")
+            if call_id:
+                self._last_voice_context_seed = (call_id, result)
+            return result
+
+    def release_voice_context_seed(self, call_id: str) -> None:
+        lock = self.__dict__.get("_voice_context_lock")
+        if lock is None:
+            return
+        with lock:
+            previous = self.__dict__.get("_last_voice_context_seed")
+            if previous is not None and previous[0] == call_id:
+                self.__dict__.pop("_last_voice_context_seed", None)
 
     def take_voice_history_seed(self) -> tuple[BrainMessage, ...]:
         """Consume an explicit resume once, retaining the text brain's history.

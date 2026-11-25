@@ -131,6 +131,7 @@ from dodaios.skills.schema import SkillDirectTriggered
 from dodaios.skills.skill_context import try_get_skill_context
 from dodaios.skills.trigger_matcher import TriggerMatcher
 from dodaios.speech import start_refusal
+from dodaios.speech.classic_context import ClassicCallContext
 from dodaios.speech.completeness import (
     Completeness,
     classify_completeness,
@@ -9059,6 +9060,7 @@ class SpeechPipeline:
             self._last_announcement_spoken_monotonic = None
             self._previous_turn_state = None
             self._current_voice_session_id = session_id
+            self._classic_call_context = None
             self._restore_agent_replies()
             self._active_voice_mode = self._configured_voice_mode()
             self._active_realtime_provider = ""
@@ -9135,6 +9137,10 @@ class SpeechPipeline:
                 self._reopen_after_engine_change = False
                 self._engine_change_reason = ""
                 self._current_voice_session_id = None
+                self._classic_call_context = None
+                release_context = getattr(self._brain, "release_voice_context_seed", None)
+                if callable(release_context):
+                    release_context(session_id)
                 self._active_voice_mode = None
                 self._active_realtime_provider = ""
                 self._active_realtime_model = ""
@@ -9321,6 +9327,10 @@ class SpeechPipeline:
         ) as mic:
             yield mic.stream()
 
+    async def _capture_classic_call_context(self) -> None:
+        call_id = getattr(self, "_current_voice_session_id", None)
+        self._classic_call_context = await ClassicCallContext.capture(getattr(self, "_brain", None), call_id)
+
     async def _active_session(
         self, *, input_buffer: _SessionInputBuffer | None = None
     ) -> str:
@@ -9341,6 +9351,7 @@ class SpeechPipeline:
             self._active_realtime_provider = ""
             self._active_realtime_model = ""
             self._voice_engine_transitioning = False
+            await self._capture_classic_call_context()
             return await self._ptt_session(input_buffer=input_buffer)
         requested_mode = self._configured_voice_mode()
         self._active_voice_mode = requested_mode
@@ -9403,6 +9414,7 @@ class SpeechPipeline:
         self._active_realtime_provider = ""
         self._active_realtime_model = ""
         self._voice_engine_transitioning = False
+        await self._capture_classic_call_context()
         async with self._session_input_source(
             input_buffer, discard_suppressed=True
         ) as input_chunks:
@@ -15322,15 +15334,17 @@ class SpeechPipeline:
                     self._brain_streaming(text, lang)
                 )
             else:
-                try:
-                    generate_call = self._brain.generate(
-                        text, consume_pending_voice_attachments=True
-                    )
-                except TypeError:
-                    # Compatibility for small test/provider adapters that still
-                    # expose the pre-modality Brain protocol.
-                    generate_call = self._brain.generate(text)
+                scope = getattr(self, "_classic_call_context", None)
+                if scope is not None:
+                    generate_call = self._brain.generate(text, consume_pending_voice_attachments=True, **scope.kwargs())
+                else:
+                    try:
+                        generate_call = self._brain.generate(text, consume_pending_voice_attachments=True)
+                    except TypeError:
+                        generate_call = self._brain.generate(text)
                 reply = await generate_call
+                if scope is not None:
+                    scope.remember(text, reply)
                 if reply:
                     await self._set_turn_state(TurnTakingState.JARVIS_SPEAKING)
                     await self._speak(reply, language=lang, kind=SPOKEN_KIND_COMPLETION)
@@ -15645,6 +15659,8 @@ class SpeechPipeline:
                 reply_delta.feed(cleaned if not reply_delta.text else f" {cleaned}")
             await _speak_sentence(cleaned)
 
+        scope = getattr(self, "_classic_call_context", None)
+
         async def _produce() -> None:
             nonlocal sentence_buffer, paraphrase_stripped, brain_first_token_marked
             try:
@@ -15663,28 +15679,31 @@ class SpeechPipeline:
                 # ``on_progress`` must still receive the stall-guard heartbeat —
                 # dropping straight to the bare call here loses ``on_progress`` and
                 # the no-first-frame ceiling would behead the working turn (BUG-032).
-                try:
-                    stream = self._brain.generate_stream(
-                        text,
-                        on_progress=self._mark_brain_progress,
-                        allow_voice_confirm=True,
-                        consume_pending_voice_attachments=True,
-                    )
-                except TypeError:
+                if scope is not None:
+                    stream = self._brain.generate_stream(text, on_progress=self._mark_brain_progress, allow_voice_confirm=True, consume_pending_voice_attachments=True, **scope.kwargs())
+                else:
                     try:
                         stream = self._brain.generate_stream(
                             text,
                             on_progress=self._mark_brain_progress,
                             allow_voice_confirm=True,
+                            consume_pending_voice_attachments=True,
                         )
                     except TypeError:
                         try:
                             stream = self._brain.generate_stream(
                                 text,
                                 on_progress=self._mark_brain_progress,
+                                allow_voice_confirm=True,
                             )
                         except TypeError:
-                            stream = self._brain.generate_stream(text)
+                            try:
+                                stream = self._brain.generate_stream(
+                                    text,
+                                    on_progress=self._mark_brain_progress,
+                                )
+                            except TypeError:
+                                stream = self._brain.generate_stream(text)
                 async for chunk in stream:
                     if not chunk:
                         continue
@@ -15862,7 +15881,10 @@ class SpeechPipeline:
         self._touch_assistant_speech_activity()
         if not barged:
             self._suppress_session_input_after_tts("response")
-        return "".join(full_text_parts), barged
+        result = "".join(full_text_parts)
+        if scope is not None and not barged:
+            scope.remember(text, result)
+        return result, barged
 
     def _brain_turn_failed(self) -> bool:
         """True when the brain flagged the just-finished turn as a total
@@ -16058,7 +16080,10 @@ class SpeechPipeline:
         await self._speak(brief, language=lang, kind=SPOKEN_KIND_REPLY)
         brain = getattr(self, "_brain", None)
         seed = getattr(brain, "seed_history", None)
-        if callable(seed):
+        scope = getattr(self, "_classic_call_context", None)
+        if scope is not None:
+            scope.remember(text, brief)
+        elif callable(seed):
             try:
                 history = list(getattr(brain, "_history", None) or [])
                 seed([*history, ("user", text), ("assistant", brief)])
@@ -16085,7 +16110,10 @@ class SpeechPipeline:
         await self._speak(spoken, language=lang, kind=SPOKEN_KIND_REPLY)
         brain = getattr(self, "_brain", None)
         seed = getattr(brain, "seed_history", None)
-        if callable(seed):
+        scope = getattr(self, "_classic_call_context", None)
+        if scope is not None:
+            scope.remember(text, spoken)
+        elif callable(seed):
             try:
                 history = list(getattr(brain, "_history", None) or [])
                 seed([*history, ("user", text), ("assistant", spoken)])
@@ -16530,7 +16558,10 @@ class SpeechPipeline:
             damit der Orb den richtigen Modus hat.
         """
         generate = getattr(self._brain, "generate", None)
-        if consume_pending_voice_attachments and callable(generate):
+        scope = getattr(self, "_classic_call_context", None)
+        if scope is not None and callable(generate):
+            brain_call = generate(text, consume_pending_voice_attachments=consume_pending_voice_attachments, **scope.kwargs())
+        elif consume_pending_voice_attachments and callable(generate):
             try:
                 brain_call = generate(
                     text, consume_pending_voice_attachments=True
@@ -16555,7 +16586,10 @@ class SpeechPipeline:
 
         if brain_task in done:
             timer_task.cancel()
-            return brain_task.result()
+            result = brain_task.result()
+            if scope is not None:
+                scope.remember(text, result)
+            return result
 
         # Timer war schneller — Brain denkt noch. Ack abspielen, dann weiterwarten.
         pcm = self._pick_task_ack_pcm(lang)
@@ -16567,7 +16601,10 @@ class SpeechPipeline:
             except Exception as exc:  # noqa: BLE001
                 log.warning("Task-Ack-Playback fehlgeschlagen: %s", exc)
             await self._set_turn_state(TurnTakingState.PROCESSING)
-        return await brain_task
+        result = await brain_task
+        if scope is not None:
+            scope.remember(text, result)
+        return result
 
     def _pick_task_ack_pcm(self, lang: str) -> bytes:
         """Liefert PCM-Bytes einer zufaelligen Start-Ack-Phrase fuer die Sprache."""
