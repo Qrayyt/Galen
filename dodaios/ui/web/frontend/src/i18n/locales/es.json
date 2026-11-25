@@ -329,7 +329,7 @@
     "agent_instructions": "{name}",
     "appshots": "Appshots",
     "jarvisx": "Galen X",
-    "marketplace": "Marketplace",
+    "marketplace": "GLNT",
     "agentic_ide": "IDE agéntico",
     "agentic_ide_beta": "Beta",
     "voice": "Voz de {name}",
@@ -6497,7 +6497,7 @@
     "share_private_note": "No se sube nada. Tú decides adónde va."
   },
   "marketplace_origin": {
-    "badge": "Marketplace",
+    "badge": "GLNT",
     "tooltip": "Instalado desde el marketplace",
     "view_source": "ver publicación"
   },
@@ -6704,9 +6704,9 @@
     "open_board": "Abrir el tablero"
   },
   "marketplace": {
-    "title": "Marketplace",
+    "title": "GLNT",
     "refresh": "Buscar entradas nuevas",
-    "open_web": "Abrir el sitio de Dodaios Marketplace",
+    "open_web": "Abrir el sitio del catálogo de origen",
     "search_placeholder": "Buscar plugins, skills y agentes…",
     "filter_all": "Todo",
     "filter_plugins": "Plugins",
@@ -9848,7 +9848,7 @@
         "description": "Un cachorro de labrador chocolate: ladea la cabeza al escuchar, escarba al trabajar y corre en círculos al acertar."
       },
       "dodaios": {
-        "description": "La figura encapuchada del logotipo: la punta de la capucha se levanta al escuchar y la capa vuela al saltar."
+        "description": "Una misteriosa figura encapuchada: levanta la capucha al escuchar y su capa ondea al saltar."
       }
     },
     "create_dialog": {

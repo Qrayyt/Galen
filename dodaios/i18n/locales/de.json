@@ -319,13 +319,13 @@
         "cu_exit_action_failed": "Eine Aktion am Bildschirm ist fehlgeschlagen, ich habe abgebrochen.",
         "cu_exit_cancelled": "Die Aktion am Bildschirm wurde abgebrochen.",
         "cu_exit_needs_elevation": "Ich habe auf die Administrator-Bestaetigung gewartet, aber es kam keine, also habe ich gestoppt.",
-        "cu_blocked_permission": "Ich musste anhalten: Dodaios braucht die Berechtigung {permission}. Erlaube sie unter {pane}. Versuche es danach noch einmal.",
-        "cu_blocked_restart_hint": "Ich musste anhalten: Die Berechtigung {permission} wirkt womöglich erst, nachdem Dodaios beendet und neu geöffnet wurde. Starte die App neu und versuche es dann noch einmal.",
-        "cu_blocked_unavailable": "Ich musste anhalten: Dodaios kann in dieser Sitzung nicht nach der Berechtigung {permission} fragen.",
+        "cu_blocked_permission": "Ich musste anhalten: Galen braucht die Berechtigung {permission}. Erlaube sie unter {pane}. Versuche es danach noch einmal.",
+        "cu_blocked_restart_hint": "Ich musste anhalten: Die Berechtigung {permission} wirkt womöglich erst, nachdem Galen beendet und neu geöffnet wurde. Starte die App neu und versuche es dann noch einmal.",
+        "cu_blocked_unavailable": "Ich musste anhalten: Galen kann in dieser Sitzung nicht nach der Berechtigung {permission} fragen.",
         "cu_blocked_waiting": "Ich musste anhalten, weil macOS gerade nach der Berechtigung {permission} fragt. Beantworte den Dialog und versuche es dann noch einmal.",
         "cu_blocked_dialog": "Ich musste anhalten, weil auf dem Mac ein Systemdialog offen ist. Beantworte ihn selbst und versuche es dann noch einmal.",
         "cu_blocked_restricted": "Ich musste anhalten: Eine nötige Berechtigung ist auf diesem Mac durch ein Profil oder eine Kindersicherung gesperrt. Das lässt sich in der App nicht ändern.",
-        "cu_blocked_generic": "Ich musste anhalten, weil macOS eine Berechtigung für Dodaios braucht. Erlaube sie in den Systemeinstellungen unter Datenschutz & Sicherheit und versuche es dann noch einmal.",
+        "cu_blocked_generic": "Ich musste anhalten, weil macOS eine Berechtigung für Galen braucht. Erlaube sie in den Systemeinstellungen unter Datenschutz & Sicherheit und versuche es dann noch einmal.",
         "cu_timeout": "Das am Bildschirm hat zu lange gedauert (ueber {secs} Sekunden) und wurde abgebrochen.",
         "open_app_launched": "Gestartet: {app}",
         "open_app_launched_raised": "Gestartet und nach vorn geholt: {app}",
@@ -394,7 +394,7 @@
         "ide_terminal_who_else": "Ich konnte nur {names} zuordnen. Wer sollte noch ran?",
         "ide_terminals_nowhere": "Es ist kein Workspace offen und ich habe keinen letzten. Wähle einen Ordner in der Agentic IDE."
       },
-      "permission_cause_templates": "Dodaios hat die Berechtigung {name} gerade nicht.",
+      "permission_cause_templates": "Galen hat die Berechtigung {name} gerade nicht.",
       "permission_cause_names": {
         "microphone": "Mikrofon",
         "accessibility": "Bedienungshilfen",
@@ -442,7 +442,7 @@
       "outcome_templates": {
         "safe_applied": "Geht klar — {label} jetzt {new}.",
         "applied": "Erledigt — {label} ist jetzt {new}.",
-        "applied_restart": "Erledigt — {label} ist jetzt {new}. Bitte einmal Dodaios neustarten, damit's wirkt.",
+        "applied_restart": "Erledigt — {label} ist jetzt {new}. Bitte einmal Galen neustarten, damit's wirkt.",
         "validate_failed": "Geht nicht — {err}. Setting bleibt {old}.",
         "rollback": "Konnte nicht gespeichert werden, hab den vorherigen Zustand wiederhergestellt. {err}",
         "vetoed": "Okay, lass ich.",
@@ -463,7 +463,7 @@
     "config_readback": {
       "phrases": {
         "applied": "Erledigt — {label} ist jetzt {value}.",
-        "applied_restart": "Erledigt — {label} ist jetzt {value}. Starte Dodaios einmal neu, damit es wirkt.",
+        "applied_restart": "Erledigt — {label} ist jetzt {value}. Starte Galen einmal neu, damit es wirkt.",
         "refused": "Das ändere ich nicht per Stimme — das bitte bewusst in den Einstellungen.",
         "unknown_setting": "Das ist keine Einstellung, die ich ändern kann.",
         "invalid_value": "Das geht so nicht — die Einstellung bleibt unverändert.",
@@ -607,7 +607,7 @@
     "call_done_open": "In Ordnung, es bleibt in der App für dich offen. Tschüss.",
     "call_done_gone": "Diese Entscheidung ist nicht mehr offen. Tschüss.",
     "test_title": "Benachrichtigungen sind an",
-    "test_body": "So erreicht dich Dodaios, während die App im Hintergrund ist.",
+    "test_body": "So erreicht dich Galen, während die App im Hintergrund ist.",
     "voice": {
       "busy": "ein geblockter Termin",
       "reminder": "Kurz zur Erinnerung: {title}.",

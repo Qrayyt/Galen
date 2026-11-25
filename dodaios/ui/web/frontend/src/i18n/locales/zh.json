@@ -329,7 +329,7 @@
     "agent_instructions": "{name}",
     "appshots": "截图",
     "jarvisx": "Galen X",
-    "marketplace": "市场",
+    "marketplace": "GLNT",
     "agentic_ide": "智能体 IDE",
     "agentic_ide_beta": "Beta",
     "voice": "{name} 语音",
@@ -6497,7 +6497,7 @@
     "share_private_note": "不会上传任何内容，由你决定发送到哪里。"
   },
   "marketplace_origin": {
-    "badge": "市场",
+    "badge": "GLNT",
     "tooltip": "从市场安装",
     "view_source": "查看条目"
   },
@@ -6704,9 +6704,9 @@
     "open_board": "打开看板"
   },
   "marketplace": {
-    "title": "市场",
+    "title": "GLNT",
     "refresh": "检查新条目",
-    "open_web": "打开 Dodaios Marketplace 网站",
+    "open_web": "打开来源目录网站",
     "search_placeholder": "搜索插件、技能和智能体…",
     "filter_all": "全部",
     "filter_plugins": "插件",
@@ -9848,7 +9848,7 @@
         "description": "一只巧克力色拉布拉多幼犬：倾听时歪着头，工作时刨土，成功时兴奋地狂奔。"
       },
       "dodaios": {
-        "description": "标志里的兜帽小人：倾听时帽尖竖起，跳跃时披风飞扬。"
+        "description": "神秘的兜帽角色：聆听时竖起兜帽，跳跃时斗篷飘动。"
       }
     },
     "create_dialog": {

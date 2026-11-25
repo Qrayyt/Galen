@@ -1,8 +1,8 @@
 {
   "format": "jarvis-pet/1",
   "id": "dodaios",
-  "name": "Dodaios",
-  "description": "The hooded figure of the logo: its hood tip perks up to listen, its cape flies on a hop.",
+  "name": "Shadow",
+  "description": "A mysterious hooded figure: its hood tip perks up to listen, its cape flies on a hop.",
   "frame_size": 48,
   "sheet": "sheet.png",
   "animations": {

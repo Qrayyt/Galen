@@ -333,14 +333,82 @@ def main() -> None:
 
     edit("pyproject.toml", project_metadata)
 
-    for language in ("en", "de", "es", "pt", "zh"):
+    # Keep marketplace branding separate from the actual upstream registry.
+    marketplace_labels = {
+        "en": "Open source catalogue website",
+        "ru": "Открыть сайт каталога-источника",
+        "de": "Website des Quellkatalogs öffnen",
+        "es": "Abrir el sitio del catálogo de origen",
+        "pt": "Abrir o site do catálogo de origem",
+        "zh": "打开来源目录网站"
+    }
+    marketplace_leads = {
+        "en": "Plugins, skills and agents in GLNT. The community catalogue is currently supplied by an external registry. Review extensions before installing them.",
+        "ru": "Плагины, навыки и агенты в GLNT. Пока каталог сообщества подключён к внешнему реестру. Изучите расширения перед установкой.",
+        "de": "Plugins, Skills und Agenten in GLNT. Der Community-Katalog stammt derzeit aus einem externen Register. Prüfe Erweiterungen vor der Installation.",
+        "es": "Plugins, habilidades y agentes en GLNT. El catálogo comunitario procede por ahora de un registro externo. Revisa las extensiones antes de instalarlas.",
+        "pt": "Plugins, habilidades e agentes no GLNT. Por enquanto, o catálogo comunitário vem de um registo externo. Revê as extensões antes de instalar.",
+        "zh": "在 GLNT 中浏览插件、技能和智能体。社区目录目前由外部注册表提供，安装前请检查扩展。"
+    }
+    pet_descriptions = {
+        "en": "A mysterious hooded figure: its hood tip perks up to listen, its cape flies on a hop.",
+        "ru": "Таинственный персонаж в капюшоне: прислушивается и подпрыгивает, развевая плащ.",
+        "de": "Eine geheimnisvolle Kapuzenfigur: Beim Lauschen hebt sie die Kapuze, beim Hüpfen flattert ihr Umhang.",
+        "es": "Una misteriosa figura encapuchada: levanta la capucha al escuchar y su capa ondea al saltar.",
+        "pt": "Uma figura misteriosa encapuzada: levanta o capuz ao ouvir e a capa esvoaça ao saltar.",
+        "zh": "神秘的兜帽角色：聆听时竖起兜帽，跳跃时斗篷飘动。"
+    }
+
+    def rebrand_values(value):
+        if isinstance(value, dict):
+            return {key: rebrand_values(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rebrand_values(item) for item in value]
+        if isinstance(value, str):
+            return re.sub(r"\bDodaios\b(?!/)", "Galen", value)
+        return value
+
+    for language in ("en", "de", "es", "pt", "zh", "ru"):
         name = f"dodaios/ui/web/frontend/src/i18n/locales/{language}.json"
+
         def localize(s: str) -> str:
+            data = rebrand_values(json.loads(s))
+            data["nav"]["marketplace"] = "GLNT"
+            data["marketplace"]["title"] = "GLNT"
+            data["marketplace"]["open_web"] = marketplace_labels[language]
+            data["marketplace_origin"]["badge"] = "GLNT"
+            data["pets"]["builtin"]["dodaios"]["description"] = pet_descriptions[language]
+            return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+        def localize_marketplace(s: str) -> str:
             data = json.loads(s)
-            # Text-only replacements preserve all i18n keys and placeholders.
-            text = json.dumps(data, ensure_ascii=False, indent=2)
-            return text.replace("Dodaios", "Galen") + "\n"
-        edit(name, localize)
+            data["marketplace"]["home_lead"] = marketplace_leads[language]
+            return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+        if (ROOT / name).exists():
+            edit(name, localize)
+        chunk = f"dodaios/ui/web/frontend/src/i18n/locales/marketplace/{language}.json"
+        if (ROOT / chunk).exists():
+            edit(chunk, localize_marketplace)
+
+    for language in ("en", "de", "es", "pt"):
+        edit(
+            f"dodaios/i18n/locales/{language}.json",
+            lambda s: json.dumps(rebrand_values(json.loads(s)), ensure_ascii=False, indent=2) + "\n",
+        )
+
+    def rename_hooded_pet(s: str) -> str:
+        data = json.loads(s)
+        data["name"] = "Shadow"
+        data["description"] = pet_descriptions["en"]
+        return json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+
+    edit("dodaios/ui/pets/builtin/dodaios/pet.json", rename_hooded_pet)
+    edit("scripts/pets/build_pets.py", chain(
+        replace('id="dodaios",\n    name="Dodaios",', 'id="dodaios",\n    name="Shadow",'),
+        replace("The hooded figure of the logo: its hood tip perks up to listen, its cape flies on a hop.",
+                pet_descriptions["en"]),
+    ))
 
     # The branded test contract follows the downstream identity. The shared
     # test setup pins English per test even though a first Galen launch is

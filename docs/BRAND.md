@@ -14,7 +14,7 @@ Galen is a desktop AI assistant by Galenite, based on Dodaios. The visible produ
 
 - Russian is the default interface language. Use natural Russian, consistent terminology and neutral phrasing. Preserve interpolation placeholders and technical identifiers.
 - Say Galen in user-facing product labels, notifications and system prompts. Use Galenite for the developer.
-- Identify the Dodaios community marketplace as a third-party catalog. Do not imply Galenite owns or verifies it.
+- Use **GLNT** for the in-app marketplace. Until its own registry is connected, distinguish the GLNT interface from the external catalogue and publishing infrastructure it currently uses. Do not imply Galenite owns or verifies externally supplied entries.
 - Keep `dodaios`, `jarvis`, legacy config filenames, plugin entry points and persistent identifiers where compatibility requires them. Do not bulk-rename code or data paths.
 - Distinguish tested capabilities from experimental or unavailable functions. Never fabricate successful actions or runtime activity.
 

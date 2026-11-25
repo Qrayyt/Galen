@@ -329,7 +329,7 @@
     "agent_instructions": "{name}",
     "appshots": "Appshots",
     "jarvisx": "Galen X",
-    "marketplace": "Marketplace",
+    "marketplace": "GLNT",
     "agentic_ide": "Agentic IDE",
     "agentic_ide_beta": "Beta",
     "voice": "{name} Stimme",
@@ -6497,7 +6497,7 @@
     "share_private_note": "Nichts wird hochgeladen. Du entscheidest, wohin es geht."
   },
   "marketplace_origin": {
-    "badge": "Marketplace",
+    "badge": "GLNT",
     "tooltip": "Aus dem Marketplace installiert",
     "view_source": "Eintrag ansehen"
   },
@@ -6704,9 +6704,9 @@
     "open_board": "Board öffnen"
   },
   "marketplace": {
-    "title": "Marketplace",
+    "title": "GLNT",
     "refresh": "Nach neuen Einträgen suchen",
-    "open_web": "Dodaios Marketplace im Web öffnen",
+    "open_web": "Website des Quellkatalogs öffnen",
     "search_placeholder": "Plugins, Skills und Agenten durchsuchen…",
     "filter_all": "Alle",
     "filter_plugins": "Plugins",
@@ -9848,7 +9848,7 @@
         "description": "Ein schokobrauner Labrador-Welpe: legt beim Zuhören den Kopf schief, buddelt beim Arbeiten, flitzt bei Erfolg im Kreis."
       },
       "dodaios": {
-        "description": "Die Kapuzenfigur aus dem Logo: Die Kapuzenspitze richtet sich beim Zuhören auf, der Umhang fliegt beim Hüpfen."
+        "description": "Eine geheimnisvolle Kapuzenfigur: Beim Lauschen hebt sie die Kapuze, beim Hüpfen flattert ihr Umhang."
       }
     },
     "create_dialog": {

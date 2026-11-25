@@ -320,12 +320,12 @@
         "cu_exit_cancelled": "The action on screen was cancelled.",
         "cu_exit_needs_elevation": "I waited for the administrator confirmation, but none came, so I stopped.",
         "cu_blocked_permission": "I had to stop. {sentence}",
-        "cu_blocked_restart_hint": "I had to stop: the {permission} permission may only take effect after Dodaios is quit and reopened. Reopen the app, then try again.",
-        "cu_blocked_unavailable": "I had to stop: Dodaios cannot ask for the {permission} permission in this session.",
+        "cu_blocked_restart_hint": "I had to stop: the {permission} permission may only take effect after Galen is quit and reopened. Reopen the app, then try again.",
+        "cu_blocked_unavailable": "I had to stop: Galen cannot ask for the {permission} permission in this session.",
         "cu_blocked_waiting": "I had to stop because macOS is asking about the {permission} permission. Answer the dialog, then try again.",
         "cu_blocked_dialog": "I had to stop because a macOS system dialog is open. Answer it yourself, then try again.",
         "cu_blocked_restricted": "I had to stop: a permission this needs is restricted on this Mac by a profile or a parental control. That cannot be changed from the app.",
-        "cu_blocked_generic": "I had to stop because macOS needs a permission for Dodaios. Allow it in System Settings under Privacy & Security, then try again.",
+        "cu_blocked_generic": "I had to stop because macOS needs a permission for Galen. Allow it in System Settings under Privacy & Security, then try again.",
         "cu_timeout": "That took too long on screen (over {secs} seconds) and was cancelled.",
         "open_app_launched": "Launched: {app}",
         "open_app_launched_raised": "Launched and brought to the front: {app}",
@@ -394,7 +394,7 @@
         "ide_terminal_who_else": "I could only place {names}. Who else did you mean?",
         "ide_terminals_nowhere": "No workspace is open and there is no recent one. Pick a folder in the Agentic IDE."
       },
-      "permission_cause_templates": "Dodaios does not have the {name} permission right now.",
+      "permission_cause_templates": "Galen does not have the {name} permission right now.",
       "permission_cause_names": {
         "microphone": "Microphone",
         "accessibility": "Accessibility",
@@ -442,7 +442,7 @@
       "outcome_templates": {
         "safe_applied": "Got it — {label} is now {new}.",
         "applied": "Done — {label} is now {new}.",
-        "applied_restart": "Done — {label} is now {new}. Please restart Dodaios for the change to take effect.",
+        "applied_restart": "Done — {label} is now {new}. Please restart Galen for the change to take effect.",
         "validate_failed": "Can't do that — {err}. Setting stays {old}.",
         "rollback": "Couldn't save it, reverted to the previous state. {err}",
         "vetoed": "Okay, leaving it.",
@@ -463,7 +463,7 @@
     "config_readback": {
       "phrases": {
         "applied": "Done — {label} is now {value}.",
-        "applied_restart": "Done — {label} is now {value}. Restart Dodaios once for it to take effect.",
+        "applied_restart": "Done — {label} is now {value}. Restart Galen once for it to take effect.",
         "refused": "I won't change that by voice — please do that deliberately in Settings.",
         "unknown_setting": "That isn't a setting I can change.",
         "invalid_value": "That doesn't work — the setting stays unchanged.",
@@ -607,7 +607,7 @@
     "call_done_open": "Okay, it stays open for you in the app. Goodbye.",
     "call_done_gone": "That decision is no longer open. Goodbye.",
     "test_title": "Notifications are on",
-    "test_body": "This is how Dodaios reaches you while the app is in the background.",
+    "test_body": "This is how Galen reaches you while the app is in the background.",
     "voice": {
       "busy": "a blocked slot",
       "reminder": "Quick reminder: {title}.",

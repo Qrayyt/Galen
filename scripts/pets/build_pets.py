@@ -9008,9 +9008,9 @@ DODAIOS_ANCHORS = Anchors(
 
 DODAIOS = PetDesign(
     id="dodaios",
-    name="Dodaios",
+    name="Shadow",
     description=(
-        "The hooded figure of the logo: its hood tip perks up to listen, its cape flies on a hop."
+        "A mysterious hooded figure: its hood tip perks up to listen, its cape flies on a hop."
     ),
     draw=draw_dodaios,
     pose=dodaios_pose,

@@ -329,7 +329,7 @@
     "agent_instructions": "{name}",
     "appshots": "Appshots",
     "jarvisx": "Galen X",
-    "marketplace": "Marketplace",
+    "marketplace": "GLNT",
     "agentic_ide": "Agentic IDE",
     "agentic_ide_beta": "Beta",
     "voice": "{name} Voice",
@@ -6497,7 +6497,7 @@
     "share_private_note": "Nothing is uploaded. You choose where it goes."
   },
   "marketplace_origin": {
-    "badge": "Marketplace",
+    "badge": "GLNT",
     "tooltip": "Installed from the marketplace",
     "view_source": "view listing"
   },
@@ -6704,9 +6704,9 @@
     "open_board": "Open the board"
   },
   "marketplace": {
-    "title": "Marketplace",
+    "title": "GLNT",
     "refresh": "Check for new entries",
-    "open_web": "Open Dodaios Marketplace website",
+    "open_web": "Open source catalogue website",
     "search_placeholder": "Search plugins, skills and agents…",
     "filter_all": "All",
     "filter_plugins": "Plugins",
@@ -9848,7 +9848,7 @@
         "description": "A chocolate Labrador puppy: tilts its head to listen, digs while it works, does zoomies on success."
       },
       "dodaios": {
-        "description": "The hooded figure of the logo: the hood's tip perks up to listen, the cape flies on a hop."
+        "description": "A mysterious hooded figure: its hood tip perks up to listen, its cape flies on a hop."
       }
     },
     "create_dialog": {

@@ -319,13 +319,13 @@
         "cu_exit_action_failed": "Uma ação no ecrã falhou, por isso parei.",
         "cu_exit_cancelled": "A ação no ecrã foi cancelada.",
         "cu_exit_needs_elevation": "Esperei pela confirmação de administrador, mas não chegou, por isso parei.",
-        "cu_blocked_permission": "Tive de parar: o Dodaios precisa da permissão de {permission}. Ativa-a em {pane}. Depois, tenta outra vez.",
-        "cu_blocked_restart_hint": "Tive de parar: a permissão de {permission} pode só ter efeito depois de o Dodaios ser fechado e reaberto. Reinicia a app e tenta outra vez.",
-        "cu_blocked_unavailable": "Tive de parar: o Dodaios não pode pedir a permissão de {permission} nesta sessão.",
+        "cu_blocked_permission": "Tive de parar: o Galen precisa da permissão de {permission}. Ativa-a em {pane}. Depois, tenta outra vez.",
+        "cu_blocked_restart_hint": "Tive de parar: a permissão de {permission} pode só ter efeito depois de o Galen ser fechado e reaberto. Reinicia a app e tenta outra vez.",
+        "cu_blocked_unavailable": "Tive de parar: o Galen não pode pedir a permissão de {permission} nesta sessão.",
         "cu_blocked_waiting": "Tive de parar porque o macOS está a pedir a permissão de {permission}. Responde ao diálogo e tenta outra vez.",
         "cu_blocked_dialog": "Tive de parar porque há um diálogo do sistema aberto no Mac. Responde tu a ele e tenta outra vez.",
         "cu_blocked_restricted": "Tive de parar: uma permissão necessária está restrita neste Mac por um perfil ou por controlo parental. Não pode ser alterada a partir da app.",
-        "cu_blocked_generic": "Tive de parar porque o macOS precisa de uma permissão para o Dodaios. Ativa-a nas Definições do Sistema, em Privacidade e segurança, e tenta outra vez.",
+        "cu_blocked_generic": "Tive de parar porque o macOS precisa de uma permissão para o Galen. Ativa-a nas Definições do Sistema, em Privacidade e segurança, e tenta outra vez.",
         "cu_timeout": "Isso demorou demasiado no ecrã (mais de {secs} segundos) e foi cancelado.",
         "open_app_launched": "Iniciado: {app}",
         "open_app_launched_raised": "Iniciado e trazido para a frente: {app}",
@@ -394,7 +394,7 @@
         "ide_terminal_who_else": "Só consegui identificar {names}: quem mais?",
         "ide_terminals_nowhere": "Não há nenhum espaço de trabalho aberto nem nenhum recente. Escolhe uma pasta no IDE agêntico."
       },
-      "permission_cause_templates": "O Dodaios não tem neste momento a permissão de {name}.",
+      "permission_cause_templates": "O Galen não tem neste momento a permissão de {name}.",
       "permission_cause_names": {
         "microphone": "Microfone",
         "accessibility": "Acessibilidade",
@@ -442,7 +442,7 @@
       "outcome_templates": {
         "safe_applied": "Feito — {label} agora é {new}.",
         "applied": "Pronto — {label} agora é {new}.",
-        "applied_restart": "Pronto — {label} agora é {new}. Reinicia o Dodaios para a alteração ter efeito.",
+        "applied_restart": "Pronto — {label} agora é {new}. Reinicia o Galen para a alteração ter efeito.",
         "validate_failed": "Não dá — {err}. A definição fica em {old}.",
         "rollback": "Não consegui guardar, repus o estado anterior. {err}",
         "vetoed": "Está bem, deixo estar.",
@@ -463,7 +463,7 @@
     "config_readback": {
       "phrases": {
         "applied": "Feito — {label} agora é {value}.",
-        "applied_restart": "Feito — {label} agora é {value}. Reinicia o Dodaios uma vez para que tenha efeito.",
+        "applied_restart": "Feito — {label} agora é {value}. Reinicia o Galen uma vez para que tenha efeito.",
         "refused": "Isso não altero por voz — faz isso de propósito nas Definições.",
         "unknown_setting": "Essa não é uma definição que eu possa alterar.",
         "invalid_value": "Assim não dá — a definição fica sem alterações.",
@@ -607,7 +607,7 @@
     "call_done_open": "Certo, continua em aberto para você no app. Tchau.",
     "call_done_gone": "Essa decisão não está mais em aberto. Tchau.",
     "test_title": "As notificações estão ativadas",
-    "test_body": "É assim que o Dodaios avisa você enquanto o app está em segundo plano.",
+    "test_body": "É assim que o Galen avisa você enquanto o app está em segundo plano.",
     "voice": {
       "busy": "um horário bloqueado",
       "reminder": "Só para lembrar: {title}.",
