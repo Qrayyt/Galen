@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { createStore, useStore } from "zustand";
 
 import type { AgentChatStoreHook } from "@/store/agentChat";
@@ -15,6 +16,30 @@ const createDraftStore = () => createStore<{ drafts: Map<string | null, MessageD
 const stores = new WeakMap<AgentChatStoreHook, ReturnType<typeof createDraftStore>>();
 export interface ComposerDraftTarget { sessionId: string | null; superseded?: boolean }
 const blankTargets = new WeakMap<AgentChatStoreHook, ComposerDraftTarget>();
+const namespaces = new WeakMap<AgentChatStoreHook, string>();
+
+export function registerComposerDraftPersistence(chat: AgentChatStoreHook, namespace: string) {
+  namespaces.set(chat, namespace);
+}
+
+function storageKey(chat: AgentChatStoreHook, sessionId: string): string | null {
+  const ns = namespaces.get(chat);
+  return ns ? `galen.composer.text.v1:${encodeURIComponent(ns)}:${encodeURIComponent(sessionId)}` : null;
+}
+
+function storedText(chat: AgentChatStoreHook, sessionId: string | null): string {
+  const key = sessionId === null ? null : storageKey(chat, sessionId);
+  try { return key ? (localStorage.getItem(key) ?? "").slice(0, 200000) : ""; } catch { return ""; }
+}
+
+function persistText(chat: AgentChatStoreHook, sessionId: string | null, text: string) {
+  const key = sessionId === null ? null : storageKey(chat, sessionId);
+  if (!key) return;
+  try {
+    if (text) localStorage.setItem(key, text.slice(0, 200000));
+    else localStorage.removeItem(key);
+  } catch { /* local storage unavailable; keep in-memory draft */ }
+}
 
 /** Capture before sending so a late failure restores the chat that was created. */
 export function captureComposerDraftTarget(chat: AgentChatStoreHook, sessionId: string | null): ComposerDraftTarget {
@@ -60,21 +85,28 @@ export function composerDraftsFor(chat: AgentChatStoreHook) {
 }
 
 export function readComposerDraft(chat: AgentChatStoreHook, sessionId: string | null): MessageDraft {
-  return composerDraftsFor(chat).getState().drafts.get(sessionId) ?? EMPTY_DRAFT;
+  return composerDraftsFor(chat).getState().drafts.get(sessionId) ?? { text: storedText(chat, sessionId), choices: [] };
 }
 
 export function writeComposerDraft(chat: AgentChatStoreHook, sessionId: string | null, draft: MessageDraft) {
   const store = composerDraftsFor(chat);
   const previous = readComposerDraft(chat, sessionId);
   if (previous.text === draft.text && JSON.stringify(previous.choices) === JSON.stringify(draft.choices)) return;
+  persistText(chat, sessionId, draft.text);
   store.setState(({ drafts }) => {
     const next = new Map(drafts);
     if (draft.text || draft.choices.length) next.set(sessionId, draft);
-    else next.delete(sessionId);
+    else next.set(sessionId, EMPTY_DRAFT);
     return { drafts: next };
   });
 }
 
 export function useComposerDraft(chat: AgentChatStoreHook, sessionId: string | null): MessageDraft {
-  return useStore(composerDraftsFor(chat), (state) => state.drafts.get(sessionId) ?? EMPTY_DRAFT);
+  const store = composerDraftsFor(chat);
+  // Stable fallback object; Zustand selectors must not allocate on every read.
+  const fallback = useMemo(() => {
+    const text = storedText(chat, sessionId);
+    return text ? { text, choices: [] } : EMPTY_DRAFT;
+  }, [chat, sessionId]);
+  return useStore(store, (state) => state.drafts.get(sessionId) ?? fallback);
 }

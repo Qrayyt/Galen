@@ -1,6 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 
 import { useEventStore, type SectionId } from "@/store/events";
+import { useAgentChatStore } from "@/store/agentChat";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { useBrainStatus } from "@/hooks/useBrainStatus";
 import { useVoiceStatus } from "@/hooks/useVoiceStatus";
@@ -249,6 +250,9 @@ export default function App() {
   );
 
   const activeSection = useEventStore((s) => s.activeSection);
+  useEffect(() => {
+    if (activeSection === "chats" && !useEventStore.getState().solo) void useAgentChatStore.getState().restoreLastChat();
+  }, [activeSection]);
   // Agents, Docs and the Wiki fill the window: each brings its own navigation column,
   // and the caption's home/back buttons leave it, so the app sidebar and the
   // toggle that used to reveal it are not needed there.

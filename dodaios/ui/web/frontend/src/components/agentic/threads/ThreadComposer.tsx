@@ -29,6 +29,18 @@ const STEERABLE_RUNNERS = new Set(["claude-cli", "glm-cli"]);
 
 /** Draft text per thread, so switching threads never loses a half-written message. */
 const drafts = new Map<string, string>();
+const draftKey = (key: string) => `galen.work.text.v1:${encodeURIComponent(key)}`;
+function readWorkDraft(key: string): string {
+  if (drafts.has(key)) return drafts.get(key) ?? "";
+  try { return (localStorage.getItem(draftKey(key)) ?? "").slice(0, 200000); } catch { return ""; }
+}
+function writeWorkDraft(key: string, text: string) {
+  drafts.set(key, text);
+  try {
+    if (text) localStorage.setItem(draftKey(key), text.slice(0, 200000));
+    else localStorage.removeItem(draftKey(key));
+  } catch { /* memory fallback */ }
+}
 
 /**
  * The message sent last, with its files, when it went and where the thread
@@ -343,7 +355,7 @@ export function ThreadComposer({
   const liveModels = chat((state) => state.liveModels);
   const busy = chat((state) => state.busy);
   const lastError = chat((state) => state.lastError);
-  const [value, setValueState] = useState(() => drafts.get(threadKey) ?? "");
+  const [value, setValueState] = useState(() => readWorkDraft(threadKey));
   // Follow-ups waiting for the next turn live on the server (they survive a
   // reload); the timeline carries one waiting notice per message.
   const queue = useMemo(() => timeline.items.flatMap((item) => item.type === "notice" && item.kind === "message_queued"
@@ -401,20 +413,20 @@ export function ThreadComposer({
 
   const setValue = useCallback((next: string) => {
     setValueState(next);
-    drafts.set(threadKey, next);
+    writeWorkDraft(threadKey, next);
   }, [threadKey]);
 
   // The dictated words append to whatever the box holds when they land — in
   // the one composer that owns the dictation, never in a hidden one.
   const setDictated = useCallback((next: string | ((current: string) => string)) => {
     if (!onScreen || (dictationOwner !== null && dictationOwner !== threadKey)) return;
-    setValue(typeof next === "function" ? next(drafts.get(threadKey) ?? "") : next);
+    setValue(typeof next === "function" ? next(readWorkDraft(threadKey)) : next);
   }, [setValue, threadKey, onScreen]);
   const dictation = useComposerDictation(setDictated, () => void submit());
 
   // Another thread: its own half-written text, its own queue.
   useEffect(() => {
-    setValueState(drafts.get(threadKey) ?? "");
+    setValueState(readWorkDraft(threadKey));
     setPaused(false);
     setProblem("");
   }, [threadKey]);
@@ -494,9 +506,9 @@ export function ThreadComposer({
 
   /** A message that did not go comes back into its thread's box, ahead of anything typed since. */
   const giveBack = useCallback((key: string, text: string) => {
-    const current = drafts.get(key) ?? "";
+    const current = readWorkDraft(key);
     const restored = current.trim() ? `${text}\n${current}` : text;
-    drafts.set(key, restored);
+    writeWorkDraft(key, restored);
     if (key === keyRef.current) setValueState(restored);
   }, []);
 
@@ -512,7 +524,7 @@ export function ThreadComposer({
     // The draft store is written with every change, the rendered `value` only
     // after the next render: a send right after dictated words landed must
     // not go out without them.
-    const text = (drafts.get(threadKey) ?? value).trim();
+    const text = (readWorkDraft(threadKey) || value).trim();
     if (!text && files.attachments.length === 0) return;
     if (files.analyzing > 0 || starting) return;
     if (!provider || !provider.connected) {
@@ -559,7 +571,7 @@ export function ThreadComposer({
     setPaused(true);
     if (activeSessionId) useRecalledMessages.getState().hide(activeSessionId, asked.id);
     void chat.getState().cancel("thread-recall");
-    const current = drafts.get(threadKey) ?? "";
+    const current = readWorkDraft(threadKey);
     setValue(current.trim() ? `${text}\n${current}` : text);
     files.restore(held);
     textareaRef.current?.focus();
