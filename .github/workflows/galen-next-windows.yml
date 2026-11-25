@@ -24,7 +24,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y portaudio19-dev libsndfile1 ffmpeg
       - run: python scripts/pip_install.py -e ".[dev]"
       - name: Chat, persistence, voice and project regression
-        run: python -m pytest -q tests/unit/state/test_chat_store_persistence.py tests/unit/state/test_chats_routes.py tests/unit/agent_chat/test_lead_thread.py tests/unit/agent_chat/test_voice_mirror.py tests/unit/agent_chat/test_agent_chat_service.py tests/unit/agent_chat/test_agent_chat_surface_parity.py tests/unit/agent_chat/test_project_detach.py tests/unit/agent_chat/test_thread_search.py tests/unit/agent_chat/test_restart_durability.py tests/unit/agent_chat/test_chat_ide_separation.py tests/unit/agent_chat/test_mode_switch_store.py tests/unit/agent_chat/test_project_context.py tests/unit/brain/test_seed_history.py tests/unit/speech/test_classic_context.py
+        run: python -m pytest -q tests/unit/state/test_chat_store_persistence.py tests/unit/state/test_chats_routes.py tests/unit/agent_chat/test_lead_thread.py tests/unit/agent_chat/test_voice_mirror.py tests/unit/agent_chat/test_agent_chat_service.py tests/unit/agent_chat/test_agent_chat_surface_parity.py tests/unit/agent_chat/test_project_detach.py tests/unit/agent_chat/test_thread_search.py tests/unit/agent_chat/test_restart_durability.py tests/unit/agent_chat/test_chat_ide_separation.py tests/unit/agent_chat/test_mode_switch_store.py tests/unit/agent_chat/test_project_context.py tests/unit/brain/test_seed_history.py tests/unit/speech/test_classic_context.py tests/unit/agent_chat/test_response_style.py tests/unit/agent_chat/test_native_ui_provider_adapters.py
   frontend:
     runs-on: ubuntu-latest
     defaults:

@@ -201,3 +201,23 @@ def test_the_assistant_links_what_it_did_or_found() -> None:
         "--json number,title,url",
     ):
         assert phrase in LINK_GUIDANCE, phrase
+
+
+def test_native_ui_guidance_examples_are_versioned_text_only():
+    import json
+    from dodaios.core.response_style import NATIVE_UI_GUIDANCE
+
+    decoder = json.JSONDecoder()
+    first, consumed = decoder.raw_decode(NATIVE_UI_GUIDANCE[NATIVE_UI_GUIDANCE.index("{"):])
+    rest = NATIVE_UI_GUIDANCE[NATIVE_UI_GUIDANCE.index("{") + consumed:]
+    second, _ = decoder.raw_decode(rest[rest.index("{"):])
+    for example in (first, second):
+        assert set(example) == {"version", "fallback", "blocks"}
+        assert example["version"] == 1
+        assert example["fallback"]
+    assert first["blocks"][0]["type"] == "progress"
+    assert second["blocks"][0]["type"] == "checklist"
+    for clause in ("matching closing fence", "unique input options", "finite numbers", "ordinary Markdown before the block", "do not run commands"):
+        assert clause in NATIVE_UI_GUIDANCE
+    for prompt in (load_persona_prompt(), load_compact_persona_prompt()):
+        assert NATIVE_UI_GUIDANCE not in prompt

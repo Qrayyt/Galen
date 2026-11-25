@@ -124,6 +124,12 @@ NATIVE_UI_GUIDANCE = (
     "calculator(label,operation=add/subtract/multiply/divide,a,b), input(label,options), "
     "chart(spec using the chart format). No other keys, scripts, HTML, URLs, callbacks, or tools. "
     "Controls are local-only and may copy values; they do not run commands or submit to a service. "
+    "Emit the opening fence on its own line, one JSON object, and a matching closing fence "
+    "on its own line. Use JSON double quotes, unique input options and finite numbers. "
+    "Use a checklist for actions the reader may tick, for example "
+    '{"version":1,"fallback":"Review then publish.","blocks":[{"type":"checklist","title":"Release","items":["Review","Publish"]}]}. '
+    "Do not use interactive blocks for a single fact, ordinary prose, source code, "
+    "tool arguments, or replies intended to be spoken. "
     "Keep essential facts in ordinary Markdown before the block. If a block is not valid, "
     "give a readable Markdown answer instead. Never invent numbers to fill a chart."
 )

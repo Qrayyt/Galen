@@ -474,3 +474,7 @@ starting the scoped project-context injection block.
 
 - Added a separate Windows job downstream of the installer/reinstall/uninstall gate. It installs the actual candidate on a separate disposable runner, boots its frozen CLI server with an isolated scratch profile, creates separate Chat/Work sessions and project data, opens the packaged frontend in Chromium, toggles the project group, restarts, checks persistent draft/state/metadata and safe ungrouping. No live model calls or real accounts. Reports and screenshots upload even on failure.
 - This is installed-package browser/UI smoke, not native WebView, microphone or vendor CLI acceptance. Requires successful results on exact candidate. No release or server changes.
+
+## Native UI provider adapter regression
+
+- Extended native UI model guidance with matching-fence rules, JSON/option constraints, a concrete checklist example and plain-Markdown preference. Added 18 deterministic adapter scenarios over actual OpenAI-compatible, Anthropic and Gemini code paths (single-character, mixed and whole-answer fragments, complete and truncated). Fake SDK events exercise the real normalization, not live accounts; tests assert exact text, prompt delivery and absence of tool calls. Added prompt-example contract tests and included both suites in dependency-backed candidate CI. Task 20 remains in progress until CI results are available.
