@@ -150,6 +150,7 @@ class VoiceChatBody(BaseModel):
     #: An archived voice chat on stage instead (``sessions.db``): calls are
     #: recorded into it and start with its history. Only with ``session_id`` unset.
     voice_session_id: str | None = None
+    project_id: str | None = Field(default=None, max_length=128)
 
 
 class VoiceChatResponse(BaseModel):
@@ -209,10 +210,13 @@ def put_voice_chat(body: VoiceChatBody, request: Request) -> VoiceChatResponse:
             raise HTTPException(status_code=404, detail="no-such-voice-chat")
     try:
         svc.bind_voice_chat(
-            body.session_id or None, voice_session=voice_session, voice_history=history
+            body.session_id or None, voice_session=voice_session, voice_history=history,
+            **({"project_id": body.project_id} if body.project_id else {})
         )
     except NoSuchSession as exc:
         raise HTTPException(status_code=404, detail="no-such-jarvis-chat") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _voice_chat_answer(svc)
 
 

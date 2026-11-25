@@ -586,9 +586,9 @@ export function createAgentChatStore(
    * `null` = a blank page: the next call opens a new chat. Only the front
    * page's chat has a voice; the other surfaces never bind.
    */
-  const bindVoice = (sessionId: string | null, voiceSessionId: string | null = null) => {
+  const bindVoice = (sessionId: string | null, voiceSessionId: string | null = null, projectId?: string) => {
     if (surface !== "jarvis" || options.voice === false) return;
-    void bindVoiceChat(sessionId, voiceSessionId).catch((err: unknown) => {
+    void bindVoiceChat(sessionId, voiceSessionId, projectId).catch((err: unknown) => {
       // Not fatal: the composer's voice button binds again before a call.
       console.info("Voice chat binding failed.", err);
     });
@@ -1197,7 +1197,7 @@ export function createAgentChatStore(
           catalogStale: get().catalog !== null,
         });
         // A new chat stays blank until its first message; never reopen the previous lead.
-        bindVoice(null, opts?.voiceSessionId ?? null);
+        bindVoice(null, opts?.voiceSessionId ?? null, opts?.projectId);
         void get().loadCatalog();
       },
 

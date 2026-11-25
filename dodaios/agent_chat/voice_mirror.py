@@ -109,7 +109,8 @@ class VoiceChatMirror:
 
             hint = str(getattr(event, "provider", "") or "") if event is not None else ""
             if getattr(svc, "voice_chat_fresh", False):
-                session = start_session(svc, provider_hint=hint)
+                project_id = getattr(svc, "voice_project_id", None)
+                session = start_session(svc, provider_hint=hint, project_id=project_id)
                 if session is not None:
                     svc.bind_voice_chat(session.session_id)
                 return session

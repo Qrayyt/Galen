@@ -722,6 +722,7 @@ class AgentChatService:
         # turn landed in, so opening another chat mid-call never splits it.
         self._voice_chat_id: str | None = None
         self._voice_chat_fresh = False
+        self._voice_project_id: str | None = None
         self._voice_call_chats: dict[str, str] = {}
         # The archived voice chat's history while one is continued (bind_voice_chat).
         self._voice_archive_history: Callable[[], list[Any]] | None = None
@@ -2709,6 +2710,10 @@ class AgentChatService:
         return self._voice_chat_fresh
 
     @property
+    def voice_project_id(self) -> str | None:
+        return self._voice_project_id
+
+    @property
     def voice_session_continued(self) -> str | None:
         """The archived voice chat calls are recorded into, if one is on stage."""
         from dodaios.sessions.continuation import continued_voice_session
@@ -2721,6 +2726,7 @@ class AgentChatService:
         *,
         voice_session: str | None = None,
         voice_history: Callable[[], list[Any]] | None = None,
+        project_id: str | None = None,
     ) -> str | None:
         """Make ``session_id`` the chat voice calls continue; ``None`` = a new one.
 
@@ -2743,6 +2749,13 @@ class AgentChatService:
 
         brain = runner_brain.brain_manager()
         archived = (voice_session or "").strip() or None
+        if project_id and not session_id and not archived:
+            project = self.project_lookup(project_id) if self.project_lookup else None
+            if not project or project.get("id") != project_id:
+                raise ValueError("no-such-project")
+            self._voice_project_id = project_id
+        else:
+            self._voice_project_id = None
         continue_voice_session(archived if session_id is None else None)
         self._voice_archive_history = voice_history if archived and session_id is None else None
         if session_id is None and archived:
@@ -2780,6 +2793,9 @@ class AgentChatService:
             return archive()
         from dodaios.agent_chat import lead
 
+        # A fresh page must not seed the previous lead's private history.
+        if self._voice_chat_fresh:
+            return []
         session_id = self._voice_chat_id
         if not session_id or self.store.get_session(session_id) is None:
             # Nothing chosen on screen: the call continues the lead's conversation.

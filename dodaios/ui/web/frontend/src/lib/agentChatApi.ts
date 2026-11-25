@@ -133,11 +133,12 @@ export interface VoiceChatBinding {
 export async function bindVoiceChat(
   sessionId: string | null,
   voiceSessionId: string | null = null,
+  projectId?: string,
 ): Promise<VoiceChatBinding> {
   return json(await fetch("/api/agent-chat/voice-chat", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, voice_session_id: voiceSessionId }),
+    body: JSON.stringify({ session_id: sessionId, voice_session_id: voiceSessionId, ...(projectId ? { project_id: projectId } : {}) }),
   }), "voice-chat-bind-failed");
 }
 

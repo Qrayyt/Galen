@@ -153,7 +153,7 @@ def lead_session(svc: Any, *, create: bool = True, provider_hint: str = "") -> A
 
 
 def start_session(
-    svc: Any, *, seat: dict[str, Any] | None = None, provider_hint: str = ""
+    svc: Any, *, seat: dict[str, Any] | None = None, provider_hint: str = "", project_id: str | None = None
 ) -> Any | None:
     """Create and remember a distinct lead conversation.
 
@@ -167,6 +167,8 @@ def start_session(
         if not wanted.get("provider"):
             log.warning("lead thread: no chat provider is available for a new conversation")
             return None
+        if project_id:
+            wanted["project_id"] = project_id
         session = svc.create_session(surface=SURFACE, **wanted)
         remember = getattr(svc.store, "set_lead_session_id", None)
         if callable(remember):
