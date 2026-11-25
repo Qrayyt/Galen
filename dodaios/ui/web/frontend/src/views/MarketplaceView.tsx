@@ -31,6 +31,7 @@ import {
   type StoreFilter,
 } from "@/views/marketplace/model";
 import { StoreHome } from "@/views/marketplace/StoreHome";
+import { GlntCatalogPanel } from "@/views/marketplace/GlntCatalogPanel";
 
 // ---------------------------------------------------------------------------
 // The marketplace, as a section of its own.
@@ -65,6 +66,7 @@ export function MarketplaceView() {
   const [openKey, setOpenKey] = useState<string | null>(null);
   const [landing, setLanding] = useState<Landing | null>(null);
   const [studioOpen, setStudioOpen] = useState(false);
+  const [glntOpen, setGlntOpen] = useState(false);
   const [signInOpen, setSignInOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const identity = usePublishIdentity();
@@ -189,6 +191,7 @@ export function MarketplaceView() {
   return (
     <div className="relative flex h-full min-h-0 flex-col">
       <div className="flex h-12 shrink-0 items-center gap-2 px-4">
+        <Button variant="outline" size="sm" onClick={() => setGlntOpen(v => !v)}>GLNT</Button>
         <div className="ml-auto flex items-center gap-1.5">
           <ActionMenu
             label={t("marketplace.more_actions")}
@@ -217,7 +220,8 @@ export function MarketplaceView() {
         </div>
       </div>
 
-      <div className={cn("min-h-0 flex-1 flex-col", openEntry ? "hidden" : "flex")}>
+      {glntOpen && <GlntCatalogPanel onClose={() => setGlntOpen(false)} onSignIn={() => setSignInOpen(true)} signedIn={login !== null} />}
+      <div className={cn("min-h-0 flex-1 flex-col", openEntry || glntOpen ? "hidden" : "flex")}>
         <StoreHome
           t={t}
           loading={index.isLoading || (!index.error && !localeReady)}
@@ -246,7 +250,7 @@ export function MarketplaceView() {
         />
       </div>
 
-      {openEntry && (
+      {openEntry && !glntOpen && (
         <EntryPage
           key={entryKey(openEntry)}
           entry={openEntry}
