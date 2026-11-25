@@ -34,138 +34,115 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Files]
 Source: "ui\generated\*.bmp"; Flags: dontcopy
 [Code]
-
 const
-  WIN_W  = 1024;
-  WIN_H  = 640;
-  LEFT_W = 400;
-  BAR_H  = 52;
-  BAR_Y  = 588;
-  RP_PAD = 36;
-
-  CLR_BG     = $00101010;
-  CLR_PANEL  = $00181818;
-  CLR_BAR    = $00101010;
-  CLR_ACCENT = $00CCCCCC; { BGR — overwritten visually by generated BMPs }
-  CLR_CREAM  = $00F2F2F2;
-  CLR_MUTED  = $00AAAAAA;
-  CLR_INPUT  = $00222222;
-  CLR_BORDER = $00333333;
+  WIN_W = 680;
+  WIN_H = 420;
+  CLR_BG = $00292929;
+  CLR_TEXT = $00F4F4F4;
+  CLR_MUTED = $00B8B8B8;
 
 var
-  IsRussian: Boolean;
   DemoTimer: UINT_PTR;
-  DemoPct: Integer;
-  DemoState: Integer;
-  HeroWelcome, HeroInstalling, HeroFinished: string;
-  BmpInstall, BmpNext, BmpLaunch: string;
-  Hero: TBitmapImage;
-  RightPanel: TPanel;
-  Page1: TPanel;
+  DemoPct, DemoState: Integer;
+  Page1, Page2, Page3: TPanel;
   DirEdit: TNewEdit;
-  BrowseBtn: TNewButton;
-  SpaceLabel: TNewStaticText;
-  LangCombo: TNewComboBox;
-  DesktopChk: TNewCheckBox;
-  StartMenuChk: TNewCheckBox;
-  Page2: TPanel;
-  P2Status: TNewStaticText;
-  ProgressTrack: TBitmapImage;
-  ProgressFill: TBitmapImage;
-  PctLabel: TNewStaticText;
-  Page3: TPanel;
-  LaunchChk: TNewCheckBox;
-  BottomBar: TPanel;
-  BottomSep: TPanel;
-  HelpLbl: TNewStaticText;
-  CancelLbl: TNewStaticText;
-  NextBtn: TBitmapImage;
-  LaunchBtn: TBitmapImage;
+  StatusLabel, PercentLabel: TNewStaticText;
+  ProgressTrack, ProgressFill: TBitmapImage;
+  InstallBtn, FinishBtn: TBitmapImage;
+  CancelBtn: TNewButton;
 
 procedure LoadBmp(Img: TBitmapImage; const FileName: string);
 begin
   Img.Bitmap.LoadFromFile(ExpandConstant('{tmp}\') + FileName);
 end;
 
-procedure StylePanel(P: TPanel; Clr: Integer);
+function NewPanel: TPanel;
 begin
-  P.Color := Clr;
-  P.BevelOuter := bvNone;
+  Result := TPanel.Create(WizardForm);
+  Result.Parent := WizardForm;
+  Result.Left := 0;
+  Result.Top := 0;
+  Result.Width := ScaleX(WIN_W);
+  Result.Height := ScaleY(WIN_H);
+  Result.Color := CLR_BG;
+  Result.BevelOuter := bvNone;
+  Result.Visible := False;
 end;
 
-procedure StyleLabel(L: TNewStaticText; Clr: Integer; Bold: Boolean; SizePt: Integer);
+function AddText(P: TPanel; const S: string; X,Y,W,H,Pt,Clr: Integer; Bold: Boolean): TNewStaticText;
 begin
-  L.Font.Color := Clr;
-  L.Font.Size := SizePt;
-  L.Font.Name := 'Segoe UI';
-  if Bold then L.Font.Style := [fsBold] else L.Font.Style := [];
+  Result := TNewStaticText.Create(P);
+  Result.Parent := P;
+  Result.AutoSize := False;
+  Result.Left := ScaleX(X);
+  Result.Top := ScaleY(Y);
+  Result.Width := ScaleX(W);
+  Result.Height := ScaleY(H);
+  Result.Font.Name := 'Segoe UI';
+  Result.Font.Size := Pt;
+  Result.Font.Color := Clr;
+  if Bold then Result.Font.Style := [fsBold];
+  Result.Caption := S;
 end;
 
-procedure StyleEdit(E: TNewEdit);
+function AddImage(P: TPanel; const FileName: string; X,Y,W,H: Integer): TBitmapImage;
 begin
-  E.Color := CLR_INPUT;
-  E.Font.Color := CLR_CREAM;
-  E.Font.Name := 'Segoe UI';
-  E.Font.Size := 10;
+  Result := TBitmapImage.Create(P);
+  Result.Parent := P;
+  Result.Left := ScaleX(X);
+  Result.Top := ScaleY(Y);
+  Result.Width := ScaleX(W);
+  Result.Height := ScaleY(H);
+  Result.Stretch := True;
+  LoadBmp(Result, FileName);
 end;
 
-procedure StyleCheckBox(C: TNewCheckBox; Clr: Integer);
+function AddButton(P: TPanel; const S: string; X,Y,W,H: Integer): TNewButton;
 begin
-  C.Font.Color := Clr;
+  Result := TNewButton.Create(P);
+  Result.Parent := P;
+  Result.Left := ScaleX(X);
+  Result.Top := ScaleY(Y);
+  Result.Width := ScaleX(W);
+  Result.Height := ScaleY(H);
+  Result.Caption := S;
+  Result.Font.Name := 'Segoe UI';
+  Result.Font.Size := 10;
+end;
+
+procedure AddCheck(P: TPanel; const S: string; Y: Integer; Initial: Boolean);
+var C: TNewCheckBox;
+begin
+  C := TNewCheckBox.Create(P);
+  C.Parent := P;
+  C.Left := ScaleX(36);
+  C.Top := ScaleY(Y);
+  C.Width := ScaleX(470);
+  C.Height := ScaleY(24);
+  C.Caption := S;
   C.Font.Name := 'Segoe UI';
   C.Font.Size := 10;
+  C.Checked := Initial;
 end;
 
-function RW: Integer;
+procedure AddBrand(P: TPanel);
 begin
-  Result := ScaleX(WIN_W - LEFT_W) - 2 * ScaleX(RP_PAD);
+  AddImage(P, 'logo.bmp', 520, 48, 108, 116);
 end;
 
-procedure AddHeading(Parent: TPanel; const Caption: string; X, Y, W: Integer);
-var
-  L: TNewStaticText;
+procedure AddFooter(P: TPanel);
 begin
-  L := TNewStaticText.Create(Parent);
-  L.Parent := Parent;
-  L.Left := X;
-  L.Top := Y;
-  L.Width := W;
-  L.Caption := Caption;
-  StyleLabel(L, CLR_CREAM, True, 10);
+  AddText(P, 'Galenite  /  Демоверсия', 36, 378, 245, 24, 9, CLR_MUTED, False);
 end;
 
-procedure UpdateSpaceLabel;
-var
-  Free, Total: Cardinal;
-  GB: Extended;
-  S: string;
+procedure ShowPage(P: TPanel);
 begin
-  if not GetSpaceOnDisk(DirEdit.Text, True, Total, Free) then Free := 0;
-  if Free = 0 then S := '-'
-  else begin
-    GB := Free / 1024;
-    S := Format('%.1f', [GB]);
-    if IsRussian then S := S + ' ГБ' else S := S + ' GB';
-  end;
-  if IsRussian then
-    SpaceLabel.Caption := 'Требуется: ~{#MyRequiredMB} МБ    |    Доступно: ' + S
-  else
-    SpaceLabel.Caption := 'Required: ~{#MyRequiredMB} MB    |    Available: ' + S;
+  Page1.Visible := (P = Page1);
+  Page2.Visible := (P = Page2);
+  Page3.Visible := (P = Page3);
+  P.BringToFront;
 end;
 
-procedure OnBrowseClick(Sender: TObject);
-var
-  Dir: string;
-begin
-  Dir := DirEdit.Text;
-  if BrowseForFolder('', Dir, False) then begin
-    DirEdit.Text := Dir;
-    UpdateSpaceLabel;
-  end;
-end;
-
-procedure ShowInstalling; forward;
-procedure ShowFinished; forward;
 function SetTimer(hWnd: HWND; nIDEvent: UINT_PTR; uElapse: UINT; lpTimerFunc: LongWord): UINT_PTR;
   external 'SetTimer@user32.dll stdcall';
 function KillTimer(hWnd: HWND; nIDEvent: UINT_PTR): BOOL;
@@ -184,286 +161,109 @@ begin
   if DemoState <> 1 then Exit;
   Inc(DemoPct);
   ProgressFill.Width := (ProgressTrack.Width * DemoPct) div 100;
-  PctLabel.Caption := IntToStr(DemoPct) + '%';
-  if DemoPct < 25 then P2Status.Caption := 'Подготовка компонентов...'
-  else if DemoPct < 80 then P2Status.Caption := 'Распаковка файлов...'
-  else if DemoPct < 95 then P2Status.Caption := 'Настройка приложения...'
-  else P2Status.Caption := 'Завершение установки...';
+  PercentLabel.Caption := IntToStr(DemoPct) + '%';
+  if DemoPct < 25 then StatusLabel.Caption := 'Подготовка компонентов...'
+  else if DemoPct < 80 then StatusLabel.Caption := 'Распаковка файлов...'
+  else if DemoPct < 95 then StatusLabel.Caption := 'Настройка приложения...'
+  else StatusLabel.Caption := 'Завершение установки...';
   if DemoPct >= 100 then begin
     StopDemoTimer;
     DemoState := 2;
-    ShowFinished;
+    ShowPage(Page3);
   end;
 end;
 
-procedure OnHelpClick(Sender: TObject);
+procedure CloseDemo(Sender: TObject);
 begin
-  MsgBox('Это визуальный прототип Galen. Приложение не устанавливается.', mbInformation, MB_OK);
-end;
-
-procedure OnCancelClick(Sender: TObject);
-begin
+  StopDemoTimer;
   WizardForm.Close;
 end;
 
-procedure OnNextClick(Sender: TObject);
+procedure StartDemo(Sender: TObject);
 begin
   if DemoState <> 0 then Exit;
   DemoState := 1;
   DemoPct := 0;
   ProgressFill.Width := ScaleX(1);
-  PctLabel.Caption := '0%';
-  P2Status.Caption := 'Подготовка компонентов...';
-  ShowInstalling;
+  PercentLabel.Caption := '0%';
+  StatusLabel.Caption := 'Подготовка компонентов...';
+  ShowPage(Page2);
   DemoTimer := SetTimer(0, 0, 65, CreateCallback(@DemoTick));
   if DemoTimer = 0 then begin
     DemoState := 2;
-    ShowFinished;
+    ShowPage(Page3);
   end;
 end;
 
-procedure OnLaunchClick(Sender: TObject);
+procedure BrowseClick(Sender: TObject);
+var Dir: string;
 begin
-  WizardForm.Close;
+  Dir := DirEdit.Text;
+  if BrowseForFolder('', Dir, False) then DirEdit.Text := Dir;
 end;
 
-procedure ShowPage(P: TPanel);
+procedure BuildWelcome;
+var B: TNewButton;
 begin
-  Page1.Visible := (P = Page1);
-  Page2.Visible := (P = Page2);
-  Page3.Visible := (P = Page3);
-end;
+  Page1 := NewPanel;
+  AddBrand(Page1);
+  AddText(Page1, 'Установка Galen', 36, 40, 465, 42, 22, CLR_TEXT, True);
+  AddText(Page1, 'Ваш персональный AI-ассистент.', 36, 94, 465, 30, 12, CLR_MUTED, False);
+  AddText(Page1, 'Выберите параметры и начните установку.', 36, 125, 470, 24, 10, CLR_MUTED, False);
 
-procedure ShowWelcome;
-begin
-  LoadBmp(Hero, HeroWelcome);
-  ShowPage(Page1);
-  NextBtn.Visible := True;
-  LaunchBtn.Visible := False;
-  CancelLbl.Visible := True;
-end;
-
-procedure ShowInstalling;
-begin
-  LoadBmp(Hero, HeroInstalling);
-  ShowPage(Page2);
-  NextBtn.Visible := False;
-  LaunchBtn.Visible := False;
-  CancelLbl.Visible := True;
-end;
-
-procedure ShowFinished;
-begin
-  LoadBmp(Hero, HeroFinished);
-  ShowPage(Page3);
-  NextBtn.Visible := False;
-  LaunchBtn.Visible := True;
-  CancelLbl.Visible := False;
-end;
-
-procedure BuildPage1;
-var
-  Lbl: TNewStaticText;
-  Sep: TPanel;
-  W: Integer;
-begin
-  W := RW;
-  Page1 := TPanel.Create(RightPanel);
-  Page1.Parent := RightPanel;
-  Page1.Left := 0; Page1.Top := 0;
-  Page1.Width := RightPanel.Width; Page1.Height := ScaleY(BAR_Y);
-  StylePanel(Page1, CLR_PANEL);
-
-  Lbl := TNewStaticText.Create(Page1);
-  Lbl.Parent := Page1; Lbl.Left := ScaleX(RP_PAD); Lbl.Top := ScaleY(44); Lbl.Width := W;
-  if IsRussian then Lbl.Caption := 'Параметры установки' else Lbl.Caption := 'Installation options';
-  StyleLabel(Lbl, CLR_CREAM, True, 15);
-
-  Lbl := TNewStaticText.Create(Page1);
-  Lbl.Parent := Page1; Lbl.Left := ScaleX(RP_PAD); Lbl.Top := ScaleY(80); Lbl.Width := W;
-  if IsRussian then Lbl.Caption := 'Выберите папку и другие параметры (демо)'
-               else Lbl.Caption := 'Choose the install folder and other options';
-  StyleLabel(Lbl, CLR_MUTED, False, 10);
-
-  Sep := TPanel.Create(Page1); Sep.Parent := Page1;
-  Sep.Left := ScaleX(RP_PAD); Sep.Top := ScaleY(108); Sep.Width := W; Sep.Height := 1;
-  StylePanel(Sep, CLR_BORDER);
-
-  if IsRussian then AddHeading(Page1, 'Папка установки', ScaleX(RP_PAD), ScaleY(124), W)
-               else AddHeading(Page1, 'Install folder', ScaleX(RP_PAD), ScaleY(124), W);
-
+  AddText(Page1, 'Папка установки', 36, 175, 400, 24, 10, CLR_TEXT, True);
   DirEdit := TNewEdit.Create(Page1);
   DirEdit.Parent := Page1;
-  DirEdit.Left := ScaleX(RP_PAD); DirEdit.Top := ScaleY(146);
-  DirEdit.Width := W - ScaleX(90); DirEdit.Height := ScaleY(34);
+  DirEdit.Left := ScaleX(36);
+  DirEdit.Top := ScaleY(201);
+  DirEdit.Width := ScaleX(506);
+  DirEdit.Height := ScaleY(30);
+  DirEdit.Font.Name := 'Segoe UI';
+  DirEdit.Font.Size := 10;
   DirEdit.Text := ExpandConstant('{localappdata}\Programs\Galen');
-  StyleEdit(DirEdit);
+  B := AddButton(Page1, 'Обзор', 554, 198, 90, 32);
+  B.OnClick := @BrowseClick;
+  AddCheck(Page1, 'Создать ярлык на рабочем столе', 253, False);
+  AddCheck(Page1, 'Добавить команду galen в PATH', 280, False);
 
-  BrowseBtn := TNewButton.Create(Page1);
-  BrowseBtn.Parent := Page1;
-  BrowseBtn.Left := DirEdit.Left + DirEdit.Width + ScaleX(8);
-  BrowseBtn.Top := ScaleY(146); BrowseBtn.Width := ScaleX(80); BrowseBtn.Height := ScaleY(34);
-  BrowseBtn.OnClick := @OnBrowseClick;
-  if IsRussian then BrowseBtn.Caption := 'Обзор' else BrowseBtn.Caption := 'Browse';
-
-  SpaceLabel := TNewStaticText.Create(Page1);
-  SpaceLabel.Parent := Page1;
-  SpaceLabel.Left := ScaleX(RP_PAD); SpaceLabel.Top := ScaleY(188); SpaceLabel.Width := W;
-  StyleLabel(SpaceLabel, CLR_MUTED, False, 9);
-  UpdateSpaceLabel;
-
-  if IsRussian then AddHeading(Page1, 'Язык интерфейса', ScaleX(RP_PAD), ScaleY(224), W)
-               else AddHeading(Page1, 'Interface language', ScaleX(RP_PAD), ScaleY(224), W);
-
-  LangCombo := TNewComboBox.Create(Page1);
-  LangCombo.Parent := Page1;
-  LangCombo.Left := ScaleX(RP_PAD); LangCombo.Top := ScaleY(246); LangCombo.Width := W;
-  LangCombo.Style := csDropDownList;
-  LangCombo.Items.Add('Русский');
-  { Russian preview only }
-  if IsRussian then LangCombo.ItemIndex := 0 else LangCombo.ItemIndex := 1;
-
-  Sep := TPanel.Create(Page1); Sep.Parent := Page1;
-  Sep.Left := ScaleX(RP_PAD); Sep.Top := ScaleY(296); Sep.Width := W; Sep.Height := 1;
-  StylePanel(Sep, CLR_BORDER);
-
-  if IsRussian then AddHeading(Page1, 'Создать ярлыки', ScaleX(RP_PAD), ScaleY(310), W)
-               else AddHeading(Page1, 'Create shortcuts', ScaleX(RP_PAD), ScaleY(310), W);
-
-  DesktopChk := TNewCheckBox.Create(Page1);
-  DesktopChk.Parent := Page1;
-  DesktopChk.Left := ScaleX(RP_PAD); DesktopChk.Top := ScaleY(334); DesktopChk.Width := W;
-  DesktopChk.Checked := False; StyleCheckBox(DesktopChk, CLR_CREAM);
-  if IsRussian then DesktopChk.Caption := 'Создать ярлык на рабочем столе'
-               else DesktopChk.Caption := 'Create a desktop shortcut';
-
-  StartMenuChk := TNewCheckBox.Create(Page1);
-  StartMenuChk.Parent := Page1;
-  StartMenuChk.Left := ScaleX(RP_PAD); StartMenuChk.Top := ScaleY(362); StartMenuChk.Width := W;
-  StartMenuChk.Checked := True; StyleCheckBox(StartMenuChk, CLR_CREAM);
-  if IsRussian then StartMenuChk.Caption := 'Создать ярлык в меню «Пуск»'
-               else StartMenuChk.Caption := 'Create a Start Menu shortcut';
+  AddFooter(Page1);
+  B := AddButton(Page1, 'Отмена', 394, 369, 104, 34);
+  B.OnClick := @CloseDemo;
+  InstallBtn := AddImage(Page1, 'install.bmp', 510, 369, 134, 34);
+  InstallBtn.Cursor := crHand;
+  InstallBtn.OnClick := @StartDemo;
 end;
 
-procedure BuildPage2;
-var
-  Heading: TNewStaticText;
-  TrackTop, TrackW: Integer;
+procedure BuildInstalling;
 begin
-  TrackW := RW;
-  Page2 := TPanel.Create(RightPanel);
-  Page2.Parent := RightPanel;
-  Page2.Left := 0; Page2.Top := 0;
-  Page2.Width := RightPanel.Width; Page2.Height := ScaleY(BAR_Y);
-  Page2.Visible := False; StylePanel(Page2, CLR_PANEL);
-
-  Heading := TNewStaticText.Create(Page2);
-  Heading.Parent := Page2; Heading.Left := ScaleX(RP_PAD); Heading.Top := ScaleY(60); Heading.Width := TrackW;
-  if IsRussian then Heading.Caption := 'Установка Galen' else Heading.Caption := 'Installing...';
-  StyleLabel(Heading, CLR_CREAM, True, 15);
-
-  P2Status := TNewStaticText.Create(Page2);
-  P2Status.Parent := Page2; P2Status.Left := ScaleX(RP_PAD); P2Status.Top := ScaleY(100); P2Status.Width := TrackW;
-  P2Status.Caption := ''; StyleLabel(P2Status, CLR_MUTED, False, 9);
-
-  TrackTop := ScaleY(130);
-  ProgressTrack := TBitmapImage.Create(Page2);
-  ProgressTrack.Parent := Page2;
-  ProgressTrack.Left := ScaleX(RP_PAD); ProgressTrack.Top := TrackTop;
-  ProgressTrack.Width := TrackW; ProgressTrack.Height := ScaleY(6);
-  ProgressTrack.Stretch := True; LoadBmp(ProgressTrack, 'progress-track.bmp');
-
-  ProgressFill := TBitmapImage.Create(Page2);
-  ProgressFill.Parent := Page2;
-  ProgressFill.Left := ScaleX(RP_PAD); ProgressFill.Top := TrackTop;
-  ProgressFill.Width := ScaleX(8); ProgressFill.Height := ScaleY(4);
-  ProgressFill.Stretch := True; LoadBmp(ProgressFill, 'progress-fill.bmp');
-
-  PctLabel := TNewStaticText.Create(Page2);
-  PctLabel.Parent := Page2;
-  PctLabel.Left := ScaleX(RP_PAD); PctLabel.Top := TrackTop + ScaleY(12); PctLabel.Width := ScaleX(80);
-  PctLabel.Caption := '0%'; StyleLabel(PctLabel, CLR_MUTED, False, 9);
+  Page2 := NewPanel;
+  AddBrand(Page2);
+  AddText(Page2, 'Установка Galen', 36, 40, 465, 42, 22, CLR_TEXT, True);
+  AddText(Page2, 'Ваш персональный AI-ассистент', 36, 110, 465, 30, 12, CLR_TEXT, True);
+  AddText(Page2, 'Общайтесь с ИИ, работайте с файлами', 36, 147, 455, 26, 11, CLR_MUTED, False);
+  AddText(Page2, 'и автоматизируйте повседневные задачи.', 36, 174, 455, 26, 11, CLR_MUTED, False);
+  AddText(Page2, 'Подготавливаем Galen к первому запуску.', 36, 218, 510, 26, 10, CLR_MUTED, False);
+  StatusLabel := AddText(Page2, '', 36, 294, 525, 26, 10, CLR_TEXT, False);
+  PercentLabel := AddText(Page2, '0%', 600, 294, 44, 26, 10, CLR_TEXT, False);
+  ProgressTrack := AddImage(Page2, 'track.bmp', 36, 326, 608, 4);
+  ProgressFill := AddImage(Page2, 'fill.bmp', 36, 326, 1, 4);
+  AddFooter(Page2);
+  CancelBtn := AddButton(Page2, 'Отмена', 540, 369, 104, 34);
+  CancelBtn.OnClick := @CloseDemo;
 end;
 
-procedure BuildPage3;
-var
-  Heading, Body: TNewStaticText;
-  W: Integer;
+procedure BuildFinished;
 begin
-  W := RW;
-  Page3 := TPanel.Create(RightPanel);
-  Page3.Parent := RightPanel;
-  Page3.Left := 0; Page3.Top := 0;
-  Page3.Width := RightPanel.Width; Page3.Height := ScaleY(BAR_Y);
-  Page3.Visible := False; StylePanel(Page3, CLR_PANEL);
-
-  Heading := TNewStaticText.Create(Page3);
-  Heading.Parent := Page3; Heading.Left := ScaleX(RP_PAD); Heading.Top := ScaleY(60); Heading.Width := W;
-  if IsRussian then Heading.Caption := 'Готово!' else Heading.Caption := 'Done!';
-  StyleLabel(Heading, CLR_CREAM, True, 22);
-
-  Body := TNewStaticText.Create(Page3);
-  Body.Parent := Page3; Body.Left := ScaleX(RP_PAD); Body.Top := ScaleY(110); Body.Width := W;
-  if IsRussian then Body.Caption := 'Демонстрация завершена. Galen не установлен.'
-               else Body.Caption := '{#MyAppName} is installed. You can launch it now.';
-  StyleLabel(Body, CLR_MUTED, False, 11);
-
-  LaunchChk := TNewCheckBox.Create(Page3);
-  LaunchChk.Parent := Page3;
-  LaunchChk.Left := ScaleX(RP_PAD); LaunchChk.Top := ScaleY(160); LaunchChk.Width := W;
-  LaunchChk.Checked := True; LaunchChk.Enabled := False; StyleCheckBox(LaunchChk, CLR_CREAM);
-  if IsRussian then LaunchChk.Caption := 'Открыть Galen (демо)'
-               else LaunchChk.Caption := 'Open {#MyAppName}';
-end;
-
-procedure BuildBottomBar;
-var
-  BtnW, BtnH, CenterY: Integer;
-begin
-  BtnW := ScaleX(206); BtnH := ScaleY(48);
-  CenterY := (ScaleY(BAR_H) - BtnH) div 2;
-
-  BottomSep := TPanel.Create(WizardForm);
-  BottomSep.Parent := WizardForm;
-  BottomSep.Left := 0; BottomSep.Top := ScaleY(BAR_Y);
-  BottomSep.Width := ScaleX(WIN_W); BottomSep.Height := 1;
-  StylePanel(BottomSep, CLR_BORDER);
-
-  BottomBar := TPanel.Create(WizardForm);
-  BottomBar.Parent := WizardForm;
-  BottomBar.Left := 0; BottomBar.Top := ScaleY(BAR_Y) + 1;
-  BottomBar.Width := ScaleX(WIN_W); BottomBar.Height := ScaleY(BAR_H) - 1;
-  StylePanel(BottomBar, CLR_BAR);
-
-  HelpLbl := TNewStaticText.Create(BottomBar);
-  HelpLbl.Parent := BottomBar; HelpLbl.AutoSize := True; HelpLbl.Cursor := crHand;
-  HelpLbl.OnClick := @OnHelpClick;
-  if IsRussian then HelpLbl.Caption := 'Galenite  ·  Демо' else HelpLbl.Caption := '?  Help';
-  StyleLabel(HelpLbl, CLR_MUTED, False, 10);
-  HelpLbl.Left := ScaleX(24);
-  HelpLbl.Top := CenterY + (BtnH - ScaleY(16)) div 2;
-
-  CancelLbl := TNewStaticText.Create(BottomBar);
-  CancelLbl.Parent := BottomBar; CancelLbl.AutoSize := True; CancelLbl.Cursor := crHand;
-  CancelLbl.OnClick := @OnCancelClick;
-  if IsRussian then CancelLbl.Caption := 'Отмена' else CancelLbl.Caption := 'Cancel';
-  StyleLabel(CancelLbl, CLR_MUTED, False, 10);
-  CancelLbl.Top := HelpLbl.Top;
-  CancelLbl.Left := ScaleX(WIN_W) - BtnW - ScaleX(RP_PAD) - ScaleX(100);
-
-  NextBtn := TBitmapImage.Create(BottomBar);
-  NextBtn.Parent := BottomBar;
-  NextBtn.Width := BtnW; NextBtn.Height := BtnH; NextBtn.Stretch := True;
-  NextBtn.Cursor := crHand; NextBtn.OnClick := @OnNextClick;
-  NextBtn.Left := ScaleX(WIN_W) - BtnW - ScaleX(RP_PAD); NextBtn.Top := CenterY;
-  LoadBmp(NextBtn, BmpInstall);
-
-  LaunchBtn := TBitmapImage.Create(BottomBar);
-  LaunchBtn.Parent := BottomBar;
-  LaunchBtn.Width := BtnW; LaunchBtn.Height := BtnH; LaunchBtn.Stretch := True;
-  LaunchBtn.Cursor := crHand; LaunchBtn.OnClick := @OnLaunchClick;
-  LaunchBtn.Left := NextBtn.Left; LaunchBtn.Top := CenterY; LaunchBtn.Visible := False;
-  LoadBmp(LaunchBtn, BmpLaunch);
+  Page3 := NewPanel;
+  AddBrand(Page3);
+  AddText(Page3, 'Всё готово', 36, 40, 465, 42, 22, CLR_TEXT, True);
+  AddText(Page3, 'Установка завершена.', 36, 110, 465, 30, 12, CLR_TEXT, True);
+  AddText(Page3, 'Это визуальный прототип.', 36, 155, 490, 26, 11, CLR_MUTED, False);
+  AddText(Page3, 'Приложение и ваши данные не изменены.', 36, 182, 500, 26, 11, CLR_MUTED, False);
+  AddFooter(Page3);
+  FinishBtn := AddImage(Page3, 'finish.bmp', 510, 369, 134, 34);
+  FinishBtn.Cursor := crHand;
+  FinishBtn.OnClick := @CloseDemo;
 end;
 
 procedure HideStockChrome;
@@ -483,58 +283,21 @@ end;
 
 procedure InitializeWizard;
 begin
-  if WizardSilent then Exit;
-
-  IsRussian := True;
-  if IsRussian then begin
-    HeroWelcome := 'hero-welcome-ru.bmp';
-    HeroInstalling := 'hero-installing-ru.bmp';
-    HeroFinished := 'hero-finished-ru.bmp';
-    BmpInstall := 'btn-install-ru.bmp';
-    BmpNext := 'btn-next-ru.bmp';
-    BmpLaunch := 'btn-launch-ru.bmp';
-  end else begin
-    HeroWelcome := 'hero-welcome-en.bmp';
-    HeroInstalling := 'hero-installing-en.bmp';
-    HeroFinished := 'hero-finished-en.bmp';
-    BmpInstall := 'btn-install-en.bmp';
-    BmpNext := 'btn-next-en.bmp';
-    BmpLaunch := 'btn-launch-en.bmp';
-  end;
-
-  ExtractTemporaryFile(HeroWelcome);
-  ExtractTemporaryFile(HeroInstalling);
-  ExtractTemporaryFile(HeroFinished);
-  ExtractTemporaryFile(BmpInstall);
-  ExtractTemporaryFile(BmpNext);
-  ExtractTemporaryFile(BmpLaunch);
-  ExtractTemporaryFile('progress-track.bmp');
-  ExtractTemporaryFile('progress-fill.bmp');
-
+  ExtractTemporaryFile('logo.bmp');
+  ExtractTemporaryFile('install.bmp');
+  ExtractTemporaryFile('finish.bmp');
+  ExtractTemporaryFile('track.bmp');
+  ExtractTemporaryFile('fill.bmp');
   WizardForm.ClientWidth := ScaleX(WIN_W);
   WizardForm.ClientHeight := ScaleY(WIN_H);
   WizardForm.Color := CLR_BG;
   WizardForm.Position := poScreenCenter;
-  WizardForm.Caption := 'Galen — визуальный прототип';
-
+  WizardForm.Caption := 'Установка Galen';
   HideStockChrome;
-
-  Hero := TBitmapImage.Create(WizardForm);
-  Hero.Parent := WizardForm;
-  Hero.Left := 0; Hero.Top := 0;
-  Hero.Width := ScaleX(LEFT_W); Hero.Height := ScaleY(WIN_H);
-  Hero.Stretch := True; Hero.Enabled := False;
-  LoadBmp(Hero, HeroWelcome);
-
-  RightPanel := TPanel.Create(WizardForm);
-  RightPanel.Parent := WizardForm;
-  RightPanel.Left := ScaleX(LEFT_W); RightPanel.Top := 0;
-  RightPanel.Width := ScaleX(WIN_W - LEFT_W); RightPanel.Height := ScaleY(WIN_H);
-  StylePanel(RightPanel, CLR_PANEL);
-
-  BuildPage1; BuildPage2; BuildPage3; BuildBottomBar;
-  RightPanel.BringToFront; BottomSep.BringToFront; BottomBar.BringToFront;
-  ShowWelcome;
+  BuildWelcome;
+  BuildInstalling;
+  BuildFinished;
+  ShowPage(Page1);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
