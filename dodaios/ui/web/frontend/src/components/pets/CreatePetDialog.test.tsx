@@ -32,6 +32,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("CreatePetDialog", () => {
@@ -48,6 +49,55 @@ describe("CreatePetDialog", () => {
     expect(link.getAttribute("href")).toBe("/api/pets/template.png");
     expect(link.hasAttribute("download")).toBe(true);
     expect(link.textContent).toBe("Download template");
+  });
+
+  it("saves the original PNG through the desktop Downloads API", async () => {
+    const bytes = new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" });
+    const fetchSpy = vi.fn(async (url: string, _init?: RequestInit) => {
+      if (url === "/api/downloads/capabilities") return { ok: true, json: async () => ({ native_file_actions: true }) };
+      if (url === "/api/pets/template.png") return { ok: true, blob: async () => bytes };
+      if (url === "/api/downloads/save") return { ok: true, json: async () => ({ saved_path: "C:/Users/test/Downloads/pet-template.png" }) };
+      throw new Error("Unexpected request: " + url);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const browserClick = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    renderDialog();
+    fireEvent.click(screen.getByTestId("create-pet-template"));
+    await waitFor(() => expect(screen.getByTestId("create-pet-template").getAttribute("aria-busy")).toBe("false"));
+    const save = fetchSpy.mock.calls.find(([url]) => url === "/api/downloads/save");
+    expect(save?.[1]?.method).toBe("POST");
+    expect(JSON.parse(String(save?.[1]?.body))).toEqual({ filename: "pet-template.png", content_b64: "iVBORw==" });
+    expect(browserClick).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps the normal browser download when native file actions are unavailable", async () => {
+    const bytes = new Blob(["png"], { type: "image/png" });
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (url === "/api/downloads/capabilities") return { ok: true, json: async () => ({ native_file_actions: false }) };
+      if (url === "/api/pets/template.png") return { ok: true, blob: async () => bytes };
+      throw new Error("Unexpected request: " + url);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const browserClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderDialog();
+    fireEvent.click(screen.getByTestId("create-pet-template"));
+    await waitFor(() => expect(browserClick).toHaveBeenCalledTimes(1));
+    expect(fetchSpy.mock.calls.map(([url]) => url)).toEqual(["/api/downloads/capabilities", "/api/pets/template.png"]);
+  });
+
+  it("shows an error instead of a blocked browser download when the native save fails", async () => {
+    const fetchSpy = vi.fn(async (url: string) => {
+      if (url === "/api/downloads/capabilities") return { ok: true, json: async () => ({ native_file_actions: true }) };
+      if (url === "/api/pets/template.png") return { ok: true, blob: async () => new Blob(["png"], { type: "image/png" }) };
+      return { ok: false, status: 500 };
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const browserClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    renderDialog();
+    fireEvent.click(screen.getByTestId("create-pet-template"));
+    expect((await screen.findByRole("alert")).textContent).toBe("Download failed");
+    expect(browserClick).not.toHaveBeenCalled();
   });
 
   it("refuses a file that is not a PNG before uploading anything", () => {

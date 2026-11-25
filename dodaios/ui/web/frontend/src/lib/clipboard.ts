@@ -313,6 +313,8 @@ export interface SaveOrDownloadArgs {
   mime?: string;
   /** True in the desktop shell — route the save through the backend. */
   native: boolean;
+  /** Surface native save errors instead of trying a blocked WebView download. */
+  strictNative?: boolean;
 }
 
 /**
@@ -322,7 +324,7 @@ export interface SaveOrDownloadArgs {
  *   writes them into ``~/Downloads`` (pywebview silently cancels browser
  *   downloads, so this is the only path that works there). Returns the saved
  *   absolute path. On any failure it falls back to the browser download — never
- *   worse than before.
+ *   worse than before, unless `strictNative` is set (then the error is surfaced).
  * - Browser / VPS (`!native`): the normal blob ``<a download>`` — the real
  *   browser saves into the user's own Downloads. Returns null.
  */
@@ -343,8 +345,10 @@ export async function saveOrDownload(
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as { saved_path?: string };
+      if (args.strictNative && !data.saved_path) throw new Error("Missing saved file path");
       return data.saved_path ?? filename;
-    } catch {
+    } catch (error) {
+      if (args.strictNative) throw error;
       // Fall through to the browser download — never worse than today.
     }
   }

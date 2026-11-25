@@ -9,6 +9,8 @@ import { useT } from "@/i18n";
 import { FRAME_SIZES, MAX_FRAMES_PER_STATE, PET_STATES } from "@/lib/petStates";
 import { PET_TEMPLATE_URL, PetsRequestError, type Pet } from "@/lib/petsApi";
 import { cn } from "@/lib/utils";
+import { saveOrDownload } from "@/lib/clipboard";
+import { useEventStore } from "@/store/events";
 
 /** Mirrors the loader's limits (`dodaios/ui/pets/manifest.py`, docs/pets.md). */
 const MAX_NAME = 40;
@@ -68,6 +70,10 @@ export function CreatePetDialog({
   const [frameSize, setFrameSize] = useState<number>(DEFAULT_FRAME_SIZE);
   const [manifest, setManifest] = useState<File | null>(null);
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({});
+  const [templateBusy, setTemplateBusy] = useState(false);
+  const [templateError, setTemplateError] = useState(false);
+  const templateInFlight = useRef(false);
+  const pushToast = useEventStore((s) => s.pushToast);
 
   // A fresh form every time the dialog opens.
   useEffect(() => {
@@ -78,6 +84,7 @@ export function CreatePetDialog({
     setFrameSize(DEFAULT_FRAME_SIZE);
     setManifest(null);
     setErrors({});
+    setTemplateError(false);
   }, [open]);
 
   // The preview is a local object URL; release it when the file changes.
@@ -113,6 +120,44 @@ export function CreatePetDialog({
     }
     setErrors((e) => ({ ...e, manifest: undefined }));
     setManifest(file);
+  }
+
+  async function downloadTemplate(event: React.MouseEvent<HTMLAnchorElement>) {
+    event.preventDefault();
+    if (templateInFlight.current) return;
+    templateInFlight.current = true;
+    setTemplateBusy(true);
+    setTemplateError(false);
+    try {
+      // Resolve capabilities on click, rather than treating a pending desktop
+      // capability request as a browser and silently losing the download.
+      const capsResponse = await fetch("/api/downloads/capabilities");
+      if (!capsResponse.ok) throw new Error("Could not determine download capabilities");
+      const caps = (await capsResponse.json()) as { native_file_actions?: boolean };
+      if (typeof caps.native_file_actions !== "boolean") throw new Error("Invalid download capabilities");
+      const response = await fetch(PET_TEMPLATE_URL);
+      if (!response.ok) throw new Error(`Template HTTP ${response.status}`);
+      const blob = await response.blob();
+      if (!blob.size) throw new Error("Empty template");
+      const filename = "pet-template.png";
+      const savedPath = await saveOrDownload({
+        filename,
+        blob,
+        native: caps.native_file_actions,
+        strictNative: true,
+      });
+      if (savedPath) {
+        pushToast("success", `${t("session_detail.saved_to_downloads")} ${savedPath}`, {
+          filePath: savedPath,
+          filename: savedPath.split(/[\\/]/).pop() || filename,
+        });
+      }
+    } catch {
+      setTemplateError(true);
+    } finally {
+      templateInFlight.current = false;
+      setTemplateBusy(false);
+    }
   }
 
   async function submit(event: React.FormEvent) {
@@ -324,12 +369,16 @@ export function CreatePetDialog({
                   href={PET_TEMPLATE_URL}
                   download="pet-template.png"
                   data-testid="create-pet-template"
-                  className="inline-flex items-center gap-1.5 rounded-md text-sm font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  aria-disabled={templateBusy}
+                  aria-busy={templateBusy}
+                  onClick={(event) => void downloadTemplate(event)}
+                  className="inline-flex items-center gap-1.5 rounded-md text-sm font-medium text-accent hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:opacity-50"
                 >
-                  <Download className="h-3.5 w-3.5" aria-hidden />
+                  {templateBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : <Download className="h-3.5 w-3.5" aria-hidden />}
                   {t("pets.create_dialog.template_download")}
                 </a>
               </div>
+              {templateError && <p role="alert" className="mt-2 text-sm text-destructive">{t("session_detail.download_failed")}</p>}
               <p className="mt-1 text-sm text-muted-foreground">
                 {t("pets.create_dialog.layout_body").replace("{0}", String(MAX_FRAMES_PER_STATE))}
               </p>
