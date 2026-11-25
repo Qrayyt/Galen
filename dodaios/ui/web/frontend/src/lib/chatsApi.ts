@@ -107,6 +107,25 @@ export function fetchConversations(days = 0, limit = 500, query = ""): Promise<C
   });
 }
 
+/** Search the archive in bounded server pages, aborting obsolete queries. */
+export async function searchVoiceArchive(query: string, signal: AbortSignal, limit = 100): Promise<ConversationSummary[]> {
+  if (!query.trim()) return [];
+  const rows: ConversationSummary[] = [];
+  let offset: number | null = 0;
+  while (offset !== null && rows.length < limit) {
+    const params = new URLSearchParams({ q: query.trim(), offset: String(offset) });
+    const res = await fetch(`/api/chats/voice-search?${params}`, { signal });
+    if (!res.ok) throw new ChatsApiError("voice-search-failed", res.status);
+    const page = await res.json() as { rows: ConversationSummary[]; next_offset: number | null };
+    rows.push(...page.rows);
+    if (page.next_offset !== null && (!Number.isSafeInteger(page.next_offset) || page.next_offset <= offset)) {
+      throw new Error("voice-search-invalid-offset");
+    }
+    offset = page.next_offset;
+  }
+  return rows.sort((a, b) => b.updated_ms - a.updated_ms).slice(0, limit);
+}
+
 export async function patchTextConversation(
   id: string,
   input: { title?: string; mode?: "chat" | "work"; project_id?: string | null; draft?: string; state?: Record<string, unknown> },

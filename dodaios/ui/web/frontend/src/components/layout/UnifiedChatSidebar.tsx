@@ -18,6 +18,7 @@ import {
   createChatProject,
   deleteChatProject,
   fetchChatProjects,
+  searchVoiceArchive,
   patchChatProject,
   type ChatProject,
 } from "@/lib/chatsApi";
@@ -31,7 +32,7 @@ import {
 } from "@/lib/agentChatApi";
 import { fill, useT, useUiLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
-import { useEventStore } from "@/store/events";
+import { useEventStore, type ConversationSummary } from "@/store/events";
 import { useIdeThreadsStore } from "@/store/ideThreads";
 
 const REFRESH_MS = 5000;
@@ -75,7 +76,7 @@ export function UnifiedChatSidebar() {
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [query, setQuery] = useState("");
-  const [hits, setHits] = useState<{ query: string; rows: Array<ChatSearchHit & { mode: "chat" | "work" }>; failed: boolean } | null>(null);
+  const [hits, setHits] = useState<{ query: string; rows: Array<ChatSearchHit & { mode: "chat" | "work" }>; voice: ConversationSummary[]; failed: boolean } | null>(null);
   const [newMode, setNewMode] = useState<"chat" | "work">(activeSection === "agentic-ide" ? "work" : "chat");
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectName, setProjectName] = useState("");
@@ -117,9 +118,10 @@ export function UnifiedChatSidebar() {
       void Promise.allSettled([
         searchAgentChatSessions(needle, { surface: "jarvis", signal: controller.signal, limit: 100 }),
         searchAgentChatSessions(needle, { surface: "agent", signal: controller.signal, limit: 100 }),
-      ]).then(([chat, work]) => {
+        searchVoiceArchive(needle, controller.signal, 100),
+      ]).then(([chat, work, voice]) => {
         if (controller.signal.aborted) return;
-        setHits({ query: needle, failed: chat.status === "rejected" || work.status === "rejected", rows: [
+        setHits({ query: needle, failed: chat.status === "rejected" || work.status === "rejected" || voice.status === "rejected", voice: voice.status === "fulfilled" ? voice.value : [], rows: [
           ...(chat.status === "fulfilled" ? chat.value.map((hit) => ({ ...hit, mode: "chat" as const })) : []),
           ...(work.status === "fulfilled" ? work.value.map((hit) => ({ ...hit, mode: "work" as const })) : []),
         ] });
@@ -168,11 +170,12 @@ export function UnifiedChatSidebar() {
     return [...chats, ...work].sort((a, b) => b.updatedMs - a.updatedMs);
   }, [chatRows, sessions, sessionsById, t]);
 
+  const rowKey = (row: UnifiedRow) => `${row.chat?.kind === "voice" ? "voice" : row.mode}:${row.id}`;
   const visible = useMemo(() => {
     const folded = needle.toLocaleLowerCase();
     if (!folded) return rows;
-    const results = new Map(rows.filter((row) => `${row.title}\n${row.preview}`.toLocaleLowerCase().includes(folded)).map((row) => [`${row.mode}:${row.id}`, row]));
-    const byKey = new Map(rows.map((row) => [`${row.mode}:${row.id}`, row]));
+    const results = new Map(rows.filter((row) => `${row.title}\n${row.preview}`.toLocaleLowerCase().includes(folded)).map((row) => [rowKey(row), row]));
+    const byKey = new Map(rows.map((row) => [rowKey(row), row]));
     for (const hit of hits?.query === needle ? hits.rows : []) {
       const key = `${hit.mode}:${hit.session_id}`;
       const existing = byKey.get(key);
@@ -182,8 +185,13 @@ export function UnifiedChatSidebar() {
         updatedMs: hit.updated_ms, messageCount: hit.matches, provider: "", raw: null };
       results.set(key, fallback);
     }
+    for (const hit of hits?.query === needle ? hits.voice : []) {
+      const chat: ChatRow = { kind: "voice", id: hit.id, title: hit.title, preview: hit.preview, updatedMs: hit.updated_ms, messageCount: hit.message_count, provider: "", raw: hit };
+      const existing = byKey.get(`voice:${hit.id}`);
+      results.set(`voice:${hit.id}`, { id: hit.id, mode: "chat", title: existing?.title ?? chatRowLabel(chat, t).text, preview: hit.preview, updatedMs: hit.updated_ms, projectId: "", chat, session: null });
+    }
     return [...results.values()].sort((a, b) => b.updatedMs - a.updatedMs);
-  }, [needle, rows, hits]);
+  }, [needle, rows, hits, t]);
 
   const ungrouped = visible.filter((row) => !row.projectId || !projects.some((project) => project.project_id === row.projectId));
   const start = (projectId?: string) => {
@@ -419,7 +427,7 @@ export function UnifiedChatSidebar() {
                 )}
                 {(!project.collapsed || Boolean(needle)) && (
                   <ul className="ml-4 border-l border-border pl-1">
-                    {projectRows.map((row) => <HistoryRow key={`${row.mode}-${row.id}`} row={row} projects={projects}
+                    {projectRows.map((row) => <HistoryRow key={rowKey(row)} row={row} projects={projects}
                       active={row.mode === "work" ? activeWorkId === row.id : Boolean(row.chat && isActive(row.chat))}
                       onOpen={() => row.mode === "work" ? openCodingThread(row.id) : row.chat && openChat(row.chat)}
                       onMove={(projectId) => void moveRow(row, projectId)} onDelete={() => void removeRow(row)} t={t} />)}
@@ -432,7 +440,7 @@ export function UnifiedChatSidebar() {
 
         <div className="mb-1 mt-4 px-2 text-xs font-semibold text-muted-foreground">{t("sidebar.recent_chats")}</div>
         {ungrouped.length ? (
-          <ul>{ungrouped.map((row) => <HistoryRow key={`${row.mode}-${row.id}`} row={row} projects={projects}
+          <ul>{ungrouped.map((row) => <HistoryRow key={rowKey(row)} row={row} projects={projects}
             active={row.mode === "work" ? activeWorkId === row.id : Boolean(row.chat && isActive(row.chat))}
             onOpen={() => row.mode === "work" ? openCodingThread(row.id) : row.chat && openChat(row.chat)}
             onMove={(projectId) => void moveRow(row, projectId)} onDelete={() => void removeRow(row)} t={t} />)}</ul>

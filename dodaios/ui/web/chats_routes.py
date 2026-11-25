@@ -489,6 +489,62 @@ def _conversation_title(
 # ----------------------------------------------------------------------
 
 
+class VoiceSearchPage(BaseModel):
+    rows: list[ConversationSummary]
+    next_offset: int | None = None
+
+
+@router.get("/voice-search", response_model=VoiceSearchPage)
+def search_voice_archive(
+    request: Request,
+    q: str = Query(min_length=1, max_length=500),
+    offset: int = Query(default=0, ge=0),
+) -> VoiceSearchPage:
+    """Search one bounded page of the actual visible voice transcript.
+
+    Never generate titles or send transcript data to a model during search.
+    Match against normalized messages, including revised realtime captions.
+    """
+    needle = q.strip().casefold()
+    session_store = _optional_session_store(request)
+    if not needle or session_store is None:
+        return VoiceSearchPage(rows=[])
+    chat_store = _require_chat_store(request)
+    page_size = 100
+    sessions = session_store.list_sessions(limit=page_size, offset=offset, include_empty=False)
+    rows: list[ConversationSummary] = []
+    for session in sessions:
+        sid = str(session.id)
+        try:
+            title = _conversation_title(request, CONVERSATION_KIND_VOICE, sid, chat_store, session_store)
+        except Exception:  # noqa: BLE001 - cached title is optional
+            title = ""
+        row = _voice_session_to_summary(session, title)
+        if needle in row.title.casefold():
+            rows.append(row)
+            continue
+        messages = _normalized_messages(CONVERSATION_KIND_VOICE, sid, chat_store, session_store)
+        for message in messages or []:
+            if message.role not in {"user", "assistant"} or needle not in message.text.casefold():
+                continue
+            # A bounded excerpt centred around the match, preserving its case.
+            # Use a folded-prefix length so Unicode casefold expansions do not
+            # shift the excerpt away from the actual match.
+            position = message.text.casefold().find(needle)
+            start = 0
+            if position > 60:
+                folded_length = 0
+                for index, char in enumerate(message.text):
+                    folded_length += len(char.casefold())
+                    if folded_length >= position - 60:
+                        start = index
+                        break
+            row.preview = ("…" if start else "") + message.text[start:start + max(240, len(q) + 120)]
+            rows.append(row)
+            break
+    return VoiceSearchPage(rows=rows, next_offset=offset + page_size if len(sessions) == page_size else None)
+
+
 @router.get("", response_model=list[ConversationSummary])
 def list_conversations(
     request: Request,

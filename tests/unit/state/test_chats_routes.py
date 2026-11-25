@@ -62,7 +62,7 @@ def _fake_session_store():
     ]
 
     return SimpleNamespace(
-        list_sessions=lambda *, limit=100, include_empty=True: list(sessions),
+        list_sessions=lambda *, limit=100, offset=0, include_empty=True: list(sessions[offset:offset + limit]),
         get_session=lambda cid: sessions[0] if cid == "v1" else None,
         get_turns=lambda cid: list(turns) if cid == "v1" else [],
     )
@@ -397,3 +397,16 @@ async def test_project_delete_requires_explicit_chat_disposition() -> None:
 
     assert removed.json()["chats"] == "ungrouped"
     assert store.get_thread(chat["id"])["project_id"] is None
+
+
+async def test_voice_archive_search_matches_later_reply_and_preserves_kind() -> None:
+    app, store = await _make_app(with_session=True)
+    await store.add_message(thread_id="text-only", role="user", text="Sunny")
+    async with _client(app) as client:
+        response = await client.get("/api/chats/voice-search", params={"q": "SUNNY"})
+        assert response.status_code == 200
+        page = response.json()
+        assert [(r["kind"], r["id"], r["preview"]) for r in page["rows"]] == [("voice", "v1", "Sunny.")]
+        assert page["next_offset"] is None
+        assert (await client.get("/api/chats/voice-search", params={"q": "unmatched"})).json()["rows"] == []
+        assert (await client.get("/api/chats/voice-search", params={"q": "sunny", "offset": 100})).json()["rows"] == []

@@ -438,3 +438,7 @@ starting the scoped project-context injection block.
 ## Full regression follow-up
 
 - Windows candidate [45637491642](https://github.com/Qrayyt/Galen/actions/runs/45637491642) on `7931080` succeeded (backend, frontend, Windows packaging). Latest focused checks [45638183943](https://github.com/Qrayyt/Galen/actions/runs/45638183943) on `a697614` succeeded. Full candidate [45638184039](https://github.com/Qrayyt/Galen/actions/runs/45638184039) passed backend but 12 frontend assertions in four files still expected old IDE labels (6,572 tests passed). Updated those assertions to the actual Work labels; no functional assertions removed or tests skipped. Windows packaging of the latest revision remains pending.
+
+## Voice archive search implementation
+
+- Added a local paginated voice search route over normalized archived transcripts and cached titles, including realtime captions; no new title generation, external model requests, or project changes. Sidebar now searches Chat, Work and voice archives with one abortable query and opens archived results using their original voice identity. Added backend and frontend focused fixtures. Task 4 pending CI and large-history performance acceptance.
