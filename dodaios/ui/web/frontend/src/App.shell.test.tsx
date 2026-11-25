@@ -86,10 +86,9 @@ describe("App shell", () => {
     expect(screen.getByTestId("sidebar")).toBeTruthy();
   });
 
-  it("offers the drag seam only beside the IDE's column", () => {
+  it("offers the drag seam beside unified history and Work", () => {
     render(<App />);
-    // Beside the conversation the sidebar is a rail of icons at one width.
-    expect(screen.queryByTestId("sidebar-resizer")).toBeNull();
+    expect(screen.getByTestId("sidebar-resizer")).toBeTruthy();
 
     act(() => useEventStore.setState({ activeSection: "agentic-ide" }));
     expect(screen.getByTestId("sidebar-resizer")).toBeTruthy();

@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 16:02 MSK (UTC+03:00).
-- Stage: current agent-chat metadata bridge implemented and verified; unified frontend next.
+- Date: 2026-11-25 15:45 MSK (UTC+03:00).
+- Stage: unified Chat/Work history and project controls implemented in the web shell; desktop smoke verification remains.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `482bd03`.
-- Working tree before this journal update: agent-chat metadata bridge and tests only.
+  `5d52aeb62523cd29361e2927ece60ed8a732421f`.
+- Working tree before this journal update: unified frontend, compatibility labels, and focused test updates only.
 
 ## Repository audit
 
@@ -42,19 +42,19 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | # | Task | Status | Evidence / note |
 | ---: | --- | --- | --- |
 | 1 | Multi-session ordinary chats | in progress | Durable multi-thread store/API and current agent-chat bridge verified; active UI still needs navigation |
-| 2 | Unified history sidebar | not started | Audit pending |
+| 2 | Unified history sidebar | in progress | Chat and Work rows, search, recent chats, and project groups render in one sidebar; running-desktop scenarios remain |
 | 3 | Chat lifecycle and durable history | in progress | Create, metadata update, delete, automatic title, and persistence verified at store/API level; UI remains |
 | 4 | Chat search | in progress | Title and message-body search verified at store/API level; sidebar UI remains |
 | 5 | Isolated chat context and global memory | in progress | Existing per-thread message isolation preserved; project context injection still remains |
 | 6 | Restart restore and lossless migration | in progress | Draft/state persistence and repeated migrations verified in both chat stores; active-chat UI restoration remains |
-| 7 | Rename IDE to Work | not started | Audit pending |
-| 8 | Remove separate Chat/IDE tabs | not started | Audit pending |
-| 9 | Per-chat mode selection and persistence | in progress | Legacy mode and current agent-chat surface metadata persist; dialog selector remains |
-| 10 | Unified Chat/Work history | not started | Audit pending |
-| 11 | Project lifecycle | in progress | Project CRUD and safe ungroup/delete semantics verified at store/API level; UI remains |
-| 12 | Project names, icons, collapsible groups | in progress | Name, icon, collapse, and ordering metadata persist; sidebar rendering remains |
-| 13 | Chat and Work creation in projects | in progress | Project-scoped creation with either mode is supported; UI remains |
-| 14 | Move chats between project scopes | in progress | Move between projects and ungroup verified by route tests; UI remains |
+| 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
+| 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
+| 9 | Per-chat mode selection and persistence | in progress | New-conversation Chat/Work selector is in the history column and session metadata persists; existing-chat dialog/state restoration remains |
+| 10 | Unified Chat/Work history | in progress | Ordinary and Work sessions are merged and ordered in the Chat sidebar without removing the mature Work project tree |
+| 11 | Project lifecycle | in progress | Create, rename, collapse, and safe delete/ungroup controls are rendered; user-scenario and desktop checks remain |
+| 12 | Project names, icons, collapsible groups | in progress | Persisted names, icons, and collapse state are rendered as grouped sidebar sections; icon editing remains |
+| 13 | Chat and Work creation in projects | in progress | Mode creation exists and project grouping exists, but creation directly inside a selected project remains |
+| 14 | Move chats between project scopes | in progress | Agent-backed Chat and Work rows can move between project groups or back to recent/ungrouped; voice rows remain unassignable |
 | 15 | Project instructions, context, and files | in progress | Instructions and context-file references persist; scoped prompt/file injection remains |
 | 16 | Future project-agent relationship | implemented | Optional inert `agent_id` metadata is present and round-trip tested; no agent system added |
 | 17 | Native visual component library | not started | Existing chart/report support must be audited first |
@@ -72,7 +72,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 29 | Unified extension manifest | not started | Existing plugin/skill formats must be audited |
 | 30 | Moderation and safe installation | not started | Audit pending |
 
-Summary: 0 verified, 1 implemented, 11 in progress, 18 not started, 0 blocked.
+Summary: 0 verified, 2 implemented, 14 in progress, 14 not started, 0 blocked.
 
 ## Files changed in this checkpoint
 
@@ -85,6 +85,15 @@ Summary: 0 verified, 1 implemented, 11 in progress, 18 not started, 0 blocked.
 - `tests/unit/state/test_chats_routes.py` — end-to-end route coverage for lifecycle, search,
   modes, projects, moves, state restoration, and safe project deletion.
 - `docs/next-release/PROGRESS.md` — this resumable implementation checkpoint.
+- `dodaios/ui/web/frontend/src/components/layout/UnifiedChatSidebar.tsx` — merged Chat/Work history,
+  search, mode creation control, project groups, moves, rename, collapse, and safe delete controls.
+- `dodaios/ui/web/frontend/src/components/layout/Sidebar.tsx` and `src/App.tsx` — host the full-width
+  unified history column and its resizer while preserving the established Work project tree.
+- `dodaios/ui/web/frontend/src/components/layout/TopBar.tsx` — remove the separate top Chat/IDE switch.
+- `dodaios/ui/web/frontend/src/lib/chatsApi.ts` and `src/store/events.ts` — typed project, state,
+  and chat metadata clients used by the compatibility-preserving frontend bridge.
+- Main locale files — expose Work in primary navigation/mode labels without changing internal route ids.
+- Shell/sidebar/i18n tests — update assertions to the intended unified navigation behavior.
 
 No release marker, workflow, website, external server, or secret has been changed.
 
@@ -120,6 +129,9 @@ No release marker, workflow, website, external server, or secret has been change
 | `npm ci` in the frontend | 850 packages installed; audit reports 0 vulnerabilities |
 | First agent-chat test attempts | Environment setup exposed missing `aiosqlite`, `python-multipart`, and `rich`; no product assertion failed |
 | `python -m pytest tests/unit/agent_chat/test_agent_chat_surface_parity.py tests/unit/agent_chat/test_agent_chat_service.py -q` | 37 passed, 1 third-party deprecation warning, 3.20 seconds |
+| `npm run build` in the frontend | Passed; 8,738 modules transformed; existing chunk-size, Tailwind ambiguity, and third-party annotation warnings only |
+| `npm test -- --run src/components/layout/Sidebar.test.tsx src/App.shell.test.tsx src/components/layout/AppSurfaceSwitch.test.tsx src/__tests__/i18n.test.ts` | 4 files passed, 87 tests passed, 4.02 seconds |
+| `git diff --check` after unified frontend changes | Passed |
 
 ## Architecture audit findings
 
@@ -233,8 +245,31 @@ None. No server credentials were read or recorded. No deployment, database, cata
   never delete histories during UI selection; persist active chat/draft state; run component tests,
   a production web build, and a packaged desktop smoke check before calling the UI verified.
 
+## Unified frontend checkpoint
+
+- Result: the Chat surface now owns a full-width ChatGPT-style history column that merges ordinary
+  and Work sessions, sorts them by activity, searches them locally, and groups agent-backed sessions
+  under persistent projects.
+- Compatibility: selecting Work still opens the existing `agentic-ide` section, project tree, files,
+  terminals, git, tools, approvals, and resume logic. Internal route and surface identifiers were not
+  renamed, so saved links and persisted sessions continue to resolve.
+- Safety: deleting a project uses the API's safe default and ungroups its chats. It does not request
+  destructive `delete_chats=true`. Existing chat deletion behavior remains scoped to eligible rows.
+- Verification: the production frontend bundle succeeds and focused shell/sidebar/i18n tests pass.
+  The desktop application has not yet been launched against this bundle, so tasks are not marked verified.
+- Remaining in this stage: assign a newly created Chat/Work conversation directly to the selected
+  project, persist and restore the selected conversation/draft, add icon editing, finish secondary
+  Work copy, and exercise rename/move/delete/restart scenarios in the running desktop.
+
+## Risk checkpoint before unified frontend push
+
+- Planned action: commit and push the unified frontend and this journal update as one reviewable block.
+- Risk: medium; navigation changes can hide existing surfaces even though no histories are rewritten.
+- Safeguards: production build and 87 focused tests pass; legacy route ids and the mature Work tree are
+  retained; no release marker, workflow, tag, server, secret, or stored history is changed.
+
 ## Next concrete step
 
-Commit and push the verified additive data-model/API block. Then implement the unified sidebar,
-project groups, search, lifecycle controls, active-chat restoration, and in-dialog Chat/Work mode
-selection without removing any Work files, terminal, project, git, or tool functionality.
+Commit and push the unified frontend checkpoint. Then finish Work copy, selected-project creation,
+active-chat/draft restoration, project icon editing, and running-desktop chat/project scenarios before
+starting the scoped project-context injection block.

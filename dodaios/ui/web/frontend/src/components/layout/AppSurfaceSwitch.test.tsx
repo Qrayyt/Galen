@@ -46,7 +46,7 @@ describe("AppSurfaceSwitch", () => {
     const radios = screen.getAllByRole("radio");
     expect(radios.map((r) => r.getAttribute("data-testid"))).toEqual(["surface-dodaios", "surface-ide"]);
     expect(half("dodaios").textContent).toContain("Galen");
-    expect(half("ide").textContent).toContain("IDE");
+    expect(half("ide").textContent).toContain("Work");
     for (const radio of radios) expect(radio.getAttribute("title")).toBe(radio.getAttribute("aria-label"));
   });
 

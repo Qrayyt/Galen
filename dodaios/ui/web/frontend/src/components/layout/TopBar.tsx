@@ -13,7 +13,6 @@ import { cn } from "@/lib/utils";
 import { CodingModeBadge } from "@/components/layout/CodingModeBadge";
 import { SectionNavButtons } from "@/components/layout/SectionNavButtons";
 import { LayoutMenuButton } from "@/components/layout/tiling/LayoutMenuButton";
-import { AppSurfaceSwitch } from "@/components/layout/AppSurfaceSwitch";
 import { IDE_SECTIONS } from "@/lib/ideSections";
 import { openExternalUrl } from "@/lib/openExternal";
 import { IdeSidePanelToggle } from "@/components/agentic/sidePanel/IdeSidePanelToggle";
@@ -104,8 +103,6 @@ export function TopBar() {
           if (chrome.frameless) chrome.command("maximize");
         }}
       />
-      {/* Tool windows show one view only, so there is no place to switch. */}
-      {!solo && <SurfaceCaptionSwitch />}
       <div className="flex shrink-0 items-center">
         <CodingModeBadge />
         <IdeCaptionPanelToggle />
@@ -113,19 +110,6 @@ export function TopBar() {
           <WindowControls controls={controls} maximized={chrome.maximized} onCommand={chrome.command} />
         )}
       </div>
-    </div>
-  );
-}
-
-/**
- * Dodaios or IDE, centred in the caption on every screen. It floats over the
- * drag handle rather than splitting it, so the strip keeps dragging on both
- * sides of the switch.
- */
-function SurfaceCaptionSwitch() {
-  return (
-    <div className="pointer-events-none absolute inset-y-0 left-1/2 flex -translate-x-1/2 items-center">
-      <AppSurfaceSwitch className="pointer-events-auto" />
     </div>
   );
 }

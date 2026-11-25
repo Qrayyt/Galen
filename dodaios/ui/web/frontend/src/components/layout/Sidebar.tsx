@@ -22,6 +22,7 @@ import { NavRail, RAIL_BUTTON, RAIL_BUTTON_ON, RAIL_GLYPH } from "@/components/l
 import { QuickTooltip } from "@/components/ui/tooltip";
 import { useUserName } from "@/hooks/useUserName";
 import { apiKeysHealthError } from "@/lib/apiKeysTab";
+import { UnifiedChatSidebar } from "@/components/layout/UnifiedChatSidebar";
 
 // The update button renders nothing on most launches; loaded on its own so
 // the title-strip module it lives in stays out of the sidebar's chunk.
@@ -123,6 +124,7 @@ export function Sidebar({
   // The IDE leads its column with its own chat / grid switch; which of the
   // app's two places is on screen is picked in the window caption above.
   const onIdeSection = IDE_SECTIONS.includes(active);
+  const onConversationSection = active === "chats";
   // The IDE's thread list carries search as one of its own start rows
   // (ThreadTree), so there the field atop the column steps aside.
   const threadLayout = useIdeThreadsStore((s) => s.layout) === "threads" && onIdeSection;
@@ -178,7 +180,7 @@ export function Sidebar({
   // who dragged the column narrow gets icons without having to also find the
   // button. Beside the conversation the column is always the rail: it lists
   // nothing that needs a line of text, so the width belongs to the conversation.
-  const railed = !onIdeSection || collapsed || width < SIDEBAR_RAIL_AT_WIDTH;
+  const railed = !(onIdeSection || onConversationSection) || collapsed || width < SIDEBAR_RAIL_AT_WIDTH;
 
   // Lit while any hub section is on screen — the profile button IS the hub's
   // entry point now, so it carries the "you are here" state for all of them.
@@ -238,7 +240,8 @@ export function Sidebar({
             conversation, search, the pages reached most, and under them what
             needs the person (`NavRail`). The assistant's
             own panel stands to the right of the conversation. */}
-        {!onIdeSection ? <NavRail searchOn={searchBarOn} />
+        {onConversationSection && !railed ? <UnifiedChatSidebar />
+          : !onIdeSection ? <NavRail searchOn={searchBarOn} />
           : railed ? <nav aria-label={t("sidebar.ide_navigation")} className="px-2 pt-2">
           <div className="flex flex-col items-center gap-1">
             <button type="button" aria-label={t("sidebar.workspace_options")} title={t("sidebar.workspace_options")}

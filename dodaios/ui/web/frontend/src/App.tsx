@@ -325,9 +325,8 @@ export default function App() {
             collapsed={navCollapsed}
           />
 
-          {/* Only the IDE's column has a width to drag: beside the conversation
-              the sidebar is a rail of icons at one fixed width. */}
-          {IDE_SECTIONS.includes(activeSection) && (
+          {/* Conversation history and Work projects share the resizable column. */}
+          {(activeSection === "chats" || IDE_SECTIONS.includes(activeSection)) && (
             <PaneResizer
               showLine={false}
               orientation="vertical"

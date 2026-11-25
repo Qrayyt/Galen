@@ -577,16 +577,15 @@ describe("Sidebar collapse state", () => {
     expect(screen.getByTestId("sidebar").dataset.railed).toBe("false");
   });
 
-  test("beside the conversation the column is the rail at any width", () => {
+  test("beside the conversation the column shows unified history at a useful width", () => {
     act(() => useEventStore.setState({ activeSection: "chats" }));
     renderCollapsed(false);
 
     const aside = screen.getByTestId("sidebar");
-    expect(aside.dataset.railed).toBe("true");
-    expect(aside.style.width).toBe(`${SIDEBAR_RAIL_WIDTH}px`);
-    expect(screen.getByTestId("nav-rail")).toBeTruthy();
-    // No line of text: the person's name is the button's hover bubble.
-    expect(screen.queryByTestId("sidebar-profile-name")).toBeNull();
+    expect(aside.dataset.railed).toBe("false");
+    expect(aside.style.width).toBe(`${SIDEBAR_DEFAULT_WIDTH}px`);
+    expect(screen.getByTestId("unified-chat-sidebar")).toBeTruthy();
+    expect(screen.queryByTestId("nav-rail")).toBeNull();
   });
 
   test("carries no toggle of its own — the caption owns it", () => {
@@ -620,7 +619,7 @@ describe("the sidebar holds the two places and nothing else", () => {
   });
 
   test("offers the conversation, search and the four pages reached most, in the maintainer's order", () => {
-    renderSidebar();
+    renderSidebar(SIDEBAR_RAIL_WIDTH);
     const rows = ["sidebar-shortcut-chats", "sidebar-search-row", "sidebar-shortcut-plugins", "sidebar-shortcut-dictation", "sidebar-shortcut-visualization", "sidebar-shortcut-appshots"]
       .map((id) => screen.getByTestId(id));
     for (let i = 1; i < rows.length; i++) {
@@ -643,7 +642,7 @@ describe("the sidebar holds the two places and nothing else", () => {
   });
 
   test("shows what waits on the person as a tile, with no list and no heading", async () => {
-    renderSidebar();
+    renderSidebar(SIDEBAR_RAIL_WIDTH);
     expect(screen.queryByTestId("rail-notices")).toBeNull();
     act(() => useStatusLightStore.setState({ light: {
       counts: { running: 0, needs_you: 1 }, running: [], trouble: [], findings: [], tone: "calm",
@@ -662,7 +661,7 @@ describe("the sidebar holds the two places and nothing else", () => {
   });
 
   test("a failing provider reads as its name and what is wrong, and opens the API keys", async () => {
-    renderSidebar();
+    renderSidebar(SIDEBAR_RAIL_WIDTH);
     act(() => useStatusLightStore.setState({ light: {
       counts: { running: 0, needs_you: 0 }, running: [], needs_you: [], trouble: [], tone: "warn",
       findings: [{

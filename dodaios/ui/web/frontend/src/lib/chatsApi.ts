@@ -24,6 +24,29 @@ export interface ConversationDetail {
   id: string;
   title: string;
   messages: ChatTurn[];
+  mode?: "chat" | "work";
+  project_id?: string | null;
+  draft?: string;
+  state?: Record<string, unknown>;
+}
+
+export interface ChatProject {
+  project_id: string;
+  name: string;
+  icon: string;
+  instructions: string;
+  context_files: string[];
+  agent_id: string | null;
+  collapsed: boolean;
+  position: number;
+  created_ms: number;
+  updated_ms: number;
+}
+
+export interface ChatAppState {
+  active_kind?: ConversationKind;
+  active_id?: string | null;
+  [key: string]: unknown;
 }
 
 export class ChatsApiError extends Error {
@@ -50,15 +73,78 @@ function changeContext<T>(request: () => Promise<T>): Promise<T> {
 const conversationRequests = createHistoryRequests<ConversationSummary[]>();
 export const invalidateConversations = () => conversationRequests.invalidate();
 
-export function fetchConversations(days = 0, limit = 500): Promise<ConversationSummary[]> {
+export function fetchConversations(days = 0, limit = 500, query = ""): Promise<ConversationSummary[]> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (days > 0) params.set("days", String(days));
+  if (query.trim()) params.set("q", query.trim());
   const url = `/api/chats?${params.toString()}`;
   return conversationRequests.read(url, async (signal) => {
     const res = await fetch(url, { signal });
     if (!res.ok) throw new ChatsApiError("list-failed", res.status);
     return (await res.json()) as ConversationSummary[];
   });
+}
+
+export async function patchTextConversation(
+  id: string,
+  input: { title?: string; mode?: "chat" | "work"; project_id?: string | null; draft?: string; state?: Record<string, unknown> },
+): Promise<ConversationDetail> {
+  const res = await fetch(`/api/chats/text/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new ChatsApiError("update-failed", res.status);
+  invalidateConversations();
+  return (await res.json()) as ConversationDetail;
+}
+
+export async function fetchChatProjects(): Promise<ChatProject[]> {
+  const res = await fetch("/api/chats/projects");
+  if (!res.ok) throw new ChatsApiError("projects-failed", res.status);
+  return (await res.json()) as ChatProject[];
+}
+
+export async function createChatProject(input: { name: string; icon?: string }): Promise<ChatProject> {
+  const res = await fetch("/api/chats/projects", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new ChatsApiError("project-create-failed", res.status);
+  return (await res.json()) as ChatProject;
+}
+
+export async function patchChatProject(projectId: string, input: Partial<Pick<ChatProject, "name" | "icon" | "instructions" | "context_files" | "agent_id" | "collapsed" | "position">>): Promise<ChatProject> {
+  const res = await fetch(`/api/chats/projects/${encodeURIComponent(projectId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new ChatsApiError("project-update-failed", res.status);
+  return (await res.json()) as ChatProject;
+}
+
+export async function deleteChatProject(projectId: string, deleteChats = false): Promise<void> {
+  const query = deleteChats ? "?delete_chats=true" : "";
+  const res = await fetch(`/api/chats/projects/${encodeURIComponent(projectId)}${query}`, { method: "DELETE" });
+  if (!res.ok) throw new ChatsApiError("project-delete-failed", res.status);
+}
+
+export async function fetchChatAppState(): Promise<ChatAppState> {
+  const res = await fetch("/api/chats/state");
+  if (!res.ok) throw new ChatsApiError("state-failed", res.status);
+  return ((await res.json()) as { state: ChatAppState }).state;
+}
+
+export async function saveChatAppState(state: ChatAppState): Promise<ChatAppState> {
+  const res = await fetch("/api/chats/state", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
+  });
+  if (!res.ok) throw new ChatsApiError("state-save-failed", res.status);
+  return ((await res.json()) as { state: ChatAppState }).state;
 }
 
 export async function resumeConversation(

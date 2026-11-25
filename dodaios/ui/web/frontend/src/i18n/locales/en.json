@@ -330,7 +330,7 @@
     "appshots": "Appshots",
     "jarvisx": "Galen X",
     "marketplace": "GLNT",
-    "agentic_ide": "Agentic IDE",
+    "agentic_ide": "Work",
     "agentic_ide_beta": "Beta",
     "voice": "{name} Voice",
     "voice_shortcuts": "Shortcuts",
@@ -818,7 +818,7 @@
       "today": "Today",
       "tomorrow": "Tomorrow"
     },
-    "mode_ide": "IDE",
+    "mode_ide": "Work",
     "automations": "Automations",
     "automations_empty": "None yet. Ask Galen to set one up.",
     "routines": "Routines",
@@ -861,7 +861,7 @@
     "wake_word": "Wake word",
     "files_empty": "No files yet.",
     "skills_all": "All skills",
-    "mode_aria": "Conversation or Agentic IDE",
+    "mode_aria": "Chat or Work",
     "pinned": "Pinned",
     "recent": "Recent",
     "pin_chat": "Pin chat",
@@ -931,7 +931,7 @@
     "realtime_transport_offer_unsupported": "This window cannot create the WebRTC connection the subscription transport needs. Use an API Realtime provider instead.",
     "realtime_transport_socket_unreachable": "The subscription transport channel could not be reached. Restart the app, then try again.",
     "resize_hint": "Drag to resize the sidebar — double-click to reset",
-    "ide_navigation": "IDE navigation",
+    "ide_navigation": "Work navigation",
     "workspace_options": "Workspace options",
     "open_conversation_failed": "Could not open conversation"
   },
@@ -6783,7 +6783,7 @@
     "area": {
       "all": "Overall",
       "jarvis": "{name}",
-      "agentic_ide": "Agentic IDE",
+      "agentic_ide": "Work",
       "jarvis_voice": "{name} Voice"
     },
     "area_label": "Which part of the app to show",
@@ -6932,7 +6932,7 @@
       "voice": "Voice",
       "agent_chat": "Agent chat",
       "mission": "Mission",
-      "agentic_ide": "Agentic IDE",
+      "agentic_ide": "Work",
       "jarvis_voice": "{name} Voice"
     },
     "price_source": {
@@ -10709,7 +10709,7 @@
     },
     "layout_grid": "Terminal grid",
     "layout_threads": "Threads",
-    "layout_aria": "IDE layout",
+    "layout_aria": "Work layout",
     "layout_chat_short": "Chat",
     "layout_grid_short": "Grid",
     "terminal_needs_folder": "Terminal needs a project folder",

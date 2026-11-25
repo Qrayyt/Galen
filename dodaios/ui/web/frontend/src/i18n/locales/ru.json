@@ -330,7 +330,7 @@
     "appshots": "Снимки экрана",
     "jarvisx": "Galen X",
     "marketplace": "GLNT",
-    "agentic_ide": "Агентная IDE",
+    "agentic_ide": "Work",
     "agentic_ide_beta": "Бета",
     "voice": "{name} Голос",
     "voice_shortcuts": "Быстрые команды",
@@ -818,7 +818,7 @@
       "today": "Сегодня",
       "tomorrow": "Завтра"
     },
-    "mode_ide": "IDE",
+    "mode_ide": "Work",
     "automations": "Автоматизации",
     "automations_empty": "Пока ничего нет. Попросите Galen создать автоматизацию.",
     "routines": "Сценарии",
@@ -861,7 +861,7 @@
     "wake_word": "Фраза активации",
     "files_empty": "Пока нет файлов.",
     "skills_all": "Все навыки",
-    "mode_aria": "Диалог или агентная IDE",
+    "mode_aria": "Чат или Work",
     "pinned": "Закреплённые",
     "recent": "Недавние",
     "pin_chat": "Закрепить чат",
@@ -931,7 +931,7 @@
     "realtime_transport_offer_unsupported": "Это окно не может создать WebRTC-соединение, необходимое для транспорта подписки. Используйте вместо этого провайдера API реального времени.",
     "realtime_transport_socket_unreachable": "Канал по подписке не был доступен. Перезапустите приложение, затем попробуйте снова.",
     "resize_hint": "Перетащить, чтобы изменить размер боковой панели — дважды щёлкните, чтобы сбросить",
-    "ide_navigation": "Навигация по IDE",
+    "ide_navigation": "Навигация Work",
     "workspace_options": "Параметры рабочего пространства",
     "open_conversation_failed": "Не удалось начать разговор"
   },
@@ -6783,7 +6783,7 @@
     "area": {
       "all": "В целом",
       "jarvis": "{name}",
-      "agentic_ide": "Агентная IDE",
+      "agentic_ide": "Work",
       "jarvis_voice": "{name} Голос"
     },
     "area_label": "Какую часть приложения показывать",
@@ -6932,7 +6932,7 @@
       "voice": "Голос",
       "agent_chat": "Чат агента",
       "mission": "Миссия",
-      "agentic_ide": "Агентная IDE",
+      "agentic_ide": "Work",
       "jarvis_voice": "{name} Голос"
     },
     "price_source": {
@@ -10709,7 +10709,7 @@
     },
     "layout_grid": "Терминальная сетка",
     "layout_threads": "Нити",
-    "layout_aria": "Макет IDE",
+    "layout_aria": "Макет Work",
     "layout_chat_short": "Чат",
     "layout_grid_short": "Сетка",
     "terminal_needs_folder": "Терминалу нужна папка проекта",

@@ -438,6 +438,9 @@ export interface ConversationSummary {
   created_ms: number;
   updated_ms: number;
   message_count: number;
+  /** Legacy text rows carry these; voice rows omit them. */
+  mode?: "chat" | "work";
+  project_id?: string | null;
 }
 
 export interface PendingTerminalCommand {
