@@ -374,3 +374,7 @@ starting the scoped project-context injection block.
 - `912720f`: focused client tests and a non-release branch CI workflow (syntax, isolated GLNT tests, focused frontend tests and build). Workflow must run successfully before any verified claim. No test result is asserted here.
 - Server changes: none; inventory read-only. glnt_catalog_url defaults to empty until service URL and publisher authorization are verified. Existing publisher GitHub app may require updated scopes. No release marker, tags, or deployment altered.
 - Remaining: actual native extension activation/update/removal, icon retrieval/render, voice project scoping, complete mode/state restoration, message-scoped UI interaction persistence, broader backend/frontend tests and installed Windows smoke. Do not publish yet.
+
+## CI repair checkpoint
+
+- Run 45627405167: 9 focused frontend tests passed; TypeScript failed because split-pane stores did not implement the new restoration method. Python compileall passed, GLNT test collection failed because uvicorn was missing from the CI dependencies. Added scoped no-op restoration in split panes and missing dependency; expanded focused tests. No release changes.

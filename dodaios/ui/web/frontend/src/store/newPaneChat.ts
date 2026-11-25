@@ -231,6 +231,7 @@ export function createNewPaneChatStore(options: NewPaneChatOptions) {
 
       newChat: () => set({ draft: seedDraft(first, options.folder) }),
       openSession: () => undefined,
+      restoreLastChat: async () => { /* Split panes already own their session identity. */ },
       preloadSession: () => undefined,
       removeSession: async () => undefined,
 

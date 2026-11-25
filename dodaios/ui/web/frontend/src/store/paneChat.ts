@@ -624,6 +624,7 @@ export function createPaneChatStore(options: PaneChatStoreOptions) {
       },
       newChat: () => undefined,
       openSession: () => undefined,
+      restoreLastChat: async () => { /* Split panes already own their session identity. */ },
       preloadSession: () => undefined,
       removeSession: async () => undefined,
 
