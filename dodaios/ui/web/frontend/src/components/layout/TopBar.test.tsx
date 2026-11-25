@@ -174,11 +174,12 @@ describe("TopBar caption on every section", () => {
 describe("TopBar place switch", () => {
   afterEach(() => cleanup());
 
-  it("centres Dodaios / IDE in the caption on every section", () => {
+  it("keeps the unified caption free of the former Chat/IDE switch on every section", () => {
     for (const section of ["chats", "agentic-ide", "dictation"] as const) {
       useEventStore.setState({ activeSection: section });
       render(<TopBar />);
-      expect(screen.getByTestId("surface-switch")).toBeTruthy();
+      expect(screen.queryByTestId("surface-switch")).toBeNull();
+      expect(screen.getByTestId("window-caption")).toBeTruthy();
       expect(screen.queryByTestId("ide-layout-switch")).toBeNull();
       cleanup();
     }

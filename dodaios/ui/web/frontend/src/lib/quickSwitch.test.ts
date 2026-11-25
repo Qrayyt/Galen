@@ -57,11 +57,13 @@ describe("ranking", () => {
   it("lists, for one letter, exactly the names starting with it, A to Z", () => {
     const rows = rankQuickSwitch("a", englishLabel);
     const labels = rows.map((r) => r.label);
-    expect(labels.length).toBeGreaterThan(3);
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels).toEqual(QUICK_SWITCH_ENTRIES.map(englishLabel).filter(label => label.toLowerCase().startsWith("a")).sort((x, y) => x.localeCompare(y, undefined, { sensitivity: "base" })));
     for (const label of labels) expect(label.toLowerCase().startsWith("a")).toBe(true);
     const sorted = [...labels].sort((x, y) => x.localeCompare(y, undefined, { sensitivity: "base" }));
     expect(labels).toEqual(sorted);
-    expect(labels).toContain("Agentic IDE");
+    expect(labels).not.toContain("Agentic IDE");
+    expect(rankQuickSwitch("w", englishLabel).map(r => r.label)).toContain("Work");
     expect(labels).toContain("Appshots");
     // The library of everything the assistant made is listed under its name.
     expect(rankQuickSwitch("n", englishLabel).map((r) => r.label)).toContain("Nodes");

@@ -13,6 +13,9 @@ vi.mock("../data", async (load) => ({
 vi.mock("./AgentModelPicker", () => ({ AgentModelPicker: () => null }));
 
 beforeEach(() => {
+  // Drafts now persist across store instances with the same durable namespace.
+  // Each fixture starts with a fresh local profile, while remounts within it retain drafts.
+  localStorage.clear();
   vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ commands: [] }))));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });

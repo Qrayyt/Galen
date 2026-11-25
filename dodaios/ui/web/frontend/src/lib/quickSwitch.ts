@@ -69,7 +69,7 @@ export interface QuickSwitchEntry {
 const ALIASES: Partial<Record<string, readonly string[]>> = {
   voice: ["home", "start", "talk", "speak"],
   chat: ["home", "start", "message", "conversation"],
-  "agentic-ide": ["ide", "code", "coding", "terminal", "panes", "workspace"],
+  "agentic-ide": ["agentic", "agentic ide", "ide", "code", "coding", "terminal", "panes", "workspace"],
   "agentic-ide-classic": ["terminal", "grid", "panes"],
   agents: ["society", "world", "team", "routines", "schedule", "automations"],
   settings: ["preferences", "options", "config", "configuration", "general"],

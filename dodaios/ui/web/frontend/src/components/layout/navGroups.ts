@@ -176,7 +176,7 @@ export const NAV_GROUPS: NavItem[][] = [
       id: "agentic-ide",
       labelKey: "nav.agentic_ide",
       icon: CodeIcon,
-      fallbackLabel: "Agentic IDE",
+      fallbackLabel: "Work",
       // The classic grid is the same destination as far as the row is
       // concerned: someone who stepped back into it should still see where
       // they are in the navigation.

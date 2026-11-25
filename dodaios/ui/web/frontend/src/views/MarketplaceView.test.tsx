@@ -458,7 +458,7 @@ describe("MarketplaceView", () => {
 
     fireEvent.click(screen.getByText("Sentry"));
     await screen.findByTestId("marketplace-entry");
-    fireEvent.click(screen.getByRole("button", { name: "GLNT" }));
+    fireEvent.click(within(screen.getByTestId("marketplace-entry")).getByRole("button", { name: "GLNT" }));
 
     expect(screen.queryByTestId("marketplace-entry")).toBeNull();
     expect((screen.getByLabelText(/Search plugins/i) as HTMLInputElement).value).toBe("sentry");

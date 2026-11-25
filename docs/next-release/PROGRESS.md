@@ -418,3 +418,9 @@ starting the scoped project-context injection block.
 - Latest blank-draft change `1535f94` has its own queued focused check. Candidate marker updated to exercise this exact revision too; do not treat an older installer as a build of the newer code.
 - Rollback: keep the currently published Preview 5 unchanged. Before testing an installer, back up the entire local Galen data directory with the app stopped, including SQLite databases and their sidecars. If reverting the application, restore the backup made by the matching application version; do not assume an older binary can interpret every newer state field. GLNT prior skill versions and removed skills are retained outside the active skill directory. No production server modifications, release publication or user database changes occurred in this session.
 - Open acceptance work remains in the status table; no completed desktop smoke or live GLNT deployment is asserted. CLI-bound mode changes intentionally refuse transitions that would discard provider conversation handles.
+
+## Full frontend regression repair (2026-11-25)
+
+- Audited branch head `13645a24`; focused checks [45632070471](https://github.com/Qrayyt/Galen/actions/runs/45632070471) succeeded. Windows candidate [45632070591](https://github.com/Qrayyt/Galen/actions/runs/45632070591) backend passed; frontend had 6,440 passing and four failing tests (604 files); Windows packaging was skipped.
+- Corrected the marketplace back-button test to scope its query to the entry page rather than the separate GLNT catalog button; aligned caption and quick-switch assertions with the Work navigation, retaining legacy search aliases; isolated durable composer draft storage between independent test fixtures without changing application persistence.
+- Candidate marker will be advanced to this repair and the exact new source will require CI evidence. No tests skipped and no acceptance status promoted; no release or server change.
