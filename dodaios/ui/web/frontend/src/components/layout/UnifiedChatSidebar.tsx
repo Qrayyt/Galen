@@ -25,6 +25,8 @@ import {
   deleteAgentChatSession,
   fetchAgentChatSessions,
   patchAgentChatSession,
+  searchAgentChatSessions,
+  type ChatSearchHit,
   type AgentChatSession,
 } from "@/lib/agentChatApi";
 import { useT } from "@/i18n";
@@ -60,6 +62,7 @@ export function UnifiedChatSidebar() {
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [query, setQuery] = useState("");
+  const [hits, setHits] = useState<{ query: string; rows: Array<ChatSearchHit & { mode: "chat" | "work" }>; failed: boolean } | null>(null);
   const [newMode, setNewMode] = useState<"chat" | "work">("chat");
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectName, setProjectName] = useState("");
@@ -86,13 +89,38 @@ export function UnifiedChatSidebar() {
     return () => window.clearInterval(timer);
   }, [refresh]);
 
+  const needle = query.trim();
+  useEffect(() => {
+    if (!needle) return;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      void Promise.allSettled([
+        searchAgentChatSessions(needle, { surface: "jarvis", signal: controller.signal, limit: 100 }),
+        searchAgentChatSessions(needle, { surface: "agent", signal: controller.signal, limit: 100 }),
+      ]).then(([chat, work]) => {
+        if (controller.signal.aborted) return;
+        setHits({ query: needle, failed: chat.status === "rejected" || work.status === "rejected", rows: [
+          ...(chat.status === "fulfilled" ? chat.value.map((hit) => ({ ...hit, mode: "chat" as const })) : []),
+          ...(work.status === "fulfilled" ? work.value.map((hit) => ({ ...hit, mode: "work" as const })) : []),
+        ] });
+      });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [needle]);
+
   const sessionsById = useMemo(
     () => new Map(sessions.map((session) => [session.session_id, session])),
     [sessions],
   );
 
   const rows = useMemo<UnifiedRow[]>(() => {
-    const chats = chatRows.map((row) => {
+    const known = new Map(chatRows.filter((row) => row.kind === "voice" || sessionsById.get(row.id)?.surface !== "agent").map((row) => [row.id, row]));
+    for (const session of sessions) {
+      if (session.surface !== "jarvis" || known.has(session.session_id)) continue;
+      known.set(session.session_id, { kind: "agent", id: session.session_id, title: session.title, preview: session.preview,
+        updatedMs: session.updated_ms, messageCount: session.message_count, provider: session.provider, raw: null });
+    }
+    const chats = [...known.values()].map((row) => {
       const session = row.kind === "agent" ? sessionsById.get(row.id) ?? null : null;
       const label = chatRowLabel(row, t);
       return {
@@ -121,10 +149,21 @@ export function UnifiedChatSidebar() {
   }, [chatRows, sessions, sessionsById, t]);
 
   const visible = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return rows;
-    return rows.filter((row) => `${row.title}\n${row.preview}`.toLocaleLowerCase().includes(needle));
-  }, [query, rows]);
+    const folded = needle.toLocaleLowerCase();
+    if (!folded) return rows;
+    const results = new Map(rows.filter((row) => `${row.title}\n${row.preview}`.toLocaleLowerCase().includes(folded)).map((row) => [`${row.mode}:${row.id}`, row]));
+    const byKey = new Map(rows.map((row) => [`${row.mode}:${row.id}`, row]));
+    for (const hit of hits?.query === needle ? hits.rows : []) {
+      const key = `${hit.mode}:${hit.session_id}`;
+      const existing = byKey.get(key);
+      if (existing) { results.set(key, { ...existing, preview: hit.snippet || existing.preview }); continue; }
+      const fallback: UnifiedRow = { id: hit.session_id, mode: hit.mode, title: hit.title, preview: hit.snippet, updatedMs: hit.updated_ms, projectId: "", session: null };
+      if (hit.mode === "chat") fallback.chat = { kind: "agent", id: hit.session_id, title: hit.title, preview: hit.snippet,
+        updatedMs: hit.updated_ms, messageCount: hit.matches, provider: "", raw: null };
+      results.set(key, fallback);
+    }
+    return [...results.values()].sort((a, b) => b.updatedMs - a.updatedMs);
+  }, [needle, rows, hits]);
 
   const ungrouped = visible.filter((row) => !row.projectId || !projects.some((project) => project.project_id === row.projectId));
   const start = (projectId?: string) => {
@@ -208,11 +247,14 @@ export function UnifiedChatSidebar() {
           <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <input
             value={query}
+            maxLength={200}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t("all_chats.search_placeholder")}
             className="h-9 w-full rounded-lg border border-border bg-background pl-8 pr-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
         </label>
+        {needle && hits?.query !== needle && <p role="status" className="text-xs text-muted-foreground">{t("common.loading")}</p>}
+        {needle && hits?.query === needle && hits.failed && <p role="status" className="text-xs text-muted-foreground">{t("common.error_generic")}</p>}
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 scrollbar-jarvis">
@@ -291,7 +333,7 @@ export function UnifiedChatSidebar() {
                     </>
                   )}
                 </div>
-                {!project.collapsed && (
+                {(!project.collapsed || Boolean(needle)) && (
                   <ul className="ml-4 border-l border-border pl-1">
                     {projectRows.map((row) => <HistoryRow key={`${row.mode}-${row.id}`} row={row} projects={projects}
                       active={row.mode === "work" ? activeWorkId === row.id : Boolean(row.chat && isActive(row.chat))}
