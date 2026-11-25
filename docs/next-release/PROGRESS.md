@@ -429,3 +429,8 @@ starting the scoped project-context injection block.
 
 - Updated mode-specific user-facing labels in six primary dictionaries and the audited nested custom CLI, computers, onboarding, self-build and society dictionaries. Kept compatibility keys and provider handles unchanged. Added a six-locale fixture for secondary labels.
 - Task 7 remains in progress pending CI and accessibility acceptance. The candidate marker is advanced; the source of the resulting workflow is the actual pushed SHA. No release or server changes.
+
+## Native UI stream safety and provider-text fixture checkpoint
+
+- Native UI now proves closure of its own Markdown node before exposing controls, including nested quoted fences. Strict native charts reject undeclared nested properties; duplicate option labels are rejected to avoid ambiguous restored state. Added parser and rendered streaming fixtures, including message-specific state restoration and malformed source fallback. Updated the native UI contract to reflect actual persisted state.
+- Fixtures represent normalized provider text chunk boundaries, not live provider API integrations. Tasks 20 and 22 still require representative provider/runtime acceptance; no status promoted without CI.

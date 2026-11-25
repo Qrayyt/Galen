@@ -4,4 +4,6 @@ Use ordinary Markdown plus optional fenced `galen-ui` blocks. A block is strict 
 
 An open final fence displays a pending state, and invalid closed JSON remains readable as source. Essential prose must precede the block. Existing chat HTML previews are inert; chat cannot opt in to executing scripts. Other explicitly opened legacy artifact surfaces retain their existing separate behavior.
 
-Current limitations: native control state is ephemeral pending message-scoped persistence; no tool-submit action; diagram is a sequence, not arbitrary graph; rich provider streaming and desktop acceptance remain to be exercised.
+Current limitations: native control state is persisted locally for stable message IDs (ephemeral otherwise), bounded to 100 records; no tool-submit action; diagram is a sequence, not arbitrary graph; rich provider streaming and desktop acceptance remain to be exercised.
+
+The streaming renderer requires a matching closing marker for the specific Markdown node before exposing interactive controls. Synthetic normalized text-chunk fixtures exercise different chunk boundaries; these are not live provider API tests.

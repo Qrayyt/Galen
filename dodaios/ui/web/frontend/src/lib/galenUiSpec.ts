@@ -38,15 +38,30 @@ function block(v: unknown): NativeBlock | null {
       return keys(v, ["type", "label", "operation", "a", "b"]) && str(v.label, 120) && (v.operation === "add" || v.operation === "subtract" || v.operation === "multiply" || v.operation === "divide") && number(v.a) && number(v.b)
         ? { type: v.type, label: v.label, operation: v.operation, a: v.a, b: v.b } : null;
     case "input":
-      return keys(v, ["type", "label", "options"]) && str(v.label, 120) && strings(v.options, 12, 150) ? { type: v.type, label: v.label, options: v.options } : null;
+      return keys(v, ["type", "label", "options"]) && str(v.label, 120) && strings(v.options, 12, 150) && new Set(v.options).size === v.options.length ? { type: v.type, label: v.label, options: v.options } : null;
     case "chart": {
       if (!keys(v, ["type", "spec"]) || !object(v.spec)) return null;
+      // The legacy chart parser deliberately accepts aliases and ignores extra
+      // fields. Native UI's versioned contract is stricter: reject model-defined
+      // properties instead of silently interpreting a different schema.
+      if (!keys(v.spec, ["type", "title", "note", "subtitle", "source", "unit", "value", "delta", "x", "labels", "data", "values", "series"])) return null;
+      if (Array.isArray(v.spec.series) && v.spec.series.some(item => !object(item) || !keys(item, ["name", "data", "values"]))) return null;
       const spec = parseChartSpec(JSON.stringify(v.spec));
       if (!spec || spec.series.some(series => series.data.some(point => point !== null && !Number.isFinite(point)))) return null;
       return { type: v.type, spec };
     }
     default: return null;
   }
+}
+
+/** Prove that this CommonMark code node has its own matching closing marker. */
+export function nativeFenceClosed(markdown: string, start?: number, end?: number): boolean {
+  if (start === undefined || end === undefined || start < 0 || end <= start || end > markdown.length) return false;
+  const lines = markdown.slice(start, end).trimEnd().split("\n");
+  if (lines.length < 3) return false;
+  const opening = /^[\t >]*(`{3,}|~{3,})[ \t]*galen-ui(?:[ \t].*)?$/i.exec(lines[0].replace(/\r$/, ""));
+  const closing = /^[\t >]*(`{3,}|~{3,})[ \t]*$/.exec(lines[lines.length - 1].replace(/\r$/, ""));
+  return !!opening && !!closing && opening[1][0] === closing[1][0] && closing[1].length >= opening[1].length;
 }
 
 export function parseNativeUi(source: string): NativeUi | null {

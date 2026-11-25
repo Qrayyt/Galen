@@ -7,7 +7,7 @@ import { openExternalUrl } from "@/lib/openExternal";
 import { openLocalPath } from "@/lib/openLocalPath";
 import { readFence, visualFenceLanguage } from "@/lib/visualFence";
 import { CHART_FENCE, endsInOpenFence, parseChartSpec } from "@/lib/chartSpec";
-import { GALEN_UI_FENCE, parseNativeUi } from "@/lib/galenUiSpec";
+import { GALEN_UI_FENCE, nativeFenceClosed, parseNativeUi } from "@/lib/galenUiSpec";
 import { chatLinkAction, chatUrlTransform, localPathFromChatHref, pageRefFromChatHref, threadRefFromChatHref } from "./chatLinks";
 import { PageLink } from "./PageCard";
 import { WebLink } from "./WebLink";
@@ -82,7 +82,9 @@ const NativeMessageContext = createContext<{ messageId?: string; live?: boolean 
 function NativeBlock({ code, start, end }: { code: string; start?: number; end?: number }) {
   const body = useContext(MarkdownBodyContext);
   const { messageId, live } = useContext(NativeMessageContext);
-  const incomplete = endsInOpenFence(body) && (end === undefined || body.slice(end).trim() === "");
+  // Check this AST node, not the last top-level fence in the entire message.
+  // A quoted/list-nested open fence must not expose interactive controls early.
+  const incomplete = !nativeFenceClosed(body, start, end);
   const pending = incomplete && live !== false;
   const spec = useMemo(() => parseNativeUi(code), [code]);
   if (pending) return <div role="status" className="my-3 rounded-lg border border-border p-3 text-xs text-muted-foreground">{translate("common.loading")}</div>;
