@@ -463,7 +463,12 @@ log "building the disk image"
 if building; then
   "${PYTHON}" "${SCRIPT_DIR}/make_galen_dmg_art.py" --stage "${STAGE_DIR}"
 fi
-create_dmg "${STAGE_DIR}" "${DMG_PATH}"
+if building; then
+  command -v dmgbuild >/dev/null 2>&1 || die "Install dmgbuild==1.6.7 before packaging Galen"
+  run dmgbuild -s "${SCRIPT_DIR}/dmg_settings.py" -D "app=${APP_BUNDLE}" -D "background=${DIST_DIR}/galen-dmg-background.png" "${VOLUME_NAME}" "${DMG_PATH}"
+else
+  create_dmg "${STAGE_DIR}" "${DMG_PATH}"
+fi
 run rm -rf "${STAGE_DIR}"
 
 if [ "${SIGNED_FOR_DISTRIBUTION}" = "1" ]; then
