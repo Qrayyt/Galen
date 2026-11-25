@@ -162,7 +162,7 @@ export async function saveChatAppState(state: ChatAppState): Promise<ChatAppStat
   const res = await fetch("/api/chats/state", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(state),
+    body: JSON.stringify({ state }),
   });
   if (!res.ok) throw new ChatsApiError("state-save-failed", res.status);
   return ((await res.json()) as { state: ChatAppState }).state;

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { createChatProject, fetchChatProjects, patchChatProject } from "./chatsApi";
+import { createChatProject, fetchChatProjects, patchChatProject, saveChatAppState } from "./chatsApi";
 
 const project = {
   id: "project-123", name: "Galen", icon: "", instructions: "", context_files: [],
@@ -28,4 +28,12 @@ describe("chat project API wire contract", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response([{ ...project, id: "" }])));
     await expect(fetchChatProjects()).rejects.toThrow("project-response-invalid-id");
   });
+});
+
+test("writes app state using the backend envelope", async () => {
+  const state = { active_kind: "text" as const, active_id: "chat-1" };
+  const fetch = vi.fn().mockResolvedValue(response({ state }));
+  vi.stubGlobal("fetch", fetch);
+  expect(await saveChatAppState(state)).toEqual(state);
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ state });
 });
