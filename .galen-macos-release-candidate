@@ -1,4 +1,6 @@
 Galen 1.0 Preview 5 macOS candidate
 Platforms: Apple Silicon arm64; Intel x64
 Publish only verified notarized images to existing Preview 5 release
-Revision: 1
+Revision: 2
+
+Retry: store verified DMGs directly in Releases; unsigned builds in private drafts.
