@@ -19,7 +19,7 @@ function setup(enabled = true) {
   terminal.focus();
   const key = (init: KeyboardEventInit & { key: string }) => act(() => { fireEvent.keyDown(document.activeElement ?? terminal, init); });
   const leader = () => key({ key: "b", code: "KeyB", ctrlKey: true });
-  const isOn = () => screen.queryByRole("dialog", { name: "IDE shortcuts" }) !== null;
+  const isOn = () => screen.queryByRole("dialog", { name: "Work shortcuts" }) !== null;
   return { actions, renames, terminalKeys, passed, key, leader, isOn, view };
 }
 

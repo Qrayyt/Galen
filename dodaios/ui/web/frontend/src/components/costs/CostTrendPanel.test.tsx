@@ -89,7 +89,7 @@ describe("CostTrendPanel", () => {
     await waitFor(() => expect(maxAxisTick(container)).toBeGreaterThan(100_000));
     expect(fetcher).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     await waitFor(() => expect(maxAxisTick(container)).toBeLessThan(2));
     const params = new URL(String(fetcher.mock.calls[0][0]), "http://localhost").searchParams;
     expect(params.getAll("surface")).toEqual(["agent-chat", "mission", "jarvis-voice"]);
@@ -105,7 +105,7 @@ describe("CostTrendPanel", () => {
 
     fireEvent.click(screen.getByRole("tab", { name: "Tokens" }));
     await waitFor(() => expect(maxAxisTick(container)).toBeLessThan(1000));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     await waitFor(() => expect(maxAxisTick(container)).toBeGreaterThanOrEqual(1_000_000));
     expect(JSON.stringify(all)).toBe(original);
   });
@@ -114,7 +114,7 @@ describe("CostTrendPanel", () => {
     const fetcher = vi.fn();
     vi.stubGlobal("fetch", fetcher);
     mount(summary(bucket({ agent: 100_000 })), { ...EMPTY_FILTERS, surfaces: ["agentic-ide"] });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     expect(screen.getByText("Nothing spent in this range.")).toBeTruthy();
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -130,7 +130,7 @@ describe("CostTrendPanel", () => {
       ...EMPTY_FILTERS, surfaces: ["agentic-ide", "jarvis-voice"],
       sinceMs: 1000, untilMs: 2000, providers: ["example"],
     });
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     await waitFor(() => expect(screen.getByText("Text to speech")).toBeTruthy());
     expect(screen.queryByText("Coding agent")).toBeNull();
     const params = new URL(String(fetcher.mock.calls[0][0]), "http://localhost").searchParams;
@@ -146,7 +146,7 @@ describe("CostTrendPanel", () => {
     let reject!: (error: Error) => void;
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise((_resolve, fail) => { reject = fail; })));
     const { container } = mount(summary(bucket({ agent: 100_000 })));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     expect(screen.getByRole("status")).toBeTruthy();
     expect(container.querySelector(".recharts-bar")).toBeNull();
     reject(new Error("offline"));
@@ -172,7 +172,7 @@ describe("CostTrendPanel", () => {
     clients.push(client);
     const { container } = render(<QueryClientProvider client={client}><CostsView /></QueryClientProvider>);
     await waitFor(() => expect(maxAxisTick(container)).toBeGreaterThan(100_000));
-    fireEvent.click(screen.getByRole("checkbox", { name: "Include Agentic IDE" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include Work" }));
     await waitFor(() => expect(maxAxisTick(container)).toBeLessThan(2));
     filtered = summary(bucket({ tts: 50 }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));

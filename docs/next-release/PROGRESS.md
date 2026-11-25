@@ -434,3 +434,7 @@ starting the scoped project-context injection block.
 
 - Native UI now proves closure of its own Markdown node before exposing controls, including nested quoted fences. Strict native charts reject undeclared nested properties; duplicate option labels are rejected to avoid ambiguous restored state. Added parser and rendered streaming fixtures, including message-specific state restoration and malformed source fallback. Updated the native UI contract to reflect actual persisted state.
 - Fixtures represent normalized provider text chunk boundaries, not live provider API integrations. Tasks 20 and 22 still require representative provider/runtime acceptance; no status promoted without CI.
+
+## Full regression follow-up
+
+- Windows candidate [45637491642](https://github.com/Qrayyt/Galen/actions/runs/45637491642) on `7931080` succeeded (backend, frontend, Windows packaging). Latest focused checks [45638183943](https://github.com/Qrayyt/Galen/actions/runs/45638183943) on `a697614` succeeded. Full candidate [45638184039](https://github.com/Qrayyt/Galen/actions/runs/45638184039) passed backend but 12 frontend assertions in four files still expected old IDE labels (6,572 tests passed). Updated those assertions to the actual Work labels; no functional assertions removed or tests skipped. Windows packaging of the latest revision remains pending.

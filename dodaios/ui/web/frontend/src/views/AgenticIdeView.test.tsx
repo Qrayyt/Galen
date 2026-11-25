@@ -245,7 +245,7 @@ describe("Agentic IDE project flow", () => {
     await screen.findByRole("button", { name: "Pane add" });
     await waitFor(() => expect(api.fetchIdeAgents).toHaveBeenCalled());
     fireEvent.keyDown(document.body, { key: "b", code: "KeyB", ctrlKey: true });
-    expect(await screen.findByRole("dialog", { name: "IDE shortcuts" })).toBeTruthy();
+    expect(await screen.findByRole("dialog", { name: "Work shortcuts" })).toBeTruthy();
     fireEvent.keyDown(document.body, { key: "x", code: "KeyX" });
     fireEvent.keyDown(document.body, { key: "ArrowRight", code: "ArrowRight" });
     await waitFor(() => expect(api.addTerminal).toHaveBeenCalledWith({ workspace_id: "w1", agent: "codex", anchor: "T1", direction: "right" }, { onMessage: expect.any(Function) }));

@@ -516,7 +516,7 @@ describe("AssistantPanel", () => {
   it("says so while no chat was handed a task and nothing was made yet", async () => {
     mount([]);
     await waitFor(() => expect(screen.getByTestId("assistant-activity-empty").textContent)
-      .toBe("Nothing yet. Chats in the Agentic IDE that Nova hands a task to show up here."));
+      .toBe("Nothing yet. Chats in Work that Nova hands a task to show up here."));
     await waitFor(() => expect(screen.getByTestId("assistant-outputs-empty").textContent)
       .toBe("Nothing yet. Files Nova makes show up here."));
   });
