@@ -22,6 +22,7 @@ import {
   moveVoiceConversation,
   invalidateConversations,
   patchChatProject,
+  previewProjectDocument,
   type ChatProject,
 } from "@/lib/chatsApi";
 import {
@@ -90,7 +91,7 @@ export function UnifiedChatSidebar() {
   const [documents, setDocuments] = useState<Record<string, string>>({});
   const [readingFiles, setReadingFiles] = useState(false);
   const locale = useUiLanguage();
-  const contextCopy = ({ ru: ["Инструкции проекта", "Текстовые файлы проекта", "Текст файлов сохраняется локально и передаётся модели только в чатах проекта. До 8 файлов, 16 000 символов на файл, 48 000 всего.", "Не удалось добавить файл: проверьте формат и лимиты."], en: ["Project instructions", "Project text files", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total.", "Could not add the file: check format and limits."] } as Record<string, string[]>)[locale] ?? ["Project instructions", "Project text files", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total.", "Could not add the file: check format and limits."];
+  const contextCopy = ({ ru: ["Инструкции проекта", "Документы проекта", "Текст файлов сохраняется локально и передаётся модели только в чатах проекта. До 8 файлов, 16 000 символов на файл, 48 000 всего. PDF и офисные документы: до 8 МБ, только читаемый текст.", "Не удалось добавить файл: проверьте формат и лимиты."], en: ["Project instructions", "Project documents", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total. PDF and Office documents: up to 8 MB, readable text only.", "Could not add the file: check format and limits."] } as Record<string, string[]>)[locale] ?? ["Project instructions", "Project documents", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total. PDF and Office documents: up to 8 MB, readable text only.", "Could not add the file: check format and limits."];
   const [confirmProject, setConfirmProject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -228,8 +229,10 @@ export function UnifiedChatSidebar() {
     try {
       const next = { ...documents };
       for (const file of Array.from(files)) {
-        if (!/\.(txt|md|csv|json|log|yaml|yml|tsv)$/i.test(file.name) || file.size > 64000 || file.name.length > 180) throw new Error("format");
-        const body = await file.text();
+        const plain = /\.(txt|md|csv|json|log|yaml|yml|tsv)$/i.test(file.name);
+        const rich = /\.(pdf|docx|xlsx|pptx|odt|ods|odp|rtf|epub)$/i.test(file.name);
+        if ((!plain && !rich) || file.size > (plain ? 64000 : 8 * 1024 * 1024) || file.name.length > 180) throw new Error("format");
+        const body = plain ? await file.text() : await previewProjectDocument(file);
         if (body.length > 16000 || body.includes("\0")) throw new Error("length");
         next[file.name] = body;
       }
@@ -383,12 +386,12 @@ export function UnifiedChatSidebar() {
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                         <Plus aria-hidden className="h-3 w-3" />
                       </button>
-                      <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); setIconValue(project.icon); setInstructions(project.instructions ?? ""); setDocuments(project.context_documents ?? {}); setConfirmProject(null); }}
+                      <button type="button" disabled={busy || readingFiles} onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); setIconValue(project.icon); setInstructions(project.instructions ?? ""); setDocuments(project.context_documents ?? {}); setConfirmProject(null); }}
                         aria-label={t("common.edit")} title={t("common.edit")}
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
                         <Pencil aria-hidden className="h-3 w-3" />
                       </button>
-                      <button type="button" onClick={() => { setConfirmProject(project.project_id); setRenaming(null); }}
+                      <button type="button" disabled={busy || readingFiles} onClick={() => { setConfirmProject(project.project_id); setRenaming(null); }}
                         aria-label={t("ide_threads.remove_project")} title={t("ide_threads.remove_project")}
                         className="rounded p-1 text-muted-foreground hover:text-destructive focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
                         <Trash2 aria-hidden className="h-3 w-3" />
@@ -411,7 +414,7 @@ export function UnifiedChatSidebar() {
                         className="mt-1 w-full rounded border border-border bg-background p-2 text-sm text-foreground" />
                     </label>
                     <label className="block text-xs text-muted-foreground">{contextCopy[1]}
-                      <input type="file" multiple accept=".txt,.md,.csv,.json,.log,.yaml,.yml,.tsv" disabled={busy || readingFiles}
+                      <input type="file" multiple accept=".txt,.md,.csv,.json,.log,.yaml,.yml,.tsv,.pdf,.docx,.xlsx,.pptx,.odt,.ods,.odp,.rtf,.epub" disabled={busy || readingFiles}
                         onChange={(event) => { void addDocuments(event.target.files); event.target.value = ""; }} className="mt-1 w-full text-xs" />
                     </label>
                     <p className="text-xs text-muted-foreground">{contextCopy[2]}</p>

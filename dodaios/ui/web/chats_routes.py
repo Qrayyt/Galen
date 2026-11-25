@@ -29,6 +29,8 @@ import time
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from starlette.concurrency import run_in_threadpool
+from pathlib import PurePath
 from pydantic import BaseModel, Field
 
 from dodaios.sessions import chat_titles
@@ -615,6 +617,45 @@ async def create_chat(request: Request, body: NewChatRequest | None = None) -> N
         mode=created["mode"],
         project_id=created["project_id"],
     )
+
+
+_PROJECT_RICH_DOCUMENTS = {
+    ".pdf": "pdf", ".docx": "docx", ".xlsx": "xlsx", ".pptx": "pptx",
+    ".odt": "odf", ".ods": "odf", ".odp": "odf", ".rtf": "rtf", ".epub": "epub",
+}
+_PROJECT_DOCUMENT_UPLOAD_MAX = 8 * 1024 * 1024
+
+
+@router.post("/projects/document-preview")
+async def preview_project_document(
+    request: Request, filename: str = Query(min_length=1, max_length=180),
+) -> dict[str, str]:
+    """Extract a user-selected file locally without storing it or invoking a model."""
+    from dodaios.agent_chat.project_context import validate_documents
+    from dodaios.documents.extract import extract_text
+
+    kind = _PROJECT_RICH_DOCUMENTS.get(PurePath(filename).suffix.lower())
+    if kind is None:
+        raise HTTPException(415, "project-document-format")
+    try:
+        validate_documents({filename: ""})
+    except ValueError as exc:
+        raise HTTPException(400, "project-document-name") from exc
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/octet-stream":
+        raise HTTPException(415, "project-document-content-type")
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > _PROJECT_DOCUMENT_UPLOAD_MAX:
+            raise HTTPException(413, "project-document-size")
+        body.extend(chunk)
+    result = await run_in_threadpool(extract_text, bytes(body), filename=filename)
+    if not result.ok or result.kind != kind or not result.text.strip():
+        raise HTTPException(422, "project-document-unreadable")
+    try:
+        validate_documents({filename: result.text})
+    except ValueError as exc:
+        raise HTTPException(422, "project-document-content-limit") from exc
+    return {"name": filename, "text": result.text}
 
 
 @router.get("/projects", response_model=list[ProjectResponse])

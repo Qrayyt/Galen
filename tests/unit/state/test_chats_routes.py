@@ -430,3 +430,41 @@ async def test_voice_archive_project_move_search_and_safe_delete() -> None:
         assert detail["project_id"] is None
         assert [m["text"] for m in detail["messages"]] == ["how is the weather", "Sunny."]
         assert (await client.patch("/api/chats/voice/missing/project", json={"project_id": a})).status_code == 404
+
+
+async def test_project_rich_document_preview_is_local_and_not_persisted() -> None:
+    from io import BytesIO
+    from zipfile import ZipFile
+
+    app, store = await _make_app()
+    raw = BytesIO()
+    with ZipFile(raw, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            '<w:body><w:p><w:r><w:t>Private project notes</w:t></w:r></w:p></w:body></w:document>',
+        )
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/chats/projects/document-preview", params={"filename": "notes.docx"},
+            content=raw.getvalue(), headers={"Content-Type": "application/octet-stream"},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["name"] == "notes.docx"
+        assert "Private project notes" in response.json()["text"]
+        bad = await client.post(
+            "/api/chats/projects/document-preview", params={"filename": "fake.docx"},
+            content=b"not a Word document", headers={"Content-Type": "application/octet-stream"},
+        )
+        assert bad.status_code == 422
+        invalid = await client.post(
+            "/api/chats/projects/document-preview", params={"filename": "../notes.docx"},
+            content=raw.getvalue(), headers={"Content-Type": "application/octet-stream"},
+        )
+        assert invalid.status_code == 400
+        too_large = await client.post(
+            "/api/chats/projects/document-preview", params={"filename": "huge.pdf"},
+            content=b"x" * (8 * 1024 * 1024 + 1), headers={"Content-Type": "application/octet-stream"},
+        )
+        assert too_large.status_code == 413
+    assert store.list_projects() == []

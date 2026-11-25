@@ -150,6 +150,21 @@ export async function patchTextConversation(
   return (await res.json()) as ConversationDetail;
 }
 
+/** A user-selected document is parsed locally; only its returned text is saved on Apply. */
+export async function previewProjectDocument(file: File): Promise<string> {
+  if (file.size > 8 * 1024 * 1024) throw new ChatsApiError("project-document-size", 413);
+  const params = new URLSearchParams({ filename: file.name });
+  const res = await fetch(`/api/chats/projects/document-preview?${params}`, {
+    method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: file,
+  });
+  if (!res.ok) throw new ChatsApiError("project-document-preview-failed", res.status);
+  const result = await res.json() as { name?: unknown; text?: unknown };
+  if (result.name !== file.name || typeof result.text !== "string" || !result.text.trim() || result.text.length > 16000 || result.text.includes("\0")) {
+    throw new Error("project-document-preview-invalid");
+  }
+  return result.text;
+}
+
 export async function fetchChatProjects(): Promise<ChatProject[]> {
   const res = await fetch("/api/chats/projects");
   if (!res.ok) throw new ChatsApiError("projects-failed", res.status);

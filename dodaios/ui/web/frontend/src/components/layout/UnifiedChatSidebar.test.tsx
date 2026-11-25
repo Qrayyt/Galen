@@ -4,7 +4,7 @@ import { UnifiedChatSidebar } from "./UnifiedChatSidebar";
 
 const mock = vi.hoisted(() => ({
   fetchSessions: vi.fn(), fetchProjects: vi.fn(), search: vi.fn(), searchVoice: vi.fn(), moveVoice: vi.fn(), invalidateConversations: vi.fn(),
-  patchProject: vi.fn(), deleteProject: vi.fn(), createProject: vi.fn(),
+  patchProject: vi.fn(), deleteProject: vi.fn(), createProject: vi.fn(), previewDocument: vi.fn(),
   patchSession: vi.fn(), deleteSession: vi.fn(),
   newChat: vi.fn(), newThread: vi.fn(), setLayout: vi.fn(), setSection: vi.fn(),
   openChat: vi.fn(), openWork: vi.fn(), removeChat: vi.fn(), pushToast: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock("@/components/home/chatRows", () => ({
 }));
 vi.mock("@/lib/chatsApi", () => ({
   fetchChatProjects: mock.fetchProjects, createChatProject: mock.createProject, searchVoiceArchive: mock.searchVoice, moveVoiceConversation: mock.moveVoice, invalidateConversations: mock.invalidateConversations,
-  patchChatProject: mock.patchProject, deleteChatProject: mock.deleteProject,
+  patchChatProject: mock.patchProject, deleteChatProject: mock.deleteProject, previewProjectDocument: mock.previewDocument,
 }));
 vi.mock("@/lib/agentChatApi", () => ({
   fetchAgentChatSessions: mock.fetchSessions, searchAgentChatSessions: mock.search,
@@ -102,6 +102,20 @@ describe("unified history and project controls", () => {
     fireEvent.click(within(row).getByRole("button", { name: "common.apply" }));
     await waitFor(() => expect(mock.moveVoice).toHaveBeenCalledWith("archived", "p1"));
     expect(within(await screen.findByRole("region", { name: "Galen" })).getByRole("button", { name: /Voice call/ })).toBeTruthy();
+  });
+
+  it("previews a rich document and saves only its text after project confirmation", async () => {
+    mock.previewDocument.mockResolvedValue("Project-only text");
+    render(<UnifiedChatSidebar />);
+    const group = await screen.findByRole("region", { name: "Galen" });
+    fireEvent.click(within(group).getByRole("button", { name: "common.edit" }));
+    const file = new File(["document bytes"], "notes.docx");
+    fireEvent.change(within(group).getByLabelText("Project documents"), { target: { files: [file] } });
+    expect(await within(group).findByText("notes.docx")).toBeTruthy();
+    expect(mock.previewDocument).toHaveBeenCalledWith(file);
+    expect(mock.patchProject).not.toHaveBeenCalled();
+    fireEvent.click(within(group).getByRole("button", { name: "common.save" }));
+    await waitFor(() => expect(mock.patchProject).toHaveBeenCalledWith("p1", expect.objectContaining({ context_documents: { "notes.docx": "Project-only text" } })));
   });
 
   it("edits an icon and asks for deliberate confirmation before removing project metadata", async () => {
