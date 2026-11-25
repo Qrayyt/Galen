@@ -346,3 +346,9 @@ starting the scoped project-context injection block.
 
 - `d3bddcc`: project deletion now detaches associated agent-backed Chat and Work sessions in addition to legacy text threads; retains sessions, drafts, timestamps and CLI resume handles. Added focused store test. Agent sessions are deliberately retained even if the legacy text deletion flag is set. The two database operations are not atomic; detach precedes metadata deletion to preserve access on failure.
 - Test execution and route-level acceptance still pending. No existing data mutated by this commit; changes affect application behavior only.
+
+## Scoped project context checkpoint
+
+- `c813de1`: additive project text snapshots, explicit size/name validation, runtime-only project briefing passed to brain/API/CLI runners; no automatic filesystem reads from legacy references. Instructions and snapshots are not inserted into stored user messages. Focused isolation and limit tests added.
+- Following frontend commit exposes project instructions and explicit local text-file snapshots. Deleting a snapshot removes it from future prompt construction; no original file is touched. Existing CLI provider history and prior answers may retain previously supplied content; movement does not erase vendor history. Voice context, rich document formats, UI integration tests and full acceptance remain pending.
+- No tests executed yet; no release or server changes. Next: draft restore and safe native UI contract. 

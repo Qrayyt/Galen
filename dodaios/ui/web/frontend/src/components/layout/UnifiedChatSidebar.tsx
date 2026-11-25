@@ -82,6 +82,11 @@ export function UnifiedChatSidebar() {
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [iconValue, setIconValue] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [documents, setDocuments] = useState<Record<string, string>>({});
+  const [readingFiles, setReadingFiles] = useState(false);
+  const locale = useUiLanguage();
+  const contextCopy = ({ ru: ["Инструкции проекта", "Текстовые файлы проекта", "Текст файлов сохраняется локально и передаётся модели только в чатах проекта. До 8 файлов, 16 000 символов на файл, 48 000 всего.", "Не удалось добавить файл: проверьте формат и лимиты."], en: ["Project instructions", "Project text files", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total.", "Could not add the file: check format and limits."] } as Record<string, string[]>)[locale] ?? ["Project instructions", "Project text files", "Text snapshots are stored locally and sent to the model only in project chats. Up to 8 files, 16,000 characters each, 48,000 total.", "Could not add the file: check format and limits."];
   const [confirmProject, setConfirmProject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -206,12 +211,28 @@ export function UnifiedChatSidebar() {
     }
   };
 
+  const addDocuments = async (files: FileList | null) => {
+    if (!files || readingFiles) return;
+    setReadingFiles(true);
+    try {
+      const next = { ...documents };
+      for (const file of Array.from(files)) {
+        if (!/\.(txt|md|csv|json|log|yaml|yml|tsv)$/i.test(file.name) || file.size > 64000 || file.name.length > 180) throw new Error("format");
+        const body = await file.text();
+        if (body.length > 16000 || body.includes("\0")) throw new Error("length");
+        next[file.name] = body;
+      }
+      if (Object.keys(next).length > 8 || Object.values(next).reduce((sum, value) => sum + value.length, 0) > 48000) throw new Error("total");
+      setDocuments(next);
+    } catch { pushToast("error", contextCopy[3]); } finally { setReadingFiles(false); }
+  };
+
   const renameProject = async (project: ChatProject) => {
     const name = renameValue.trim();
-    if (!name || busy) return;
+    if (!name || busy || readingFiles) return;
     setBusy(true);
     try {
-      await patchChatProject(project.project_id, { name, icon: iconValue.trim() });
+      await patchChatProject(project.project_id, { name, icon: iconValue.trim(), instructions, context_documents: documents });
       setRenaming(null);
       await refresh();
     } catch { pushToast("error", t("common.save_failed")); } finally {
@@ -344,7 +365,7 @@ export function UnifiedChatSidebar() {
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                         <Plus aria-hidden className="h-3 w-3" />
                       </button>
-                      <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); setIconValue(project.icon); setConfirmProject(null); }}
+                      <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); setIconValue(project.icon); setInstructions(project.instructions ?? ""); setDocuments(project.context_documents ?? {}); setConfirmProject(null); }}
                         aria-label={t("common.edit")} title={t("common.edit")}
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
                         <Pencil aria-hidden className="h-3 w-3" />
@@ -367,9 +388,22 @@ export function UnifiedChatSidebar() {
                       <input value={iconValue} maxLength={16} onChange={(event) => setIconValue(event.target.value)}
                         className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-sm text-foreground" />
                     </label>
+                    <label className="block text-xs text-muted-foreground">{contextCopy[0]}
+                      <textarea value={instructions} maxLength={100000} rows={4} onChange={(event) => setInstructions(event.target.value)}
+                        className="mt-1 w-full rounded border border-border bg-background p-2 text-sm text-foreground" />
+                    </label>
+                    <label className="block text-xs text-muted-foreground">{contextCopy[1]}
+                      <input type="file" multiple accept=".txt,.md,.csv,.json,.log,.yaml,.yml,.tsv" disabled={busy || readingFiles}
+                        onChange={(event) => { void addDocuments(event.target.files); event.target.value = ""; }} className="mt-1 w-full text-xs" />
+                    </label>
+                    <p className="text-xs text-muted-foreground">{contextCopy[2]}</p>
+                    {Object.keys(documents).map((name) => <div key={name} className="flex items-center gap-1 text-xs">
+                      <span className="min-w-0 flex-1 truncate" title={name}>{name}</span>
+                      <button type="button" disabled={busy || readingFiles} aria-label={`${t("common.delete")} ${name}`} onClick={() => setDocuments((current) => Object.fromEntries(Object.entries(current).filter(([key]) => key !== name)))} className="rounded p-1 hover:bg-secondary"><Trash2 className="h-3 w-3" /></button>
+                    </div>)}
                     <div className="flex justify-end gap-2">
-                      <button type="button" disabled={busy} onClick={() => setRenaming(null)} className="rounded px-2 py-1 text-xs hover:bg-secondary">{t("common.cancel")}</button>
-                      <button type="submit" disabled={busy || !renameValue.trim()} className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">{t("common.save")}</button>
+                      <button type="button" disabled={busy || readingFiles} onClick={() => setRenaming(null)} className="rounded px-2 py-1 text-xs hover:bg-secondary">{t("common.cancel")}</button>
+                      <button type="submit" disabled={busy || readingFiles || !renameValue.trim()} className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">{t("common.save")}</button>
                     </div>
                   </form>
                 )}

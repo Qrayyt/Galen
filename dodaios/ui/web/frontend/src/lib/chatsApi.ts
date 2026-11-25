@@ -36,6 +36,7 @@ export interface ChatProject {
   icon: string;
   instructions: string;
   context_files: string[];
+  context_documents?: Record<string, string>;
   agent_id: string | null;
   collapsed: boolean;
   position: number;
@@ -136,7 +137,7 @@ export async function createChatProject(input: { name: string; icon?: string }):
   return decodeChatProject((await res.json()) as ChatProjectResponse);
 }
 
-export async function patchChatProject(projectId: string, input: Partial<Pick<ChatProject, "name" | "icon" | "instructions" | "context_files" | "agent_id" | "collapsed" | "position">>): Promise<ChatProject> {
+export async function patchChatProject(projectId: string, input: Partial<Pick<ChatProject, "name" | "icon" | "instructions" | "context_files" | "context_documents" | "agent_id" | "collapsed" | "position">>): Promise<ChatProject> {
   const res = await fetch(`/api/chats/projects/${encodeURIComponent(projectId)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },

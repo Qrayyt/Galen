@@ -86,7 +86,7 @@ describe("unified history and project controls", () => {
     fireEvent.click(within(group).getByRole("button", { name: "common.edit" }));
     fireEvent.change(within(group).getByLabelText("Project icon (optional)"), { target: { value: "G" } });
     fireEvent.click(within(group).getByRole("button", { name: "common.save" }));
-    await waitFor(() => expect(mock.patchProject).toHaveBeenCalledWith("p1", { name: "Galen", icon: "G" }));
+    await waitFor(() => expect(mock.patchProject).toHaveBeenCalledWith("p1", { name: "Galen", icon: "G", instructions: "", context_documents: {} }));
     const remove = await within(group).findByRole("button", { name: "ide_threads.remove_project" });
     fireEvent.click(remove);
     expect(mock.deleteProject).not.toHaveBeenCalled();
