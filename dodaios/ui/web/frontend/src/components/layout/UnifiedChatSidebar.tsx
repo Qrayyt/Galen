@@ -127,9 +127,9 @@ export function UnifiedChatSidebar() {
   }, [query, rows]);
 
   const ungrouped = visible.filter((row) => !row.projectId || !projects.some((project) => project.project_id === row.projectId));
-  const start = () => {
+  const start = (projectId?: string) => {
     if (newMode === "chat") {
-      startNewTextChat();
+      startNewTextChat(projectId);
       return;
     }
     useIdeThreadsStore.getState().newThread("");
@@ -193,7 +193,7 @@ export function UnifiedChatSidebar() {
           </select>
           <button
             type="button"
-            onClick={start}
+            onClick={() => start()}
             aria-label={t("sidebar.new_chat")}
             title={t("sidebar.new_chat")}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -271,6 +271,11 @@ export function UnifiedChatSidebar() {
                   )}
                   {!editing && (
                     <>
+                      <button type="button" onClick={() => { setNewMode("chat"); startNewTextChat(project.project_id); }}
+                        aria-label={t("sidebar.new_chat")} title={t("sidebar.new_chat")}
+                        className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                        <Plus aria-hidden className="h-3 w-3" />
+                      </button>
                       <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); }}
                         aria-label={t("ide_threads.rename")} title={t("ide_threads.rename")}
                         className="hidden rounded p-1 text-muted-foreground hover:text-foreground focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
