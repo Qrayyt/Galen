@@ -8,7 +8,7 @@
 
         1. build the React frontend when dodaios/ui/web/dist is missing,
         2. freeze the app with PyInstaller (dodaios.spec, onedir),
-        3. wrap dist/Jarvis in an Inno Setup wizard.
+        3. compile the Inno Setup engine and package it with the Galen WPF shell.
 
     The result is dist/installers/Galen-Setup-x64.exe.
 
@@ -224,20 +224,40 @@ Write-Step "3/3 packaging with $Iscc"
 
 New-Item -ItemType Directory -Force -Path $InstallerDir | Out-Null
 
+# Stage the two components outside the published directory.
+$StageDir = Join-Path ([IO.Path]::GetTempPath()) ("GalenBuild-" + [Guid]::NewGuid().ToString("N"))
+$EngineDir = Join-Path $StageDir "engine"
+$ShellDir = Join-Path $StageDir "shell"
+$ShellProject = Join-Path $PSScriptRoot "shell\GalenInstaller.csproj"
+$Artifact = Join-Path $InstallerDir "Galen-Setup-x64.exe"
+if (Test-Path -LiteralPath $Artifact) { Remove-Item -LiteralPath $Artifact -Force }
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { Stop-WithError ".NET SDK 8 and the .NET Framework 4.8 targeting pack are required" }
+New-Item -ItemType Directory -Force -Path $EngineDir, $ShellDir | Out-Null
+try {
 $IsccArgs = @(
     "/DAppVersion=$AppVersion",
     "/DAppDisplayVersion=$AppDisplayVersion",
     "/DSourceDir=$BundleDir",
-    "/DOutputDir=$InstallerDir",
+    "/DOutputDir=$EngineDir",
     "/DIconFile=$IconFile",
     $IssFile
 )
 Invoke-Checked -Executable $Iscc -Arguments $IsccArgs -WorkingDirectory $RepoRoot -What "ISCC"
 
-# The signed name (OutputBaseFilename = SignedSetupBaseName in the .iss).
-$Artifact = Join-Path $InstallerDir "Galen-Setup-x64.exe"
-if (-not (Test-Path $Artifact)) {
-    Stop-WithError "ISCC reported success but $Artifact does not exist"
+$Engine = Join-Path $EngineDir "Galen-Setup-x64.exe"
+if (-not (Test-Path $Engine)) { Stop-WithError "ISCC did not produce $Engine" }
+Write-Step "building the WPF installer interface"
+Invoke-Checked -Executable "dotnet" -Arguments @(
+    "build", $ShellProject, "-c", "Release", "-o", $ShellDir,
+    "-p:Version=$AppVersion", "-p:AssemblyVersion=$AppVersion",
+    "-p:FileVersion=$AppVersion", "-p:InformationalVersion=$AppDisplayVersion"
+) -WorkingDirectory $RepoRoot -What "WPF installer shell"
+$Shell = Join-Path $ShellDir "Galen-Setup-x64.exe"
+if (-not (Test-Path $Shell)) { Stop-WithError "WPF shell not found: $Shell" }
+& (Join-Path $PSScriptRoot "shell\pack.ps1") -Shell $Shell -Engine $Engine -Output $Artifact
+if (-not (Test-Path $Artifact)) { Stop-WithError "Combined installer is missing" }
+} finally {
+    if (Test-Path $StageDir) { Remove-Item -Recurse -Force -LiteralPath $StageDir }
 }
 
 $SizeMb = [math]::Round((Get-Item $Artifact).Length / 1MB, 1)

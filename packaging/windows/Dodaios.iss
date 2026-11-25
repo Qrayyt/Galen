@@ -349,6 +349,40 @@ begin
   Result := Pos(AppDir, Lowercase(Target)) = 1;
 end;
 
+{ Optional private progress channel used only by the graphical wrapper.
+  ASCII percentages are appended only on change; the legacy CLI is untouched. }
+var
+  GalenLastProgress: Integer;
+
+procedure CurInstallProgressChanged(CurProgress, MaxProgress: Integer);
+var
+  ProgressFile: string;
+  Percent: Integer;
+begin
+  ProgressFile := ExpandConstant('{param:GALENPROGRESS|}');
+  if (ProgressFile = '') or (MaxProgress <= 0) then Exit;
+  Percent := Round((CurProgress / MaxProgress) * 100);
+  if Percent > 99 then Percent := 99;
+  if Percent < 0 then Percent := 0;
+  if Percent <> GalenLastProgress then
+  begin
+    GalenLastProgress := Percent;
+    SaveStringToFile(ProgressFile, IntToStr(Percent) + #13#10, True);
+  end;
+end;
+
+procedure WriteGalenAppPath;
+var
+  PathFile: string;
+  Lines: TArrayOfString;
+begin
+  PathFile := ExpandConstant('{param:GALENAPPPATH|}');
+  if PathFile = '' then Exit;
+  SetArrayLength(Lines, 1);
+  Lines[0] := ExpandConstant('{app}\{#GuiExeName}');
+  SaveStringsToUTF8File(PathFile, Lines, False);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
@@ -359,6 +393,7 @@ begin
       { An upgrade where the user cleared the task must also take the entry
         back out, or the choice silently does nothing. }
       RemoveDirFromUserPath(ExpandConstant('{app}'));
+    WriteGalenAppPath;
   end;
 end;
 

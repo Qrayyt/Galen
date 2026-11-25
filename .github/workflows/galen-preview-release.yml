@@ -155,7 +155,7 @@ jobs:
           path: |
             dist/installers/Galen-Setup-x64.exe
             dist/installers/Galen-Setup-x64.exe.sha256
-          key: galen-installer-v2-${{ runner.os }}-${{ hashFiles('dodaios/**', 'packaging/**', 'assets/**', 'integrations/openrealtime/source/**', 'third_party/**', 'install/update-contract.json', 'dodaios.spec', 'dodaios.toml.example', 'pyproject.toml', 'LICENSE', 'NOTICE', 'scripts/galen/brand.py', 'scripts/pip_install.py', 'requirements.in', 'requirements.txt', 'uv.lock') }}
+          key: galen-installer-v3-${{ runner.os }}-${{ hashFiles('dodaios/**', 'packaging/**', 'assets/**', 'integrations/openrealtime/source/**', 'third_party/**', 'install/update-contract.json', 'dodaios.spec', 'dodaios.toml.example', 'pyproject.toml', 'LICENSE', 'NOTICE', 'scripts/galen/brand.py', 'scripts/pip_install.py', 'requirements.in', 'requirements.txt', 'uv.lock') }}
       - name: Reuse the published installer when runtime inputs did not change
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'false'
         shell: pwsh
@@ -231,6 +231,10 @@ jobs:
           go build -o ../bin/openrealtime.exe ./cmd/openrealtime
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
+      - uses: actions/setup-dotnet@v4
+        if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
+        with:
+          dotnet-version: '8.0.x'
       - name: Ensure Inno Setup 6 is available
         if: steps.installer-cache.outputs.cache-hit != 'true' && needs.preflight.outputs.runtime_changed == 'true'
         shell: pwsh
