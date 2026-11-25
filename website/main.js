@@ -29,11 +29,66 @@ const platform=navigator.userAgentData?.platform||navigator.platform||'';const o
 const network=document.getElementById('network');
 const brands=['github','gmail','googledrive','figma','openai','googlegemini','claude','openrouter'];
 const logos=brands.map(name=>({name,url:`https://raw.githubusercontent.com/simple-icons/simple-icons/${name==='openai'?'11.15.0':'develop'}/icons/${name}.svg`}));
-const layer=network.querySelector('.network-particles');
-let particles=[],networkFrame=0,networkVisible=false,lastSpawn=0,bag=[];
-function nextLogo(){if(!bag.length)bag=logos.map(x=>({...x})).sort(()=>Math.random()-.5);return bag.pop();}
-function spawn(now,age=0){const w=network.clientWidth,h=network.clientHeight;const theta=Math.random()*Math.PI*2;const r=.36+Math.random()*.60;const x=w/2+Math.cos(theta)*(w/2-30)*r,y=h/2+Math.sin(theta)*(h/2-30)*r;const logo=nextLogo(),el=document.createElement('img');el.className='network-particle';el.alt='';el.src=logo.url;el.decoding='async';layer.append(el);particles.push({el,x,y,start:now-age,duration:3500+Math.random()*1800});}
+const layer=network.querySelector('.network-particles'),hub=network.querySelector('.network-hub');
+let particles=[],networkFrame=0,networkVisible=false,lastSpawn=0,lastFrame=0,bag=[],hover=false,boostUntil=0;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+function nextLogo(){
+ const active=new Set(particles.map(p=>p.name));
+ if(!bag.some(x=>!active.has(x.name)))bag=logos.filter(x=>!active.has(x.name)).map(x=>({...x}));
+ const available=bag.filter(x=>!active.has(x.name));
+ if(!available.length)return null;
+ const logo=available[Math.floor(Math.random()*available.length)];bag=bag.filter(x=>x.name!==logo.name);return logo;
+}
+function spawn(progress=0){
+ const logo=nextLogo();if(!logo)return;
+ const theta=Math.random()*Math.PI*2,r=.78+Math.random()*.19;
+ const el=document.createElement('img');el.className='network-particle';el.alt='';el.src=logo.url;el.decoding='async';
+ el.addEventListener('error',()=>{el.remove();particles=particles.filter(p=>p.el!==el);},{once:true});
+ layer.append(el);particles.push({el,name:logo.name,theta,r,progress,duration:5900+Math.random()*1600});
+}
 function clearParticles(){particles.forEach(p=>p.el.remove());particles=[];}
-function networkDraw(now){networkFrame=0;if(now-lastSpawn>460&&particles.length<11){spawn(now);lastSpawn=now;}const cx=network.clientWidth/2,cy=network.clientHeight/2;particles=particles.filter(p=>{const t=Math.max(0,(now-p.start)/p.duration);if(t>=1){p.el.remove();return false;}const move=Math.max(0,(t-.14)/.86);const eased=move*move*(3-2*move);const x=p.x+(cx-p.x)*eased,y=p.y+(cy-p.y)*eased;const alpha=Math.min(1,t/.19,(1-t)/.25);p.el.style.opacity=String(Math.max(0,alpha));p.el.style.transform=`translate(${x}px,${y}px) translate(-50%,-50%) scale(${1-.75*eased})`;return true;});if(networkVisible&&!document.hidden&&!motion.matches)networkFrame=requestAnimationFrame(networkDraw);}
-function networkSync(){if(networkFrame)cancelAnimationFrame(networkFrame);networkFrame=0;clearParticles();if(!networkVisible||document.hidden)return;const now=performance.now();if(motion.matches){logos.forEach((logo,i)=>{const el=document.createElement('img');el.src=logo.url;el.alt='';el.className='network-particle';el.style.left=(50+40*Math.cos(i*Math.PI/4))+'%';el.style.top=(50+38*Math.sin(i*Math.PI/4))+'%';el.style.transform='translate(-50%,-50%)';el.style.opacity='1';layer.append(el);particles.push({el});});return;}for(let i=0;i<5;i++)spawn(now,i*380);lastSpawn=now;networkFrame=requestAnimationFrame(networkDraw);}
-new IntersectionObserver(entries=>{networkVisible=entries[0].isIntersecting;networkSync();},{threshold:.05}).observe(network);document.addEventListener('visibilitychange',networkSync);motion.addEventListener('change',networkSync);
+function smooth(t){t=clamp(t,0,1);return t*t*(3-2*t);}
+function networkDraw(now){
+ networkFrame=0;const dt=lastFrame?Math.min(now-lastFrame,50):0;lastFrame=now;
+ const boosted=now<boostUntil,speed=boosted?1.8:hover?1.35:1;
+ const width=network.clientWidth,height=network.clientHeight,cx=width/2,cy=height/2;
+ const hw=hub.offsetWidth/2,hh=hub.offsetHeight/2;
+ const limit=width<600?4:6;
+ if(now-lastSpawn>(boosted?650:1200)&&particles.length<limit){spawn();lastSpawn=now;}
+ particles=particles.filter(p=>{
+  p.progress+=dt*speed/p.duration;const t=p.progress;
+  if(t>=1){p.el.remove();return false;}
+  const ux=Math.cos(p.theta),uy=Math.sin(p.theta);
+  const half=p.el.offsetWidth/2;
+  const dx=ux*Math.max(1,cx-half-12)*p.r,dy=uy*Math.max(1,cy-half-12)*p.r;
+  const distance=Math.hypot(dx,dy);
+  const safe=Math.min(distance,Math.min((hw+half+8)/Math.max(Math.abs(dx/distance),.0001),(hh+half+8)/Math.max(Math.abs(dy/distance),.0001)));
+  const end=Math.min(1,safe/Math.max(distance,1));
+  const travel=smooth((t-.10)/.90);
+  const ratio=1-(1-end)*travel;
+  const alpha=smooth(t/.16)*(1-smooth((t-.62)/.38));
+  p.el.style.opacity=String(alpha);
+  p.el.style.transform=`translate(${cx+dx*ratio}px,${cy+dy*ratio}px) translate(-50%,-50%) scale(${1-.68*travel})`;
+  return true;
+ });
+ if(networkVisible&&!document.hidden&&!motion.matches)networkFrame=requestAnimationFrame(networkDraw);
+}
+function networkSync(){
+ if(networkFrame)cancelAnimationFrame(networkFrame);networkFrame=0;clearParticles();lastFrame=0;hover=false;boostUntil=0;
+ if(!networkVisible||document.hidden)return;
+ if(motion.matches){
+  logos.slice(0,6).forEach((logo,i)=>{const el=document.createElement('img');el.src=logo.url;el.alt='';el.className='network-particle';el.style.left=(50+39*Math.cos(i*Math.PI/3))+'%';el.style.top=(50+38*Math.sin(i*Math.PI/3))+'%';el.style.transform='translate(-50%,-50%)';el.style.opacity='1';layer.append(el);particles.push({el,name:logo.name});});return;
+ }
+ for(let i=0;i<3;i++)spawn(.12+i*.19);
+ lastSpawn=performance.now();networkFrame=requestAnimationFrame(networkDraw);
+}
+hub.addEventListener('pointerenter',()=>{hover=true;});
+hub.addEventListener('pointerleave',()=>{hover=false;});
+hub.addEventListener('click',()=>{
+ if(motion.matches)return;
+ const now=performance.now();if(now<boostUntil)return;boostUntil=now+3000;
+ if(particles.length<(network.clientWidth<600?4:6))spawn();
+ hub.querySelector('img').animate([{transform:'scale(1)'},{transform:'scale(.94)'},{transform:'scale(1.035)'},{transform:'scale(1)'}],{duration:550,easing:'ease-out'});
+});
+new IntersectionObserver(entries=>{const visible=entries[0].isIntersecting;if(visible!==networkVisible){networkVisible=visible;networkSync();}},{threshold:.05}).observe(network);
+document.addEventListener('visibilitychange',networkSync);motion.addEventListener('change',networkSync);
