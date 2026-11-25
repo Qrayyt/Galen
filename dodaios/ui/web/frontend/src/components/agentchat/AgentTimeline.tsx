@@ -500,7 +500,7 @@ function TurnPartMessages({ part }: { part: TurnPart }) {
       <div className="lead-face-lane" aria-hidden />
       <div className="lead-turn-body">
         {part.blocks.map((block) => (
-          <div key={block.id} className="min-w-0" data-trace-reply><LeadReply text={block.text} live={false} /></div>
+          <div key={block.id} className="min-w-0" data-trace-reply><LeadReply text={block.text} live={false} messageId={JSON.stringify([part.id, block.id])} /></div>
         ))}
       </div>
     </div>
@@ -546,8 +546,8 @@ const Turn = memo(function Turn({ turn, assistantName, providerLabel, modelName,
       </div>
       <div className="lead-turn-body">
         <TurnTrace turn={turn} look={traceLook} messenger quietTyping={quietTyping} extras={extras} onDecide={onDecide}
-          renderText={(text, id) => <Prose block={{ kind: "text", text, id }} />}
-          renderAnswer={(text, _id, live) => <LeadReply text={text} live={live} />} />
+          renderText={(text, id) => <Prose block={{ kind: "text", text, id }} messageId={JSON.stringify([turn.id, id])} live={turn.status === "running"} />}
+          renderAnswer={(text, id, live) => <LeadReply text={text} live={live} messageId={JSON.stringify([turn.id, id])} />} />
         <AnswerCodingAgents threads={turn.codingThreads} texts={turnTexts(turn)} />
       </div>
     </div>;
@@ -561,7 +561,7 @@ const Turn = memo(function Turn({ turn, assistantName, providerLabel, modelName,
         {turn.effort ? <span>{effortLabel(turn.effort, t)}</span> : null}
       </div>
     )}
-    <TurnTrace turn={turn} look={traceLook} companion={traceCompanion} face={traceFace} extras={extras} onDecide={onDecide} renderText={(text, id) => <Prose block={{ kind: "text", text, id }} />} />
+    <TurnTrace turn={turn} look={traceLook} companion={traceCompanion} face={traceFace} extras={extras} onDecide={onDecide} renderText={(text, id) => <Prose block={{ kind: "text", text, id }} messageId={JSON.stringify([turn.id, id])} live={turn.status === "running"} />} />
     <AnswerCodingAgents threads={turn.codingThreads} texts={turnTexts(turn)} />
   </div>;
 });
@@ -571,14 +571,14 @@ function turnTexts(turn: TurnItem): string[] {
   return turn.blocks.flatMap((block) => block.kind === "text" ? [block.text] : []);
 }
 
-function Prose({ block }: { block: TextBlock }) {
+function Prose({ block, messageId, live }: { block: TextBlock; messageId?: string; live?: boolean }) {
   if (!block.text.trim()) return null;
   return (
     <div
       data-testid="agent-text"
       className={REPLY_PROSE}
     >
-      <ChatMarkdown text={block.text} />
+      <ChatMarkdown text={block.text} messageId={messageId} live={live} />
     </div>
   );
 }

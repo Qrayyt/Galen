@@ -61,7 +61,7 @@ export const MessengerTurn = memo(function MessengerTurn({ turn, avatar, color, 
   return <div className="flex min-w-0 flex-col gap-1.5" data-testid="messenger-turn" data-status={turn.status}>
     {turn.blocks.map((block) => {
       if (block.kind === "text") {
-        return block.text.trim() ? <MessageBubble key={block.id} text={block.text} /> : null;
+        return block.text.trim() ? <MessageBubble key={block.id} text={block.text} messageId={JSON.stringify([turn.id, block.id])} live={running} /> : null;
       }
       if (block.kind !== "tool") return null;
       if (block.credential) return <CredentialCard key={block.callId} credential={block.credential} />;
@@ -142,10 +142,10 @@ export function AwaitingTurn({ since, seed, avatar, color }: { since: number; se
 }
 
 /** One message of the agent's: a grey bubble on the left. */
-export function MessageBubble({ text }: { text: string }) {
+export function MessageBubble({ text, messageId, live }: { text: string; messageId?: string; live?: boolean }) {
   return <div className="flex min-w-0" data-testid="agent-message-bubble">
     <div className="jarvis-chat-in min-w-0 max-w-[min(85%,42rem)] rounded-[20px] px-4 py-2.5">
-      <div className={cn(PROSE, THREAD_MEDIA, "py-0")}><ChatMarkdown text={text} /></div>
+      <div className={cn(PROSE, THREAD_MEDIA, "py-0")}><ChatMarkdown text={text} messageId={messageId} live={live} /></div>
     </div>
   </div>;
 }

@@ -1083,7 +1083,7 @@ export const ThreadTurn = memo(function ThreadTurn({ turn, prompts = "composer",
         {row.text && <div className="whitespace-pre-wrap text-base leading-6 [overflow-wrap:anywhere]">{row.text}</div>}
       </div>
     </div>;
-    if (row.kind === "text") return <div key={row.id} className={cn(PROSE, THREAD_MEDIA)}><ChatMarkdown text={row.text} /></div>;
+    if (row.kind === "text") return <div key={row.id} className={cn(PROSE, THREAD_MEDIA)}><ChatMarkdown text={row.text} messageId={JSON.stringify([turn.id, row.id])} live={running} /></div>;
     if (row.kind === "agent") return <SubagentRun key={row.id} blocks={[row.block]} turn={turn} />;
     if (row.kind === "plan") return <PlanCard key={row.id} plan={row.plan} running={running} />;
     if (row.kind === "compaction") return <CompactionLine key={row.id} block={row.block} running={running} />;

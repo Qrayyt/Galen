@@ -77,13 +77,16 @@ const ImageKeysContext = createContext<ReadonlySet<string>>(new Set());
 /** Whether the text ends inside a fence, i.e. its last block is still being written. */
 const OpenFenceContext = createContext(false);
 const MarkdownBodyContext = createContext("");
+const NativeMessageContext = createContext<{ messageId?: string; live?: boolean }>({});
 
-function NativeBlock({ code, end }: { code: string; end?: number }) {
+function NativeBlock({ code, start, end }: { code: string; start?: number; end?: number }) {
   const body = useContext(MarkdownBodyContext);
-  const pending = endsInOpenFence(body) && (end === undefined || body.slice(end).trim() === "");
+  const { messageId, live } = useContext(NativeMessageContext);
+  const incomplete = endsInOpenFence(body) && (end === undefined || body.slice(end).trim() === "");
+  const pending = incomplete && live !== false;
   const spec = useMemo(() => parseNativeUi(code), [code]);
   if (pending) return <div role="status" className="my-3 rounded-lg border border-border p-3 text-xs text-muted-foreground">{translate("common.loading")}</div>;
-  if (spec) return <Suspense fallback={<p>{spec.fallback}</p>}><NativeUiFence spec={spec}/></Suspense>;
+  if (spec && !incomplete) return <Suspense fallback={<p>{spec.fallback}</p>}><NativeUiFence spec={spec} messageId={messageId} offset={start}/></Suspense>;
   return <CodeBlock language="json" code={code} dense/>;
 }
 
@@ -167,7 +170,7 @@ const MARKDOWN_COMPONENTS: Components = {
   pre: ({ children, node: _node, ...props }) => {
     const fence = readFence(children);
     if (fence) {
-      if (fence.language === GALEN_UI_FENCE) return <NativeBlock code={fence.code} end={_node?.position?.end.offset}/>;
+      if (fence.language === GALEN_UI_FENCE) return <NativeBlock code={fence.code} start={_node?.position?.start.offset} end={_node?.position?.end.offset}/>;
       if (fence.language === CHART_FENCE) return <ChartBlock code={fence.code} />;
       if (fence.language === "json" || fence.language === "") {
         const result = parseToolResult(fence.code);
@@ -182,14 +185,14 @@ const MARKDOWN_COMPONENTS: Components = {
   },
 };
 
-export function ChatMarkdown({ text, className }: { text: string; className?: string }) {
+export function ChatMarkdown({ text, className, messageId, live }: { text: string; className?: string; messageId?: string; live?: boolean }) {
   const body = useMemo(() => normalizeMediaMarkup(text), [text]);
   const imageKeys = useMemo(() => new Set(Array.from(body.matchAll(/!\[[^\]]*\]\(<?([^)>]+)>?\)/g), match => assetKey(match[1]))), [body]);
   const writing = useMemo(() => body.includes(CHART_FENCE) && endsInOpenFence(body), [body]);
   return <div className={cn("min-w-0 [overflow-wrap:anywhere]", className)}>
     <ImageKeysContext.Provider value={imageKeys}>
       <OpenFenceContext.Provider value={writing}>
-        <MarkdownBodyContext.Provider value={body}><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={url => url.startsWith("data:") ? safeMediaUrl(url) ?? "" : chatUrlTransform(url)} components={MARKDOWN_COMPONENTS}>{body}</ReactMarkdown></MarkdownBodyContext.Provider>
+        <NativeMessageContext.Provider value={{ messageId, live }}><MarkdownBodyContext.Provider value={body}><ReactMarkdown remarkPlugins={[remarkGfm]} urlTransform={url => url.startsWith("data:") ? safeMediaUrl(url) ?? "" : chatUrlTransform(url)} components={MARKDOWN_COMPONENTS}>{body}</ReactMarkdown></MarkdownBodyContext.Provider></NativeMessageContext.Provider>
       </OpenFenceContext.Provider>
     </ImageKeysContext.Provider>
   </div>;

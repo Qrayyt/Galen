@@ -130,7 +130,7 @@ export function splitReply(markdown: string): ReplyPart[] {
  * right now: only then does a new bubble ease in, so a finished conversation
  * loads still.
  */
-export function LeadReply({ text, live = false }: { text: string; live?: boolean }) {
+export function LeadReply({ text, live = false, messageId }: { text: string; live?: boolean; messageId?: string }) {
   // A coding agent's code in the words ("#bddece") opens its thread.
   const parts = useMemo(() => splitReply(linkBareThreadCodes(text)), [text]);
   if (!parts.length) return null;
@@ -146,7 +146,7 @@ export function LeadReply({ text, live = false }: { text: string; live?: boolean
           className={cn("lead-bubble", part.chart ? "" : part.note ? "border border-border bg-card shadow-rim" : "jarvis-chat-in")}
         >
           <div className={REPLY_PROSE}>
-            <ChatMarkdown text={part.text} />
+            <ChatMarkdown text={part.text} live={live} messageId={messageId ? JSON.stringify([messageId, index]) : undefined} />
           </div>
         </div>
       ))}
