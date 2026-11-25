@@ -10,14 +10,14 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 
 ## Current checkpoint
 
-- Date: 2026-11-25 15:17 MSK (UTC+03:00).
-- Stage: repository audit and recovery-plan bootstrap.
+- Date: 2026-11-25 15:21 MSK (UTC+03:00).
+- Stage: architecture audit complete; unified chat data-model implementation next.
 - Branch: `feat/galen-next-release`.
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
-- Current code SHA before this documentation-only checkpoint:
-  `e222545822e19ad867e52e0dd13b945a02326d49`.
-- Working tree before documents: clean.
+- Current code SHA before this journal-only checkpoint:
+  `3b8982938f36ac38b9413511584a0daf4a4aee64`.
+- Working tree before this journal update: clean.
 
 ## Repository audit
 
@@ -108,6 +108,54 @@ No product source, configuration, release marker, website, or server file has be
 | `git status --short --branch` | Clean branch created from `origin/v1.0.0` |
 | Test commands | Not run yet; no product code changed |
 
+## Architecture audit findings
+
+### Chats
+
+- `dodaios/state/chat_store.py` already provides durable SQLite text threads, automatic
+  first-message titles, message isolation, deletion, and an idempotent column migration.
+- `/api/chats` already unifies text and voice history, supports create/resume/delete, and
+  seeds only the selected conversation into the brain.
+- The current front page intentionally presents one endless lead conversation. An older
+  `ChatsView` and the shared `useConversations` hook prove multi-chat navigation exists as
+  a partial foundation, but the active `ChatsSurface` renders `HomeView` only.
+- Missing from the ordinary chat store/API: rename, search, mode, project association,
+  draft/restored selection metadata, and project-scoped context.
+
+### Work and projects
+
+- Work is currently exposed as the `agentic-ide` section with mature panes, terminals,
+  files, git, agent runtimes, workspaces, approvals, and resume handles.
+- `dodaios/agentic_ide/library.py` and `/api/chat-library` already implement a versioned,
+  atomic project/chat metadata library for coding-agent conversations: project create,
+  rename, color, pin, archive, reorder, delete; per-project Work chat create, rename,
+  archive, delete, resume metadata; and a scratch project.
+- The ordinary SQLite chat store and the Work JSON library are separate. The release must
+  connect them without deleting either data source. The SQLite chat entity will gain mode
+  and project metadata; Work library records remain the authoritative compatibility layer
+  for existing coding CLI conversations during migration.
+- Existing project rows are folder-oriented and do not yet carry shared instructions,
+  context files, a custom icon, collapse state, or an inert future agent id.
+
+### Generative UI
+
+- A safe chart fence is already implemented with bounded JSON parsing, fixed native React
+  components, accessible table fallback, progressive open-fence handling, and no HTML/JS.
+- Recharts, React Flow, Excalidraw, and native UI primitives are already dependencies.
+  This repository evidence recovers the existing chart choice; no additional library is assumed.
+- Missing: a common versioned component envelope, cards/tables/checklists/progress/calculators/
+  inputs/diagrams under one validator, persisted interaction state, and generalized partial recovery.
+
+### Marketplace
+
+- Galen already has a substantial local marketplace client, publication identity/studio,
+  plugin/skill import paths, catalog views, installation tests, and security-oriented helpers.
+- The current catalog is inherited from the Dodaios marketplace and supports community entries.
+  Server ownership/access for a Galenite metadata catalog is not present in this repository and
+  must not be invented or deployed without an audited endpoint and credentials.
+- Existing local installation, manifest, archive, permission, and publication code will be reused
+  and tightened rather than replaced wholesale.
+
 ## Known errors and risks
 
 - The default branch and current release branch have diverged operational roles. Opening a pull
@@ -117,8 +165,9 @@ No product source, configuration, release marker, website, or server file has be
   be changed and no release workflow will be triggered during feature development.
 - The branch head has a successful macOS build, while the last successful Windows installer is at
   Preview 5. A fresh Windows build is required after implementation.
-- The full existing chat/project/marketplace storage architecture is not yet mapped. Product changes
-  must wait until that audit is recorded.
+- The active chat surface and the mature Work surface use different stores and interaction models.
+  A destructive merge would risk both ordinary history and external CLI resume handles, so the
+  first migration is additive and compatibility-preserving.
 
 ## Risk checkpoint before first push
 
@@ -131,8 +180,17 @@ No product source, configuration, release marker, website, or server file has be
 
 None. No server credentials were read or recorded. No deployment, database, catalog, or API was changed.
 
+## Risk checkpoint before the first data-model change
+
+- Planned action: add nullable/defaulted columns and new tables to the existing `chats.db` schema,
+  plus non-destructive APIs for chat/project metadata.
+- Risk: a faulty migration could prevent old chat databases from opening.
+- Safeguards: only additive columns/tables; defaults preserve old behavior; migration remains
+  idempotent; tests open a legacy schema, run migration twice, and verify messages are unchanged;
+  no existing column/table/file is renamed or removed.
+
 ## Next concrete step
 
-Commit these two documents as the first checkpoint, push `feat/galen-next-release`, verify the
-remote commit, then map the existing chat persistence, routes, React state, Work/IDE surfaces,
-project storage, generative UI support, and marketplace publication/install paths before editing them.
+Commit and push this architecture-audit checkpoint. Then implement and test the additive SQLite
+schema for per-chat mode/project/draft and project metadata, followed by rename/search/move/state
+routes. Do not change the active UI until legacy migration tests and route tests pass.
