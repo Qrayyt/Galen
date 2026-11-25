@@ -4,4 +4,6 @@ Version: 1.0.0-preview.5
 Platform: Windows x64
 Scope: production WPF installer, in-app updater and website delivery
 Publishing gate: Python validation + React build + Windows PyInstaller/Inno Setup/WPF + SHA256
-Candidate revision: 1
+Candidate revision: 2
+
+Retry: align four GLNT branding test expectations with the rendered UI.
