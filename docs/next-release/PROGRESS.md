@@ -16,8 +16,8 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 - Baseline branch: `v1.0.0`.
 - Baseline SHA: `e222545822e19ad867e52e0dd13b945a02326d49`.
 - Current committed SHA before this product checkpoint:
-  `971ad4f`.
-- Latest code checkpoint: scoped voice call context, native UI state, Chat/Work mode switching, GLNT install/update/uninstall, and catalog file integrity.
+  `1535f94`.
+- Latest code checkpoint: scoped voice call context, native UI state, Chat/Work mode switching, GLNT install/update/uninstall, catalog file integrity, and blank-chat draft restoration.
 
 ## Repository audit
 
@@ -46,7 +46,7 @@ Allowed task states: **not started**, **in progress**, **implemented**, **verifi
 | 3 | Chat lifecycle and durable history | implemented | Create, rename, delete, auto-title and durable history; desktop acceptance outstanding |
 | 4 | Chat search | in progress | Title/body search wired to sidebar across Chat and Work; voice archive and runtime verification remain |
 | 5 | Isolated chat context and global memory | in progress | Project-scoped runtime instructions/snapshots wired into brain/API/CLI; voice and global-memory boundary checks pending |
-| 6 | Restart restore and lossless migration | in progress | Last mode/session and scoped text drafts restore; blank drafts and desktop migration acceptance remain |
+| 6 | Restart restore and lossless migration | in progress | Last mode/session, scoped text drafts and ordinary blank drafts restore; desktop migration acceptance remains |
 | 7 | Rename IDE to Work | in progress | Primary navigation and mode labels say Work in six main locales; secondary and nested locale copy remains to audit |
 | 8 | Remove separate Chat/IDE tabs | implemented | The top Chat/IDE surface switch is removed while compatibility routes remain; desktop smoke remains before verified |
 | 9 | Per-chat mode selection and persistence | implemented | New and idle API-backed existing chats support mode selection; CLI-bound chats cannot safely convert |
@@ -410,3 +410,11 @@ starting the scoped project-context injection block.
 - Remaining constraints: classic speech-pipeline project briefing and full voice archive search/assignment; CLI mode conversion without losing vendor handles; rich document support; all-provider/locale acceptance; live GLNT endpoint and publisher authorization; interactive desktop smoke. Do not mark the release verified until actual acceptance evidence exists.
 
 - Blank ordinary-chat text and its selected project now persist across a WebView restart. An explicit New Chat clears the previous blank draft before choosing another scope; Work and ephemeral side-pane blank drafts remain isolated. Focused restoration fixture added. Candidate artifact workflow started on the preceding checkpoint; this later source revision requires its own checks.
+
+### Regression evidence and candidate handoff
+
+- Windows candidate preflight [45631328255](https://github.com/Qrayyt/Galen/actions/runs/45631328255), source `96683338`: backend succeeded with 44 isolated tests and 142 dependency-backed regression tests (chat, voice mirror, projects, mode switching, history and migration). Frontend changed-source regression and Windows packaging have not yet completed.
+- Focused checks [45631328229](https://github.com/Qrayyt/Galen/actions/runs/45631328229), source `96683338`: backend and frontend jobs succeeded, including production frontend build.
+- Latest blank-draft change `1535f94` has its own queued focused check. Candidate marker updated to exercise this exact revision too; do not treat an older installer as a build of the newer code.
+- Rollback: keep the currently published Preview 5 unchanged. Before testing an installer, back up the entire local Galen data directory with the app stopped, including SQLite databases and their sidecars. If reverting the application, restore the backup made by the matching application version; do not assume an older binary can interpret every newer state field. GLNT prior skill versions and removed skills are retained outside the active skill directory. No production server modifications, release publication or user database changes occurred in this session.
+- Open acceptance work remains in the status table; no completed desktop smoke or live GLNT deployment is asserted. CLI-bound mode changes intentionally refuse transitions that would discard provider conversation handles.
