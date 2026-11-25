@@ -3,8 +3,8 @@ on:
   push:
     branches: [feat/galen-installer-preview]
     paths:
-      - 'packaging/windows/preview/**'
-      - '!packaging/windows/preview/out/**'
+      - 'packaging/windows/preview-wpf/**'
+      - '!packaging/windows/preview-wpf/out/**'
       - '.github/workflows/galen-installer-visual-preview.yml'
   workflow_dispatch:
 permissions:
@@ -15,29 +15,43 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Ensure Inno Setup 6.6+
-        shell: powershell
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Compile standalone WPF demo
+        shell: pwsh
         run: |
-          choco upgrade innosetup -y --no-progress
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler installation failed" }
-      - name: Compile only the visual installer
-        shell: powershell
+          dotnet build packaging/windows/preview-wpf/GalenInstaller.csproj -c Release -o "$env:RUNNER_TEMP\galen-wpf"
+          if ($LASTEXITCODE -ne 0) { throw 'WPF compilation failed' }
+      - name: Run all three screens and capture actual WPF rendering
+        shell: pwsh
         run: |
-          & .\packaging\windows\preview\build.ps1
-      - name: Store preview EXE on the isolated preview branch
+          $dir = "$env:RUNNER_TEMP\galen-wpf"
+          $exe = Join-Path $dir 'Galen-Installer-Visual-Preview-V3.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -PassThru
+          if (-not $p.WaitForExit(30000)) { Stop-Process -Id $p.Id -Force; throw 'Visual smoke test timed out' }
+          if (Test-Path "$dir\smoke-error.txt") { Get-Content "$dir\smoke-error.txt" }
+          if ($p.ExitCode -ne 0) { throw "Visual smoke test failed: $($p.ExitCode)" }
+          foreach ($name in @('01-welcome.png','02-installing.png','03-finished.png')) {
+            if (-not (Test-Path (Join-Path $dir $name))) { throw "Missing screenshot: $name" }
+          }
+      - name: Store demo EXE and screenshots on isolated branch
         if: github.ref == 'refs/heads/feat/galen-installer-preview'
-        shell: powershell
+        shell: pwsh
         run: |
-          $exe = 'packaging/windows/preview/out/Galen-Installer-Visual-Preview.exe'
-          if (-not (Test-Path $exe)) { throw 'Preview EXE missing' }
+          $dest = 'packaging/windows/preview-wpf/out'
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          $dir = "$env:RUNNER_TEMP\galen-wpf"
+          Copy-Item "$dir\Galen-Installer-Visual-Preview-V3.exe" $dest
+          Copy-Item "$dir\0*.png" $dest
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f -- $exe
+          git add -f -- $dest
           if ($LASTEXITCODE -ne 0) { throw 'git add failed' }
           git diff --cached --quiet
           if ($LASTEXITCODE -eq 0) { exit 0 }
           if ($LASTEXITCODE -ne 1) { throw 'git diff failed' }
-          git commit -m "Store standalone installer visual preview EXE [skip ci]"
+          git commit -m "Store WPF installer demo and rendered previews [skip ci]"
           if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }
           git push origin HEAD:refs/heads/feat/galen-installer-preview
           if ($LASTEXITCODE -ne 0) { throw 'git push failed' }
