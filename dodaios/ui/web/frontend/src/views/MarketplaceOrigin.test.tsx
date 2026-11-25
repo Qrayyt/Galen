@@ -114,7 +114,7 @@ describe("an installed community plugin is findable", () => {
     });
     const marks = screen.getAllByLabelText(/Installed from the marketplace/i);
     expect(marks.length).toBe(1);
-    expect(marks[0].textContent).toContain("Marketplace");
+    expect(marks[0].textContent).toContain("GLNT");
     // …and the publisher rides along in the title, so the mark answers
     // "from whom" and not just "from somewhere".
     expect(marks[0].getAttribute("title")).toContain("octocat");
