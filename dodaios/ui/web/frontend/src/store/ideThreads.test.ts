@@ -39,6 +39,15 @@ describe("ideThreads store", () => {
     expect(fresh.useIdeThreadsStore.getState().layout).toBe("threads");
   });
 
+  it("keeps unified project IDs separate from checkout IDs and clears scope on a new ungrouped draft", () => {
+    const store = useIdeThreadsStore.getState();
+    store.newThread("checkout", "unified");
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "checkout", unifiedProjectId: "unified", sessionId: null });
+    expect(JSON.parse(localStorage.getItem("jarvis.agenticIde.threadSelection.v1") ?? "null")).toMatchObject({ unifiedProjectId: "unified" });
+    store.newThread("checkout");
+    expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "checkout", sessionId: null });
+  });
+
   it("opens a draft, then adopts the session its first message created", () => {
     const store = useIdeThreadsStore.getState();
     store.newThread("p1");

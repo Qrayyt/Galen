@@ -132,7 +132,9 @@ export function UnifiedChatSidebar() {
       startNewTextChat(projectId);
       return;
     }
-    useIdeThreadsStore.getState().newThread("");
+    const work = useIdeThreadsStore.getState();
+    work.setLayout("threads");
+    work.newThread("", projectId);
     setActiveSection("agentic-ide");
   };
 
@@ -271,7 +273,7 @@ export function UnifiedChatSidebar() {
                   )}
                   {!editing && (
                     <>
-                      <button type="button" onClick={() => { setNewMode("chat"); startNewTextChat(project.project_id); }}
+                      <button type="button" onClick={() => start(project.project_id)}
                         aria-label={t("sidebar.new_chat")} title={t("sidebar.new_chat")}
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                         <Plus aria-hidden className="h-3 w-3" />

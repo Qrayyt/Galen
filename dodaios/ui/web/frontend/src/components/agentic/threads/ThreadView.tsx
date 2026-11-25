@@ -78,7 +78,8 @@ export function ThreadView({ onScreen, column }: {
   const [discovered, setDiscovered] = useState<{ sessionId: string; agents: DiscoveredAgent[] } | null>(null);
   const projectAnchor = useRef<HTMLButtonElement | null>(null);
   // The draft whose first message is on its way: its session belongs to this project.
-  const startingIn = useRef<string | null>(null);
+  const startingIn = useRef<{ selection: ThreadSelection; folderId: string } | null>(null);
+  const previousSelection = useRef<ThreadSelection | null>(null);
 
   const visible = useMemo(() => projects.filter((project) => !project.archived && !project.scratch), [projects]);
   const session = selection.sessionId
@@ -112,20 +113,19 @@ export function ThreadView({ onScreen, column }: {
   useEffect(() => {
     const store = chatStore.getState();
     const threads = useIdeThreadsStore.getState();
+    const changed = previousSelection.current !== selection;
+    previousSelection.current = selection;
     const pending = startingIn.current;
-    const created = pending && store.activeSessionId && store.activeSessionId !== selection.sessionId ? store.activeSessionId : null;
-    if (pending && created) {
+    if (pending && pending.selection !== selection) {
+      // The send callback retains its own folder; never adopt its output into
+      // a different draft, even when both drafts use the same checkout.
       startingIn.current = null;
-      if (!selection.sessionId && !selection.team && selection.projectId === pending) {
-        threads.adoptThread(created, pending);
+    } else if (pending && store.activeSessionId && store.activeSessionId !== selection.sessionId) {
+      startingIn.current = null;
+      if (!selection.sessionId && !selection.team) {
+        threads.adoptThread(store.activeSessionId, pending.folderId);
         return;
       }
-      threads.rememberProject(created, pending);
-    } else if (pending && (selection.sessionId || selection.team)) {
-      // The person opened another thread before the draft's thread existed:
-      // the send files that thread under its project itself (onSessionCreated),
-      // and a leftover mark must not refile or adopt a later thread.
-      startingIn.current = null;
     }
     if (selection.sessionId) {
       if (store.activeSessionId !== selection.sessionId) store.openSession(selection.sessionId);
@@ -133,8 +133,10 @@ export function ThreadView({ onScreen, column }: {
     }
     if (startingIn.current) return; // the draft's first message is on its way
     if (selection.team) return; // a team thread shows; the thread store keeps what it has
-    if (store.activeSessionId || store.timeline.items.length > 0) store.newChat();
-  }, [selection.sessionId, selection.projectId, selection.team, activeSessionId]);
+    if (changed || store.activeSessionId || store.timeline.items.length > 0) {
+      store.newChat({ projectId: selection.unifiedProjectId });
+    }
+  }, [selection, activeSessionId, chatStore]);
 
   // The agents are listed the moment the view opens, not when a menu is.
   useEffect(() => {
@@ -194,7 +196,7 @@ export function ThreadView({ onScreen, column }: {
       pushToast("error", translate("ide_threads.connect_folder_first"));
       return null;
     }
-    startingIn.current = project.id;
+    startingIn.current = { selection, folderId: project.id };
     if (checkout !== "worktree") return project.path;
     try {
       const prepared = await prepareGit(project.path, { mode: "new_worktree", branch: "", base });
@@ -204,7 +206,7 @@ export function ThreadView({ onScreen, column }: {
       startingIn.current = null;
       throw error;
     }
-  }, [project, checkout, base, pushToast]);
+  }, [project, checkout, base, pushToast, selection]);
 
   // A failed first send leaves the draft a draft.
   useEffect(() => {
@@ -297,7 +299,7 @@ export function ThreadView({ onScreen, column }: {
   }
 
   const memberOf = selection.fromTeam || session?.team_id || "";
-  const threadKey = selection.sessionId ?? `draft:${project.id}`;
+  const threadKey = selection.sessionId ?? `draft:${project.id}${selection.unifiedProjectId ? `:unified:${selection.unifiedProjectId}` : ""}`;
   const [buildBefore, buildAfter = ""] = t("ide_threads.build_in").split("{project}");
   const empty = isDraft && timeline.items.length === 0;
 
@@ -312,7 +314,7 @@ export function ThreadView({ onScreen, column }: {
 
   // The bar tucks under the composer card, so it must come right after it.
   const strip = <ThreadBranchBar folder={folder} project={project} projects={visible}
-    onProject={(id) => useIdeThreadsStore.getState().newThread(id)} onConnect={connectProject}
+    onProject={(id) => useIdeThreadsStore.getState().newThread(id, selection.unifiedProjectId)} onConnect={connectProject}
     computerId={computerId} platform={platform} contextSessionId={contextSessionId} context={timeline.context}
     onComputer={(computerId) => void chatStore.getState().setDraft({ computerId })}
     draft={isDraft} checkout={checkout} onCheckout={setCheckout} base={base} onBase={setBase} locked={running} />;
@@ -334,7 +336,7 @@ export function ThreadView({ onScreen, column }: {
           <div role="menu">
             {visible.map((entry) => <ThreadMenuItem key={entry.id} label={entry.name} selected={entry.id === project.id}
               hint={entry.id === project.id ? <Check className="h-3.5 w-3.5" /> : undefined}
-              onSelect={() => { setProjectMenu(false); useIdeThreadsStore.getState().newThread(entry.id); }} />)}
+              onSelect={() => { setProjectMenu(false); useIdeThreadsStore.getState().newThread(entry.id, selection.unifiedProjectId); }} />)}
             <ThreadMenuItem icon={<FolderPlus className="h-3.5 w-3.5" />} label={t("ide_threads.connect_another")} onSelect={() => { setProjectMenu(false); connectProject(); }} />
           </div>
         </ThreadPopover>

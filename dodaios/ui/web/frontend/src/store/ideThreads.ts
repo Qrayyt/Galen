@@ -26,6 +26,8 @@ export const IDE_LAYOUTS: readonly IdeLayout[] = ["grid", "threads"];
 export interface ThreadSelection {
   /** The project the thread belongs to; "" while no project is known yet. */
   projectId: string;
+  /** Unified history project, distinct from the Work checkout. */
+  unifiedProjectId?: string;
   /** The chat session on screen, or null for a new thread's draft. */
   sessionId: string | null;
   /**
@@ -106,7 +108,8 @@ const parseSelection = (raw: unknown): ThreadSelection | null => {
   const team = typeof row.team === "string" && row.team && row.team !== TEAM_DRAFT ? row.team : undefined;
   if (team) return { projectId, sessionId: null, team };
   const fromTeam = sessionId && typeof row.fromTeam === "string" && row.fromTeam ? row.fromTeam : undefined;
-  return fromTeam ? { projectId, sessionId, fromTeam } : { projectId, sessionId };
+  const unifiedProjectId = !sessionId && typeof row.unifiedProjectId === "string" && row.unifiedProjectId ? row.unifiedProjectId : undefined;
+  return fromTeam ? { projectId, sessionId, fromTeam } : { projectId, sessionId, ...(unifiedProjectId ? { unifiedProjectId } : {}) };
 };
 
 const parseStringMap = (raw: unknown): Record<string, string> | null => {
@@ -166,7 +169,7 @@ interface IdeThreadsState {
   /** Open an existing thread. */
   openThread: (sessionId: string, projectId: string) => void;
   /** Open an empty draft in a project; its first message starts the thread. */
-  newThread: (projectId: string) => void;
+  newThread: (projectId: string, unifiedProjectId?: string) => void;
   /** Open a team thread. */
   openTeam: (teamId: string, projectId: string) => void;
   /** Open the form that starts a team thread in a project. */
@@ -226,8 +229,8 @@ export const useIdeThreadsStore = create<IdeThreadsState>((set, get) => ({
     // A thread shows in one column only: picked for the main one, it leaves its side column.
     set({ selection, ...withoutSplit(get(), sessionId) });
   },
-  newThread: (projectId) => {
-    const selection = { projectId, sessionId: null };
+  newThread: (projectId, unifiedProjectId) => {
+    const selection = { projectId, sessionId: null, ...(unifiedProjectId ? { unifiedProjectId } : {}) };
     write(SELECTION_KEY, selection);
     set((state) => ({ selection, focusNonce: state.focusNonce + 1 }));
   },

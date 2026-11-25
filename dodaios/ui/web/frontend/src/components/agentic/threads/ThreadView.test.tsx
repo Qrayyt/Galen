@@ -127,6 +127,19 @@ describe("ThreadView", () => {
     await waitFor(() => expect(screen.getByTestId("thread-model-picker").textContent).toContain("Opus 5.5"));
   });
 
+  it("creates Work inside a unified project without using its ID as a checkout path", async () => {
+    useIdeThreadsStore.getState().newThread("p1", "unified-p1");
+    render(<ThreadView onScreen />);
+    await waitFor(() => expect(useThreadChatStore.getState().draft.cwd).toBe("/repo"));
+    const box = screen.getByTestId("thread-composer-input");
+    fireEvent.change(box, { target: { value: "fix the project" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(api.createAgentChatSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/repo", project_id: "unified-p1", surface: "agent" })
+    ));
+    await waitFor(() => expect(useIdeThreadsStore.getState().selection).toEqual({ projectId: "p1", sessionId: "s1" }));
+  });
+
   it("files a thread started in a draft under its project when the person moved on meanwhile", async () => {
     let finishCreate: (row: AgentChatSession) => void = () => {};
     api.createAgentChatSession.mockReturnValue(new Promise<AgentChatSession>((resolve) => { finishCreate = resolve; }));

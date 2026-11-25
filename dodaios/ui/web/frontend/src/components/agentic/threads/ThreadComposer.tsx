@@ -476,7 +476,7 @@ export function ThreadComposer({
         if (cwd === null) return false;
         // The person opened another thread while the worktree was being made:
         // the folder and the message are this draft's, never that thread's.
-        if (chat.getState().activeSessionId !== null) return false;
+        if (chat.getState().activeSessionId !== null || keyRef.current !== threadKey) return false;
         if (cwd !== chat.getState().draft.cwd) await chat.getState().setDraft({ cwd });
       } catch (error) {
         setProblem(error instanceof Error ? error.message : String(error));
@@ -490,7 +490,7 @@ export function ThreadComposer({
       onSessionCreated?.(session);
     }, delivery);
     return outcome !== "failed";
-  }, [chat, prepareDraft, onSessionCreated]);
+  }, [chat, prepareDraft, onSessionCreated, threadKey]);
 
   /** A message that did not go comes back into its thread's box, ahead of anything typed since. */
   const giveBack = useCallback((key: string, text: string) => {
