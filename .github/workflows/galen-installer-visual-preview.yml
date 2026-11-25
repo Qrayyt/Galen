@@ -1,0 +1,30 @@
+name: Galen installer visual preview
+on:
+  push:
+    branches: [feat/galen-installer-preview]
+    paths:
+      - 'packaging/windows/preview/**'
+      - '.github/workflows/galen-installer-visual-preview.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  preview:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure Inno Setup 6.6+
+        shell: powershell
+        run: |
+          choco upgrade innosetup -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup compiler installation failed" }
+      - name: Compile only the visual installer
+        shell: powershell
+        run: |
+          & .\packaging\windows\preview\build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Galen-Installer-Visual-Preview
+          path: packaging/windows/preview/out/Galen-Installer-Visual-Preview.exe
+          if-no-files-found: error
