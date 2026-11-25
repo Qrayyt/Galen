@@ -29,12 +29,22 @@ import {
   type ChatSearchHit,
   type AgentChatSession,
 } from "@/lib/agentChatApi";
-import { useT } from "@/i18n";
+import { fill, useT, useUiLanguage } from "@/i18n";
 import { cn } from "@/lib/utils";
 import { useEventStore } from "@/store/events";
 import { useIdeThreadsStore } from "@/store/ideThreads";
 
 const REFRESH_MS = 5000;
+
+// Keep this feature's small, safety-sensitive copy together across all six UI locales.
+const projectCopy: Record<string, { icon: string; remove: string; move: string }> = {
+  en: { icon: "Project icon (optional)", remove: "Chats move to recent history. Files and conversations are not deleted.", move: "Moving this chat changes its available project context." },
+  ru: { icon: "Иконка проекта (необязательно)", remove: "Чаты переместятся в недавние. Файлы и переписки не удаляются.", move: "При перемещении изменится доступный контекст проекта." },
+  de: { icon: "Projektsymbol (optional)", remove: "Chats werden in den letzten Verlauf verschoben. Dateien und Unterhaltungen bleiben erhalten.", move: "Beim Verschieben ändert sich der verfügbare Projektkontext." },
+  es: { icon: "Icono del proyecto (opcional)", remove: "Los chats pasarán al historial reciente. No se eliminarán archivos ni conversaciones.", move: "Mover el chat cambia el contexto del proyecto disponible." },
+  pt: { icon: "Ícone do projeto (opcional)", remove: "As conversas serão movidas para o histórico recente. Os arquivos e as conversas não serão excluídos.", move: "Mover esta conversa altera o contexto de projeto disponível." },
+  zh: { icon: "项目图标（可选）", remove: "聊天将移至最近记录，不会删除文件或对话。", move: "移动此聊天将更改其可用的项目上下文。" },
+};
 
 /** One history row, regardless of whether Galen or a coding agent answers it. */
 interface UnifiedRow {
@@ -56,28 +66,33 @@ interface UnifiedRow {
  */
 export function UnifiedChatSidebar() {
   const t = useT();
+  const copy = projectCopy[useUiLanguage()] ?? projectCopy.en;
   const { rows: chatRows, isActive, open: openChat, remove: removeChat } = useChatRows({ poll: true });
   const activeWorkId = useIdeThreadsStore((state) => state.selection.sessionId);
   const setActiveSection = useEventStore((state) => state.setActiveSection);
+  const activeSection = useEventStore((state) => state.activeSection);
+  const pushToast = useEventStore((state) => state.pushToast);
   const [sessions, setSessions] = useState<AgentChatSession[]>([]);
   const [projects, setProjects] = useState<ChatProject[]>([]);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<{ query: string; rows: Array<ChatSearchHit & { mode: "chat" | "work" }>; failed: boolean } | null>(null);
-  const [newMode, setNewMode] = useState<"chat" | "work">("chat");
+  const [newMode, setNewMode] = useState<"chat" | "work">(activeSection === "agentic-ide" ? "work" : "chat");
   const [creatingProject, setCreatingProject] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [iconValue, setIconValue] = useState("");
+  const [confirmProject, setConfirmProject] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [nextSessions, nextProjects] = await Promise.all([
+      const [nextSessions, nextProjects] = await Promise.allSettled([
         fetchAgentChatSessions(500),
         fetchChatProjects(),
       ]);
-      setSessions(nextSessions.filter((session) => session.surface === "jarvis" || session.surface === "agent"));
-      setProjects(nextProjects);
+      if (nextSessions.status === "fulfilled") setSessions(nextSessions.value.filter((session) => session.surface === "jarvis" || session.surface === "agent"));
+      if (nextProjects.status === "fulfilled") setProjects(nextProjects.value);
     } catch {
       // During a backend restart the last complete list remains visible.
     }
@@ -186,7 +201,7 @@ export function UnifiedChatSidebar() {
       setProjectName("");
       setCreatingProject(false);
       await refresh();
-    } finally {
+    } catch { pushToast("error", t("common.save_failed")); } finally {
       setBusy(false);
     }
   };
@@ -196,27 +211,42 @@ export function UnifiedChatSidebar() {
     if (!name || busy) return;
     setBusy(true);
     try {
-      await patchChatProject(project.project_id, { name });
+      await patchChatProject(project.project_id, { name, icon: iconValue.trim() });
       setRenaming(null);
       await refresh();
-    } finally {
+    } catch { pushToast("error", t("common.save_failed")); } finally {
       setBusy(false);
     }
   };
 
+  const removeProject = async (project: ChatProject) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await deleteChatProject(project.project_id);
+      setConfirmProject(null);
+      await refresh();
+    } catch { pushToast("error", t("common.delete_failed")); } finally { setBusy(false); }
+  };
+
   const moveRow = async (row: UnifiedRow, projectId: string) => {
     if (!row.session) return;
-    await patchAgentChatSession(row.id, { project_id: projectId });
-    await refresh();
+    try {
+      await patchAgentChatSession(row.id, { project_id: projectId });
+      await refresh();
+    } catch { pushToast("error", t("common.save_failed")); }
   };
 
   const removeRow = async (row: UnifiedRow) => {
-    if (row.mode === "work") {
-      await deleteAgentChatSession(row.id);
-    } else if (row.chat) {
-      removeChat(row.chat);
-    }
-    await refresh();
+    try {
+      if (row.mode === "work") {
+        await deleteAgentChatSession(row.id);
+        useIdeThreadsStore.getState().forgetThread(row.id);
+      } else if (row.chat) {
+        removeChat(row.chat);
+      }
+      await refresh();
+    } catch { pushToast("error", t("common.delete_failed")); }
   };
 
   return (
@@ -279,6 +309,7 @@ export function UnifiedChatSidebar() {
             <input
               autoFocus
               value={projectName}
+              maxLength={80}
               onChange={(event) => setProjectName(event.target.value)}
               aria-label={t("ide_threads.projects")}
               className="h-8 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -304,15 +335,8 @@ export function UnifiedChatSidebar() {
                   >
                     {project.collapsed ? <ChevronRight aria-hidden className="h-3.5 w-3.5" /> : <ChevronDown aria-hidden className="h-3.5 w-3.5" />}
                   </button>
-                  <span aria-hidden className="flex h-5 w-5 items-center justify-center text-sm">{project.icon || <Folder className="h-4 w-4" />}</span>
-                  {editing ? (
-                    <form className="flex min-w-0 flex-1" onSubmit={(event) => { event.preventDefault(); void renameProject(project); }}>
-                      <input autoFocus value={renameValue} onChange={(event) => setRenameValue(event.target.value)}
-                        aria-label={t("ide_threads.rename")} className="h-7 min-w-0 flex-1 rounded border border-border bg-background px-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
-                    </form>
-                  ) : (
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{project.name}</span>
-                  )}
+                  <span aria-hidden className="flex h-5 w-5 shrink-0 items-center justify-center overflow-hidden text-sm">{project.icon || <Folder className="h-4 w-4" />}</span>
+                  <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{project.name}</span>
                   {!editing && (
                     <>
                       <button type="button" onClick={() => start(project.project_id)}
@@ -320,19 +344,45 @@ export function UnifiedChatSidebar() {
                         className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                         <Plus aria-hidden className="h-3 w-3" />
                       </button>
-                      <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); }}
-                        aria-label={t("ide_threads.rename")} title={t("ide_threads.rename")}
-                        className="hidden rounded p-1 text-muted-foreground hover:text-foreground focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
+                      <button type="button" onClick={() => { setRenaming(project.project_id); setRenameValue(project.name); setIconValue(project.icon); setConfirmProject(null); }}
+                        aria-label={t("common.edit")} title={t("common.edit")}
+                        className="rounded p-1 text-muted-foreground hover:text-foreground focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
                         <Pencil aria-hidden className="h-3 w-3" />
                       </button>
-                      <button type="button" onClick={() => void deleteChatProject(project.project_id).then(refresh)}
+                      <button type="button" onClick={() => { setConfirmProject(project.project_id); setRenaming(null); }}
                         aria-label={t("ide_threads.remove_project")} title={t("ide_threads.remove_project")}
-                        className="hidden rounded p-1 text-muted-foreground hover:text-destructive focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
+                        className="rounded p-1 text-muted-foreground hover:text-destructive focus-visible:block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:block">
                         <Trash2 aria-hidden className="h-3 w-3" />
                       </button>
                     </>
                   )}
                 </div>
+                {editing && (
+                  <form className="space-y-2 rounded-md border border-border p-2" onSubmit={(event) => { event.preventDefault(); void renameProject(project); }}>
+                    <label className="block text-xs text-muted-foreground">{t("ide_threads.rename")}
+                      <input autoFocus value={renameValue} maxLength={80} onChange={(event) => setRenameValue(event.target.value)}
+                        className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-sm text-foreground" />
+                    </label>
+                    <label className="block text-xs text-muted-foreground">{copy.icon}
+                      <input value={iconValue} maxLength={16} onChange={(event) => setIconValue(event.target.value)}
+                        className="mt-1 h-8 w-full rounded border border-border bg-background px-2 text-sm text-foreground" />
+                    </label>
+                    <div className="flex justify-end gap-2">
+                      <button type="button" disabled={busy} onClick={() => setRenaming(null)} className="rounded px-2 py-1 text-xs hover:bg-secondary">{t("common.cancel")}</button>
+                      <button type="submit" disabled={busy || !renameValue.trim()} className="rounded bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">{t("common.save")}</button>
+                    </div>
+                  </form>
+                )}
+                {confirmProject === project.project_id && (
+                  <div className="space-y-2 rounded-md border border-border p-2" role="group" aria-label={t("ide_threads.remove_project")}>
+                    <p className="text-xs text-foreground">{fill(t("ide_threads.remove_project_title"), { project: project.name })}</p>
+                    <p className="text-xs text-muted-foreground">{copy.remove}</p>
+                    <div className="flex justify-end gap-2">
+                      <button type="button" autoFocus disabled={busy} onClick={() => setConfirmProject(null)} className="rounded px-2 py-1 text-xs hover:bg-secondary">{t("common.cancel")}</button>
+                      <button type="button" disabled={busy} onClick={() => void removeProject(project)} className="rounded bg-destructive px-2 py-1 text-xs text-destructive-foreground disabled:opacity-50">{t("common.delete")}</button>
+                    </div>
+                  </div>
+                )}
                 {(!project.collapsed || Boolean(needle)) && (
                   <ul className="ml-4 border-l border-border pl-1">
                     {projectRows.map((row) => <HistoryRow key={`${row.mode}-${row.id}`} row={row} projects={projects}
@@ -370,6 +420,8 @@ function HistoryRow({ row, projects, active, onOpen, onMove, onDelete, t }: {
   t: (key: string) => string;
 }) {
   const Icon = row.mode === "work" ? Wrench : MessageSquare;
+  const copy = projectCopy[useUiLanguage()] ?? projectCopy.en;
+  const [pending, setPending] = useState<{ kind: "move"; projectId: string } | { kind: "delete" } | null>(null);
   return (
     <li className="group relative rounded-md">
       <button type="button" onClick={onOpen} title={row.title} aria-current={active ? "page" : undefined}
@@ -382,19 +434,26 @@ function HistoryRow({ row, projects, active, onOpen, onMove, onDelete, t }: {
       </button>
       <div className="absolute right-1 top-1 hidden items-center gap-0.5 rounded bg-secondary p-0.5 group-hover:flex group-focus-within:flex">
         {row.session && (
-          <select value={row.projectId} onChange={(event) => onMove(event.target.value)} aria-label={t("ide_threads.projects")}
+          <select value={row.projectId} onChange={(event) => { if (event.target.value !== row.projectId) setPending({ kind: "move", projectId: event.target.value }); }} aria-label={t("ide_threads.projects")}
             className="h-6 max-w-20 rounded border border-border bg-background px-1 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <option value="">—</option>
             {projects.map((project) => <option key={project.project_id} value={project.project_id}>{project.name}</option>)}
           </select>
         )}
         {row.mode !== "chat" || row.chat?.kind === "agent" ? (
-          <button type="button" onClick={(event) => { event.stopPropagation(); onDelete(); }} aria-label={t("chats_view.delete")}
+          <button type="button" onClick={(event) => { event.stopPropagation(); setPending({ kind: "delete" }); }} aria-label={t("chats_view.delete")}
             title={t("chats_view.delete")} className="rounded p-1 text-muted-foreground hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
             <Trash2 aria-hidden className="h-3 w-3" />
           </button>
         ) : null}
       </div>
+      {pending && <div role="group" className="space-y-2 rounded-md border border-border p-2 text-xs">
+        <p>{pending.kind === "move" ? copy.move : t("ide_threads.delete_confirm")}</p>
+        <div className="flex justify-end gap-2">
+          <button type="button" autoFocus onClick={() => setPending(null)} className="rounded px-2 py-1 hover:bg-secondary">{t("common.cancel")}</button>
+          <button type="button" onClick={() => { if (pending.kind === "move") onMove(pending.projectId); else onDelete(); setPending(null); }} className={cn("rounded px-2 py-1", pending.kind === "delete" ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground")}>{t(pending.kind === "move" ? "common.apply" : "common.delete")}</button>
+        </div>
+      </div>}
     </li>
   );
 }
