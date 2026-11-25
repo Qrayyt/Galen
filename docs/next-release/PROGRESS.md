@@ -504,3 +504,7 @@ starting the scoped project-context injection block.
 ## Voice archive move regression fix
 
 - Exact candidate [45662739601](https://github.com/Qrayyt/Galen/actions/runs/45662739601) passed 46 focused and 254 expanded tests; one failed on moving a voice archive between projects because the outer UPSERT overrode the trigger's INSERT OR IGNORE conflict policy. Replace both triggers with explicit ON CONFLICT DO NOTHING and recreate them on schema initialization for already migrated profiles. Existing privacy provenance is retained. Focused CI 45662739684 and previous installed candidate 45659138998 passed. New exact candidate tests pending; task 5 not yet closed.
+
+## Installer storage reduction
+
+- User authorized removing the site's local installer copies after redirect migration. Unauthenticated public GitHub API and current Windows download both returned HTTP 200. Keep legacy manifest and checksum URL contract, publish only verified small metadata and per-platform SHA-256 files, and redirect installer requests directly to GitHub Releases. Server migration and storage validation pending.
