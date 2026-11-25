@@ -627,13 +627,16 @@ def _public_release_from_payload(data: Any) -> dict[str, Any] | None:
     release = _release_from_payload(data, None)
     if release is None:
         return None
-    expected_names = ("Galen-Setup-x64.exe", CHECKSUMS_ASSET_NAME)
+    mac = sys.platform == "darwin"
+    installer_name = installer_asset_names(sys.platform, machine_for_update())[0] if mac else "Galen-Setup-x64.exe"
+    expected_names = (installer_name, CHECKSUMS_ASSET_NAME)
     assets = release["assets"]
     selected = [select_asset(assets, name) for name in expected_names]
     if any(asset is None or not asset.digest or asset.size <= 0 for asset in selected):
         return None
     installer, checksum = selected
-    base = f"https://galen.galenite.org/downloads/{tag}-{installer.digest[:16]}/"
+    prefix = "macos/" if mac else ""
+    base = f"https://galen.galenite.org/downloads/{prefix}{tag}-{installer.digest[:16]}/"
     # Reject arbitrary asset URLs and refuse a partially uploaded release.
     if any(asset.url != base + asset.name for asset in (installer, checksum)):
         return None
@@ -650,7 +653,11 @@ async def _fetch_public_release() -> dict[str, Any] | None:
         import httpx
 
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
-            response = await client.get(_PUBLIC_RELEASE_FEED, headers={"Accept": "application/json"})
+            feed = _PUBLIC_RELEASE_FEED
+            if sys.platform == "darwin":
+                arch = "arm64" if machine_for_update().lower() in ("arm64", "aarch64") else "x64"
+                feed = feed.replace("latest.json", f"latest-macos-{arch}.json")
+            response = await client.get(feed, headers={"Accept": "application/json"})
         if response.status_code != 200 or len(response.content) > 512 * 1024:
             return None
         return _public_release_from_payload(response.json())
