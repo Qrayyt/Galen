@@ -229,7 +229,7 @@ export interface AgentChatStore {
    * A blank page. `voiceSessionId` = an archived voice chat goes on stage
    * instead, and calls continue it rather than opening a new chat.
    */
-  newChat: (opts?: { voiceSessionId?: string }) => void;
+  newChat: (opts?: { voiceSessionId?: string; projectId?: string }) => void;
   openSession: (sessionId: string) => void;
   /**
    * Read a thread the person is about to open (the pointer rests on it) over
@@ -628,7 +628,7 @@ export function createAgentChatStore(
   let catalogRequest = 0;
   const patchQueues = new Map<string, Promise<void>>();
   const patchRevisions = new Map<string, number>();
-  type SendLane = { tail: Promise<unknown>; pending: number; sessionId: string | null; draftTarget?: ComposerDraftTarget };
+  type SendLane = { tail: Promise<unknown>; pending: number; sessionId: string | null; draftTarget?: ComposerDraftTarget; projectId?: string };
   const sendLanes = new Map<string, SendLane>();
   const emptySendLane = (): SendLane => ({ tail: Promise.resolve(), pending: 0, sessionId: null });
   let newChatLane = emptySendLane();
@@ -1205,7 +1205,7 @@ export function createAgentChatStore(
         const left = get();
         if (surface === "jarvis" && left.activeSessionId) rememberTimeline(left.activeSessionId, left.timeline);
         closeSocket();
-        newChatLane = emptySendLane();
+        newChatLane = { ...emptySendLane(), projectId: opts?.projectId };
         resetBlankComposerDraftTarget(chatStore);
         discardHeldFiles(chatStore, "");
         ++catalogRequest;
@@ -1223,12 +1223,7 @@ export function createAgentChatStore(
           // seconds on every new chat.
           catalogStale: get().catalog !== null,
         });
-        if (surface === "jarvis" && !opts?.voiceSessionId) {
-          // Dodaios keeps ONE endless conversation: every door that used to
-          // open a blank chat opens it instead (agent_chat/lead.py).
-          openLead();
-          return;
-        }
+        // A new chat stays blank until its first message; never reopen the previous lead.
         bindVoice(null, opts?.voiceSessionId ?? null);
         void get().loadCatalog();
       },
@@ -1344,6 +1339,7 @@ export function createAgentChatStore(
               ...(d.permissionMode === "plan" && d.buildMode && d.buildMode !== "plan" ? { build_mode: d.buildMode } : {}),
               ...(d.computerId ? { computer_id: d.computerId } : {}),
               surface,
+              ...(lane.projectId ? { project_id: lane.projectId } : {}),
             });
             const visible = isVisible();
             if (bindComposerDraftTarget(chatStore, lane.draftTarget!, session.session_id)) {
